@@ -462,12 +462,13 @@ const EXTENSIONS: MarkdownExtension[] = [
 ];
 const GH = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)\/?$/;
 
-/** Links to a GitHub PR or issue become `github` custom nodes: patterns never match inside links, and GFM autolinks bare URLs. */
+/** A bare GitHub PR or issue link reads as "nsh#747": still a plain link, not a chip (GFM autolinks bare URLs). */
 function ghInlines(inlines: TextViewInline[]): TextViewInline[] {
   return inlines.map((i): TextViewInline => {
     if (i.type === "link") {
       const m = i.url.match(GH);
-      return m ? { type: "custom", name: "github", text: i.url, attributes: { repo: m[2], n: m[4], kind: m[3] === "pull" ? "PR" : "Issue" } } : i;
+      const bare = i.content.length === 1 && i.content[0].type === "text" && i.content[0].text.replace(/\/$/, "") === i.url.replace(/\/$/, "");
+      return m && bare ? { ...i, content: [{ type: "text", text: `${m[2]}#${m[4]}` }] } : i;
     }
     return "content" in i && Array.isArray(i.content) ? ({ ...i, content: ghInlines(i.content) } as TextViewInline) : i;
   });
@@ -482,22 +483,40 @@ function ghBlocks(blocks: TextViewBlock[]): TextViewBlock[] {
   });
 }
 
+/** Repositories the channel has linked so far, by name ("nsh" → "longbridge/nsh"; set by the channel). */
+let knownRepos: () => Map<string, string> = () => new Map();
+
+/** Every repository a GitHub link in `text` names, by lower-cased name. */
+function reposIn(text: string, into = new Map<string, string>()): Map<string, string> {
+  for (const m of text.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/\d+/g)) into.set(m[2].toLowerCase(), `${m[1]}/${m[2]}`);
+  return into;
+}
+
+const REF = /(^|[^\w\/\[#&])(?:([A-Za-z][\w.-]*)( ?))?#(\d+)\b/g;
+
 /**
- * "nsh #747" → a link to that PR when the message (or `context`, a decision's options) links a PR of a repository
- * named "nsh"; a bare "#747" only on a decision card whose links name one repository. Code spans are left alone.
+ * A "#746" is a GitHub PR or issue: "nsh #747" / "NSH#747" links to that repository when the channel has linked it
+ * before; a bare "#747" to the one repository the message, or what it is about (`context`: a card's options, the
+ * thread it belongs to), names. Code spans are left alone.
  */
 function linkRepoRefs(text: string, context = ""): string {
-  const seen = new Map<string, string>();
-  for (const m of `${text}\n${context}`.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/\d+/g)) seen.set(m[2].toLowerCase(), `${m[1]}/${m[2]}`);
-  if (!seen.size) return text;
-  const only = context && seen.size === 1 ? [...seen.values()][0] : null;
+  const known = reposIn(`${text}\n${context}`, new Map(knownRepos()));
+  if (!known.size) return text;
+  // the repositories in play: linked ones, and "name#N" naming a known one
+  const named = new Set<string>([...reposIn(`${text}\n${context}`).values()]);
+  for (const m of `${text}\n${context}`.matchAll(REF)) {
+    const slug = m[2] && known.get(m[2].toLowerCase());
+    if (slug) named.add(slug);
+  }
+  const only = named.size === 1 ? [...named][0] : null;
+  const url = (slug: string, n: string) => `https://github.com/${slug}/issues/${n}`;
   return text.split(/(`[^`\n]*`)/).map((part, i) => (i % 2 ? part : part.replace(
-    /(^|[^\w\/\[#])(?:([\w.-]+)( ?))?#(\d+)\b/g,
+    REF,
     (all, pre: string, name: string | undefined, sp: string, n: string) => {
-      const slug = name && seen.get(name.toLowerCase());
-      if (slug) return `${pre}[${name}#${n}](https://github.com/${slug}/pull/${n})`;
+      const slug = name && known.get(name.toLowerCase());
+      if (slug) return `${pre}[${name}${sp}#${n}](${url(slug, n)})`;
       if (!only || (name && !sp && !/^(pr|issue)s?$/i.test(name))) return all;
-      return `${pre}${name ? name + sp : ""}[#${n}](https://github.com/${only}/pull/${n})`;
+      return `${pre}${name ? name + sp : ""}[#${n}](${url(only, n)})`;
     },
   ))).join("");
 }
@@ -534,17 +553,6 @@ function Custom(props: { node: TextViewCustomNode; small: boolean }) {
           <View style={{ cursor: "pointer", width: 6, height: 6, borderRadius: 3, backgroundColor: st()?.[1] ?? colors.muted }} />
         </If>
         <Text style={{ ...chipText, fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.text }}>{n.text}</Text>
-      </View>
-    );
-  }
-  if (n.name === "github") {
-    const a = n.attributes ?? {};
-    return (
-      <View role="link" testID={`gh-chip-${a.repo}-${a.n}`} accessibilityLabel={`GitHub ${a.kind} ${a.repo}#${a.n}`} onPress={() => void openUrl(n.text!).catch(() => {})}
-        hoverStyle={chipHover} style={{ ...chipFrame, paddingHorizontal: 6, borderRadius: 6 }}>
-        <Icon name="github" size={14} tint={colors.text} />
-        <Text style={{ ...chipText, fontSize: fs, lineHeight: 16, color: colors.muted }}>{a.kind}</Text>
-        <Text style={{ ...chipText, fontSize: fs, lineHeight: 16, fontWeight: "600", color: colors.text }}>{`${a.repo}#${a.n}`}</Text>
       </View>
     );
   }
@@ -880,9 +888,16 @@ function Message(props: {
   const e = props.event;
   const ask = isAsk(e);
   const tag = TAGS[e.kind];
+  // what the message is about, for its bare "#746": the card's options, the task's title, the thread it belongs to
+  const about = () => {
+    if (!e.ref) return (e.options ?? []).join("\n");
+    const s = props.hub.status();
+    const task = [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref);
+    return [...(e.options ?? []), task?.title ?? "", ...props.hub.events().filter((x) => x.ref === e.ref && x.id !== e.id).map((x) => x.text)].join("\n");
+  };
   const body = (
     <View selectable style={{ gap: 10 }}>
-      <Rich text={ask ? e.text.replace(/\n*^建议：.*$/m, "").trimEnd() : e.text} muted={e.kind === "system"} context={(e.options ?? []).join("\n")} />
+      <Rich text={ask ? e.text.replace(/\n*^建议：.*$/m, "").trimEnd() : e.text} muted={e.kind === "system"} context={about()} />
       <If when={e.attachments?.length}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
           <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} />}</Each>
@@ -1056,7 +1071,7 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
           </If>
           <If when={t()!.request}>
             {section("请求")}
-            <View selectable><Rich text={t()!.request ?? ""} /></View>
+            <View selectable><Rich text={t()!.request ?? ""} context={t()!.title} /></View>
           </If>
           <If when={t()!.runs?.length}>
             {section("结果")}
@@ -1065,7 +1080,7 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
                 {(r) => (
                   <View style={{ gap: 4 }}>
                     <Text style={{ fontSize: 13, color: colors.faint, fontVariant: ["tabular-nums"] }}>{`${r().ts.slice(5, 16).replace("T", " ")} · ${r().host} · ${r().status}`}</Text>
-                    <Rich text={r().summary} />
+                    <Rich text={r().summary} context={`${t()!.title}\n${t()!.request ?? ""}`} />
                   </View>
                 )}
               </Each>
@@ -1081,7 +1096,7 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
                     <View style={{ width: 12, height: 21, alignItems: "center", justifyContent: "center" }}>
                       <Dot tone={st().kind === "done" ? "off" : st().kind === "fail" ? "bad" : st().kind === "decision" ? "wait" : "off"} />
                     </View>
-                    <View style={{ flex: 1, minWidth: 0 }}><Rich text={st().text.replace(new RegExp(`^${t()!.id}\\b\\s*(→\\s*)?[:：]?\\s*`), "")} muted /></View>
+                    <View style={{ flex: 1, minWidth: 0 }}><Rich text={st().text.replace(new RegExp(`^${t()!.id}\\b\\s*(→\\s*)?[:：]?\\s*`), "")} muted context={t()!.title} /></View>
                   </View>
                 )}
               </Each>
@@ -2703,6 +2718,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     else show({ name: "task", id });
   };
   taskLink = openTask;
+  const repos = computed(() => { const m = new Map<string, string>(); for (const e of props.hub.events()) reposIn(`${e.text}\n${(e.options ?? []).join("\n")}`, m); return m; });
+  knownRepos = repos;
   taskState = (id) => { const s = props.hub.status(); return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === id)?.state ?? (s?.active.some((t) => t.id === id) ? "active" : undefined); };
   /** A card being scrolled to (picked from the sidebar, a notification): entering the channel leaves the scroll to it. */
   let jumping: string | null = null;
