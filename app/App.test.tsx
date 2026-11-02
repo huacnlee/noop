@@ -317,7 +317,7 @@ describe("channel", () => {
     // an open question answers through its card, so it has no reply action
     expect(app.shows("id:reply-e2")).toBe(false);
     await app.press("id:reply-e8");
-    await app.waitFor("回复 T-0009");
+    await app.waitFor("回复 lead：T-0009 已完成，PR 已开");
     await app.type("id:composer", "再加个截图");
     await app.keyboard.press("mod+enter");
     await app.waitUntil(() => posts.length === 1);
