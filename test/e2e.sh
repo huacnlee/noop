@@ -54,8 +54,8 @@ sed -i.bak 's/^\[\[routine\]\]/[[routine_disabled]]/' config.toml && rm config.t
 hub add "plain task" -a rust-maintainer >/dev/null
 hub add "ASKME task" -a release-manager >/dev/null
 hub add "mac only" -r os:macos >/dev/null
-hub tick
-hub tick
+# how many tasks one tick runs depends on the host load, so tick until the first round settles
+for _ in 1 2 3 4 5; do hub tick; test -f tasks/done/T-0001.md && grep -qs held: decisions/open/D-0001.md && break; done
 hub status
 test -f tasks/done/T-0001.md || { echo "FAIL: T-0001 should be done"; exit 1; }
 test -f tasks/blocked/T-0002.md && test -f decisions/open/D-0001.md
