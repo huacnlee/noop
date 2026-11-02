@@ -63,6 +63,28 @@ test("owner images are downloaded and named by absolute path in the task text", 
   rmSync(root, { recursive: true, force: true });
 });
 
+test("media older than media_days is pruned", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { pruneMedia, mediaDays } = await import("../src/server");
+  expect(mediaDays({} as any)).toBe(7);
+  expect(mediaDays({ media_days: 30 } as any)).toBe(30);
+  expect(mediaDays({ media_days: 5 } as any)).toBe(7);
+  const media = mkdtempSync(join(tmpdir(), "noop-media-"));
+  const att = mkdtempSync(join(tmpdir(), "noop-att-"));
+  const now = Date.now();
+  const age = (f: string, days: number) => utimesSync(f, (now - days * 86_400_000) / 1000, (now - days * 86_400_000) / 1000);
+  writeFileSync(join(media, "old.png"), "x"); age(join(media, "old.png"), 8);
+  writeFileSync(join(media, "new.png"), "x"); age(join(media, "new.png"), 6);
+  mkdirSync(join(att, "ev-old")); writeFileSync(join(att, "ev-old", "a.png"), "x"); age(join(att, "ev-old"), 10);
+  expect(pruneMedia(7, [media, att, join(media, "missing")], now)).toBe(2);
+  expect(existsSync(join(media, "old.png"))).toBe(false);
+  expect(existsSync(join(media, "new.png"))).toBe(true);
+  expect(existsSync(join(att, "ev-old"))).toBe(false);
+  rmSync(media, { recursive: true, force: true }); rmSync(att, { recursive: true, force: true });
+});
+
 test("repo language → host requirements (only when the repo is on disk)", async () => {
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -177,4 +199,17 @@ test("pickTask: a task no machine here can run (needs another OS) never holds ba
   const picked = pickTask(cfg);
   if (picked === null && !Bun.which("claude") && !Bun.which("codex")) return; // no AI CLI here: nothing is pickable
   expect(picked).toContain("T-9002");
+});
+
+test("a reply to an agent's message goes to that message's task, not to the last answered decision", async () => {
+  const { handleOwnerMessage, setOwnerTask, feed, drainInbound } = await import("../src/server");
+  const calls: [string, { reply?: string; answered?: string }][] = [];
+  setOwnerTask(async (text, o) => { calls.push([text, o]); return o.answered ? { amend: o.answered } : { id: "T-0200", follows: o.reply }; });
+  await handleOwnerMessage("D-0001 A"); // just answered a decision: the router may take the next message as amending it
+  await handleOwnerMessage("为何我看图片不清晰呢", "T-0125"); // a reply names its task: never an amendment
+  expect(calls).toEqual([["为何我看图片不清晰呢", { reply: "T-0125", answered: undefined }]]);
+  expect(feed("", 50).at(-1)?.text).toBe("收到，接着 T-0125 处理（T-0200），会结合前面的对话。");
+  await handleOwnerMessage("等等，选 B");
+  expect(calls.at(-1)).toEqual(["等等，选 B", { reply: undefined, answered: "D-0001" }]);
+  expect(drainInbound()).toEqual([{ id: "D-0001", answer: "A", source: "chat" }, { id: "D-0001", answer: "等等，选 B", source: "chat-amend" }]);
 });

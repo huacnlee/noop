@@ -11,12 +11,12 @@
 //   POST /api/media (multipart file)      → { url }   (workers upload screenshots/recordings here)
 //   GET  /media/<file>                    → attachment
 //   GET  /api/files/list?prefix=  · GET /api/files/read?path=   → read-only rules & memory (same shape as the Worker)
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { accountsInfo } from "./accounts";
-import { type Cfg, DATA, P, allowedClis, hostName, list, loadConfig, onlineHosts, readDoc } from "./core";
+import { type Cfg, DATA, P, allowedClis, hostName, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
 import { ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
 import { readable, validPath } from "../cloud/src/files";
 
@@ -25,14 +25,17 @@ export type Event = {
   text: string; ref?: string; options?: string[]; attachments?: string[];
 };
 
-const MEDIA = join(DATA, "..", "media");
+export const MEDIA = join(DATA, "..", "media");
 const NSH_WEB = join(import.meta.dir, "..", "app", "dist", "web", "noop"); // built NSH web client
 const FEED_DIR = join(DATA, "..", "feed"); // primary-local (next to the data repo), append-only JSONL per day
 const sockets = new Set<ServerWebSocket<unknown>>();
 type Inbound = { id: string; answer: string; source: string };
 const inbound: Inbound[] = [];
 /** The owner's chat request becomes a task: a new one, or (with its title) the open task it continues. */
-type OwnerTask = (text: string, replyTo?: string) => Promise<{ id: string; title?: string; follows?: string }>;
+/** A chat message becomes work. `reply`: the task whose message the owner replied to ("T-0125"), or whose page they wrote on;
+ * `answered`: the decision the owner answered moments ago (the message may change that answer). The result: added to an open
+ * task (`title`), a new task continuing one (`follows`), a new task, or `amend`: a change to the answered decision. */
+type OwnerTask = (text: string, o: { reply?: string; answered?: string }) => Promise<{ id: string; title?: string; follows?: string } | { amend: string }>;
 let ownerTask: OwnerTask | null = null;
 
 const today = () => new Date().toLocaleDateString("sv-SE");
@@ -159,7 +162,7 @@ function hostViews(active: TaskView[], finished: TaskView[]) {
     arch: h.caps.find((c) => c.startsWith("arch:"))?.slice(5),
     clis: h.caps.filter((c) => c.startsWith("cli:")).map((c) => c.slice(4)),
     accounts: cfg && h.host === me ? (() => { try { return accountsInfo(cfg!); } catch { return undefined; } })() : undefined,
-    running: active.filter((t) => t.host === h.host).map((t) => ({ id: t.id, title: t.title, agent: t.agent, started: t.started })),
+    running: active.filter((t) => t.host === h.host).map((t) => ({ id: t.id, title: t.title, agent: t.agent, started: t.started, activity: h.activity?.[t.id] })),
     recent: finished.filter((t) => ran(t, h.host)).slice(0, 8).map((t) => ({ id: t.id, title: t.title, state: t.state, finished: t.finished ?? t.updated })),
   }));
 }
@@ -167,7 +170,10 @@ function hostViews(active: TaskView[], finished: TaskView[]) {
 export function status() {
   const log = journalLines();
   const count = (f: string) => list(P("tasks", f), /^T-.*\.md$/).length;
-  const active = list(P("tasks", "active"), /^T-.*\.md$/).map((p) => taskView(p, "active", log));
+  // a running task carries its agent's latest sign of life (from the heartbeat of the machine running it)
+  const beats = (() => { try { return onlineHosts(loadConfig()); } catch { return []; } })();
+  const active = list(P("tasks", "active"), /^T-.*\.md$/).map((p) => taskView(p, "active", log))
+    .map((t) => ({ ...t, activity: beats.find((h) => h.host === t.host)?.activity?.[t.id] }));
   const others = ["done", "failed", "blocked", "waiting", "inbox"].flatMap((f) => list(P("tasks", f), /^T-.*\.md$/).map((p) => taskView(p, f, log)))
     .sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? ""));
   return {
@@ -181,20 +187,63 @@ export function status() {
     })(),
     decisions: list(P("decisions", "open")).map((p) => { const m = readDoc(p).meta; return { id: m.id, kind: m.kind ?? "decision", question: m.question, held: !!m.held }; }),
     hosts: hostViews(active, others.filter((t) => t.state === "done" || t.state === "failed")),
+    /** The owner's latest "update every machine" (each host reports its progress on it in `hosts[].update`). */
+    update: (() => { try { return { at: String(JSON.parse(readFileSync(UPDATE_REQUEST(), "utf8")).at ?? "") }; } catch { return undefined; } })(),
   };
 }
 
 // ---------------------------------------------------------------- settings (UI-adjustable, shared via data repo)
-const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands"]; // whitelisted top-level keys
+const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days"]; // whitelisted top-level keys
 
 /** What an agent is for, from its profile's first line: "# Name (中文名) — what it does". */
+/** Chinese titles and one-liners for the built-in roles (a profile's own Chinese "(标题)" and text still win where present). */
+const ROLE_ZH: Record<string, { title: string; about: string }> = {
+  apprentice: { title: "学徒", about: "从你自己的 AI 会话里学习你怎么做事、怎么判断、偏好什么" },
+  architect: { title: "团队架构师", about: "持续调整这个团队的规则、提示词、记忆和角色，贴合你真实的工作" },
+  "chief-of-staff": { title: "幕僚长", about: "团队空闲时给你列出可以直接开干的下一步选项" },
+  dispatcher: { title: "分诊调度", about: "扫描所有进来的信号，拆成任务交给对应成员" },
+  lead: { title: "负责人", about: "任务的默认负责人，决定一件事需要走多少流程" },
+  "ops-watcher": { title: "线上值守", about: "盯线上告警和 CI 健康" },
+  "oss-triage": { title: "开源社区", about: "处理你的开源项目里的 issue" },
+  "release-manager": { title: "发布", about: "版本号、CHANGELOG、Homebrew 和软件包发布" },
+  reporter: { title: "日报 / 周报", about: "根据日志、提交和 GitHub 动态写日报、周报和 OKR 进展" },
+  reviewer: { title: "PR 审查", about: "仔细审查并实际验证你项目上的 PR，尤其是别人提的" },
+  "rust-maintainer": { title: "Rust / GPUI 维护", about: "维护 nsh、gpui-kit、gpui-fast 等 Rust 项目" },
+};
+const hasHan = (s?: string) => !!s && /\p{Script=Han}/u.test(s);
+
 export function agentRole(agent: string): { title?: string; about?: string } {
   const p = P("agents", agent, "profile.md");
   const head = existsSync(p) ? (readFileSync(p, "utf8").split("\n").find((l) => l.startsWith("# ")) ?? "") : "";
   const m = head.match(/^#\s+(.+?)\s*(?:\(([^)]+)\))?\s*(?:[—–-]+\s*(.+))?$/);
-  if (!m) return {};
-  return { title: (m[2] ?? m[1]).trim(), about: m[3]?.trim() };
+  const zh = ROLE_ZH[agent];
+  const title = m ? (m[2] ?? m[1]).trim() : undefined;
+  const about = m?.[3]?.trim();
+  return {
+    title: hasHan(title) ? title : (zh?.title ?? title),
+    about: hasHan(about) ? about : (zh?.about ?? about),
+  };
 }
+
+/** What each built-in routine does, for the settings page (a routine's own `desc` in config.toml wins). */
+const ROUTINE_DESC: Record<string, string> = {
+  "triage-inbound": "扫描 GitHub 通知、待你审的 PR、指派给你的 issue 和 CI 失败，拆成任务交给对应成员",
+  "uptime-watch": "查看线上可用性告警，按升级规则处理",
+  "pr-review": "审查 Core 仓库里还没审过的 PR，每次最多 3 个",
+  "own-prs-ci": "让你自己的 PR 保持可合并：解冲突、修 CI、改掉明显的评审意见",
+  "nightly-health": "在最新 main 上跑 cargo check / test，发现回归就建任务",
+  "macos-check": "在 macOS 上构建并测试 Core 仓库，报告平台相关的失败",
+  "daily-report": "根据日志、提交和 GitHub 动态写当天的日报",
+  "weekly-report": "按 OKR 起草本周周报，正式提交前先问你",
+  "focus-check": "核对你的关注点：哪些继续、哪些已完成、哪些该新增",
+  "learn-ceo": "每台机器从本机的 Claude / Codex 会话里学习你的做事方式和判断",
+  evolve: "回顾最近 7 天，调整团队的规则、提示词和记忆",
+  "evolve-deep": "回顾最近 30 天，重写各成员的设定，提议新角色",
+  "release-monday": "周一发布：按 runbook 发 gpui-fast / gpui-kit，每个关口找你确认",
+  "release-wednesday": "周三发布 NSH：准备好一切，发布前问你一次",
+};
+const routineDesc = (r: any) =>
+  String(r.desc ?? ROUTINE_DESC[r.name] ?? String(r.prompt ?? "").split(/(?<=[.。])\s/)[0].slice(0, 120)).trim() || undefined;
 
 export function settingsView() {
   const cfg = loadConfig();
@@ -204,8 +253,9 @@ export function settingsView() {
     effective: {
       agents: agents.map((a) => ({ id: a, ...agentRole(a), clis: allowedClis({ agent: a }, cfg), autonomy: cfg.autonomy?.agents?.[a] ?? cfg.autonomy?.level ?? "onboarding" })),
       autonomy: cfg.autonomy?.level ?? "onboarding",
-      routines: (cfg.routine ?? []).map((r: any) => ({ name: r.name, every: r.every, agent: r.agent, enabled: r.enabled !== false })),
+      routines: (cfg.routine ?? []).map((r: any) => ({ name: r.name, desc: routineDesc(r), every: r.every, agent: r.agent, enabled: r.enabled !== false })),
       max_parallel: cfg.host?.max_parallel ?? null,
+      media_days: mediaDays(cfg),
     },
     options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
   };
@@ -232,8 +282,6 @@ const ID = /^\s*([DLP]-[A-Z]?\d{4})\b[\s:：,，\-]*([\s\S]*)$/;
 
 /** Owner said something (local chat or via the cloud inbox): answer an open D-/P-/L- item, or hand it to lead. */
 let lastAnswer: { id: string; at: number } | null = null;
-let followUp: { tid: string; at: number } | null = null;
-const FOLLOW_MS = 3 * 60_000;
 let cancelHook: ((tid: string) => Promise<string>) | null = null;
 export const setCancelTask = (fn: (tid: string) => Promise<string>) => { cancelHook = fn; };
 /** The owner cancels a task (queued, waiting, blocked, proposed or running). */
@@ -247,8 +295,6 @@ export async function updateFleet(): Promise<string> {
   appendEvent({ from: "hub", kind: "system", text: `已通知 ${n} 台机器更新到最新代码：空闲的马上更新，有任务在跑的等跑完再重启；主控机同时重新发布线上。` });
   return "ok";
 }
-let appendToTask: ((tid: string, text: string) => Promise<boolean>) | null = null;
-export const setAppendToTask = (fn: (tid: string, text: string) => Promise<boolean>) => { appendToTask = fn; };
 const AMEND_MS = 5 * 60_000;
 
 // ---------------------------------------------------------------- the owner's images (attachments of a chat message)
@@ -261,6 +307,24 @@ export const localMedia: FetchAttachment = async (p) => {
   const f = join(MEDIA, basename(p));
   return existsSync(f) && statSync(f).isFile() ? new Uint8Array(readFileSync(f)) : null;
 };
+
+/** How long images and other media are kept: one of MEDIA_DAYS (settings `media_days`), 7 by default. */
+export const MEDIA_DAYS = [7, 14, 30, 90];
+export const mediaDays = (cfg: Cfg) => (MEDIA_DAYS.includes(Number(cfg.media_days)) ? Number(cfg.media_days) : 7);
+
+/** Delete media and downloaded attachments older than `days` (by modification time); returns how many entries went. */
+export function pruneMedia(days: number, dirs = [MEDIA, ATTACH_DIR], now = Date.now()): number {
+  const cutoff = now - days * 86_400_000;
+  let n = 0;
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      const f = join(dir, name);
+      try { if (statSync(f).mtimeMs < cutoff) { rmSync(f, { recursive: true, force: true }); n++; } } catch {}
+    }
+  }
+  return n;
+}
 
 /** Download a message's attachments into ATTACH_DIR/<key>/; returns the absolute paths saved (failures are skipped). */
 export async function saveAttachments(key: string, paths: string[], fetchOne: FetchAttachment = localMedia, root = ATTACH_DIR): Promise<string[]> {
@@ -295,21 +359,22 @@ export async function handleOwnerMessage(
   }
   const m = text.match(ID);
   const id = m?.[1] ?? (reply_to && /^[DLP]-[A-Z]?\d{4}$/.test(reply_to) ? reply_to : null);
+  // a reply to an agent's message about a task (or a message on its page): it goes to that task, whatever came just before
+  const replyTask = !id && reply_to && /^T-\d{4,}$/.test(reply_to) ? reply_to : undefined;
   if (id) {
     inbound.push({ id, answer: (m ? m[2] : text).trim(), source: "chat" });
     if (id.startsWith("D-")) lastAnswer = { id, at: Date.now() };
-  } else if (!noAmend && lastAnswer && Date.now() - lastAnswer.at < AMEND_MS) {
-    // a plain message right after answering a decision is about that decision ("wait, I clicked the wrong one")
-    inbound.push({ id: lastAnswer.id, answer: text.trim(), source: "chat-amend" });
-  } else if (followUp && Date.now() - followUp.at < FOLLOW_MS && (await appendToTask?.(followUp.tid, text))) {
-    // messages sent in a row are one request: add to the task just created instead of opening another
-    followUp.at = Date.now();
-    appendEvent({ from: "hub", kind: "system", text: `已补充到 ${followUp.tid}`, ref: followUp.tid });
   } else if (ownerTask) {
-    const { id: tid, title, follows } = await ownerTask(text, reply_to && /^T-[A-Z]?\d{4}$/.test(reply_to) ? reply_to : undefined);
-    followUp = { tid, at: Date.now() };
+    // everything else is routed by a quick model: which task it belongs to, or new work
+    const answered = !noAmend && !replyTask && lastAnswer && Date.now() - lastAnswer.at < AMEND_MS ? lastAnswer.id : undefined;
+    const r = await ownerTask(text, { reply: replyTask, answered });
+    if ("amend" in r) {
+      inbound.push({ id: r.amend, answer: text.trim(), source: "chat-amend" }); // "wait, I clicked the wrong one"
+      return;
+    }
+    const { id: tid, title, follows } = r;
     appendEvent(title
-      ? { from: "hub", kind: "system", text: `收到，这是 ${tid}「${title}」的后续，已补充进去，Kai 接着处理。`, ref: tid }
+      ? { from: "hub", kind: "system", text: `收到，已补充到 ${tid}「${title}」，接着处理。`, ref: tid }
       : follows
         ? { from: "hub", kind: "system", text: `收到，接着 ${follows} 处理（${tid}），会结合前面的对话。`, ref: tid }
         : { from: "hub", kind: "system", text: `收到，交给 Kai 安排（${tid}）。做完带结果回来，需要你拍板时会给你选项。`, ref: tid });

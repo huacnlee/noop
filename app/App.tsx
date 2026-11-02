@@ -24,9 +24,9 @@ import {
   untracked,
   Video,
   View,
-  windowSize, token, openUrl, keyboardFrame, Picker, Clipboard } from "nsh";
+  windowSize, token, openUrl, keyboardFrame, Picker, Speech, Clipboard } from "nsh";
 import fs from "fs/promises";
-import type { InputRef, JSX, ViewStyle } from "nsh";
+import type { InputRef, JSX, SpeechSession, ViewStyle } from "nsh";
 import { AlertDialog, ContextMenu, Dialog, Menu, MenuItem, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import {
@@ -76,7 +76,11 @@ import {
   cliKey,
   cliLabel,
   intervalsWith,
+  activityLine,
+  everyLabel,
   patches,
+  MEDIA_DAYS,
+  mediaDaysOf,
   type SettingsView,
   NOTIFY_KINDS,
   type NotifyKind,
@@ -100,6 +104,9 @@ import {
   BUILTIN_COMMANDS,
   slashQuery,
   needsLabel,
+  updateLine,
+  updateSummary,
+  type UpdateLine,
   isQueued,
 } from "./hub";
 
@@ -535,6 +542,8 @@ function hubMarkdown(text: string): string {
 
 /** Texts inside a pressable chip: a pointer, not the I-beam selectable texts force (per view on Linux). */
 const chipText = { cursor: "pointer", userSelect: "none" } as const;
+/** A message's first line, without markdown marks, for a one-line quote. */
+const firstLine = (t: string) => (t.split("\n").find((l) => l.trim()) ?? "").replace(/^\s*(#+|>)\s*/, "").replace(/[*_`]/g, "").trim().slice(0, 80);
 const chipFrame: ViewStyle = {
   cursor: "pointer", verticalAlign: "middle", flexDirection: "row", alignItems: "center", gap: 5, marginHorizontal: 2, height: 20,
   borderWidth: 1, borderColor: colors.border, backgroundColor: alpha(colors.text, 0.05),
@@ -597,12 +606,21 @@ function Media(props: { hub: Hub; path: string }) {
   // a thumbnail that keeps the timeline readable; press it to see the full image
   const THUMB = 240;
   const size = () => (ratio() >= 1 ? { width: THUMB, height: THUMB / ratio() } : { width: THUMB * ratio(), height: THUMB });
+  const gone = signal(false); // past the media retention (or otherwise unavailable)
   return (
-    <>
+    <If
+      when={!gone()}
+      else={
+        <View testID="media-gone" style={{ ...frame, width: THUMB, height: 72, alignItems: "center", justifyContent: "center" }}>
+          <Text style={{ fontSize: 13.5, color: colors.faint }}>图片已过期</Text>
+        </View>
+      }
+    >
       <View accessibilityLabel="查看大图" onPress={() => zoomed.set(true)} style={{ cursor: "pointer" }}>
         <Image
           src={src}
           onLoad={({ size }) => size.width && size.height && ratio.set(size.width / size.height)}
+          onError={() => gone.set(true)}
           style={{ ...frame, ...size(), objectFit: "cover" }}
         />
       </View>
@@ -617,7 +635,7 @@ function Media(props: { hub: Hub; path: string }) {
           <Image src={src} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
         </View>
       </Dialog>
-    </>
+    </If>
   );
 }
 
@@ -803,7 +821,10 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
   // an answer sent from the sidebar or a card ("D-0015 忽略") names its card in the text, not in `ref`
   const ref = e.ref ?? e.text.match(/^([DLP]-[A-Z]?\d{4}) \S/)?.[1];
   const over = signal(false);
-  const asked = () => (ref ? askLine(props.hub.events().find((x) => x.ref === ref && isAsk(x))?.text ?? "") || (props.hub.status()?.decisions.find((d) => d.id === ref)?.question ?? "") : "");
+  // a reply to an agent's message about a task quotes that message (the last one about it before this)
+  const said = () => [...props.hub.events()].reverse().find((x) => x.ref === ref && x.ts <= e.ts && x.kind !== "owner" && !isHub(x.from));
+  const asked = () => (ref ? askLine(props.hub.events().find((x) => x.ref === ref && isAsk(x))?.text ?? "") || (props.hub.status()?.decisions.find((d) => d.id === ref)?.question ?? "")
+    || (/^T-/.test(ref) && said() ? `${displayName(said()!.from)}：${firstLine(said()!.text)}` : "") : "");
   return (
     <View style={{ flexDirection: "row", justifyContent: "flex-end", paddingVertical: 8 }} onMouseEnter={() => over.set(true)} onMouseLeave={() => over.set(false)}>
       <View style={{ maxWidth: "82%", alignItems: "flex-end", gap: 4 }}>
@@ -882,11 +903,14 @@ function Message(props: {
   /** The pending ask the keyboard acts on. */
   target: () => string | null;
   onAnswer: (ref: string, choice: string) => void;
-  onReply: (ref: string) => void;
+  onReply: (ref: string, note?: string) => void;
   cardRef?: (r: ViewRef) => void;
 }) {
   const e = props.event;
   const ask = isAsk(e);
+  // an agent's message about a task can be replied to: the reply goes to that task
+  const replyable = !ask && !isHub(e.from) && !!e.ref && /^T-\d{4,}$/.test(e.ref);
+  const over = signal(false);
   const tag = TAGS[e.kind];
   // what the message is about, for its bare "#746": the card's options, the task's title, the thread it belongs to
   const about = () => {
@@ -908,7 +932,6 @@ function Message(props: {
   const done = () => !!e.ref && props.answered().has(e.ref);
   const targeted = () => ask && !done() && props.target() === e.ref;
   const rec = recommended(e);
-  const over = signal(false);
   if (isHub(e.from) && !ask && e.kind === "system" && !e.attachments?.length)
     return (
       <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, paddingVertical: 4, paddingLeft: 50 }} ref={(r) => props.cardRef?.(r)}>
@@ -975,7 +998,7 @@ function Message(props: {
           body
         )}
         <If when={e.text.trim()}>
-          <MsgActions id={e.id} text={e.text} show={() => touch || over()} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!) : undefined} />
+          <MsgActions id={e.id} text={e.text} show={() => touch || over()} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? `${displayName(e.from)}：${firstLine(e.text)}` : undefined) : undefined} />
         </If>
       </View>
     </View>
@@ -1038,7 +1061,26 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
     try { await props.hub.api("POST", "/api/tasks/cancel", { id: props.id }); }
     catch { cancelling.set(false); }
   }
+  // the task is its own conversation: what the owner and the team said about it, and a box to keep talking
+  const talk = () => props.hub.events().filter((e) => e.ref === props.id && !(isHub(e.from) && e.kind === "system"));
+  const text = signal("");
+  const sending = signal(false);
+  const note = signal("");
+  async function say() {
+    const v = text().trim();
+    if (!v || sending()) return;
+    sending.set(true);
+    note.set("");
+    try {
+      await props.hub.send(v, props.id);
+      text.set("");
+    } catch (e) {
+      note.set(String((e as Error)?.message ?? e));
+    }
+    sending.set(false);
+  }
   return (
+    <View style={{ flex: 1 }}>
     <Scroll style={{ flex: 1 }}>
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", paddingHorizontal: props.wide ? 32 : 16, paddingVertical: 24 }}>
         <If when={t()} else={<Text style={{ fontSize: 15, color: colors.muted }}>{`${props.id} 已经不在最近的任务里了。`}</Text>}>
@@ -1062,6 +1104,11 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
                 Number(t()!.attempt ?? 1) > 1 ? `第 ${t()!.attempt} 次` : ""].filter(Boolean).join(" · ")}
             </Text>
           </View>
+          <If when={t()!.state === "active" ? activityLine(t()!.activity) : null}>
+            {(a) => (
+              <Text testID="task-activity" style={{ marginTop: 10, fontSize: 13.5, lineHeight: 19, color: a().quiet ? colors.warn : colors.muted }}>{a().text}</Text>
+            )}
+          </If>
           <If when={t()!.state === "nohost"}>
             <View testID="task-nohost" style={{ marginTop: 16, paddingHorizontal: 14, paddingVertical: 11, borderRadius: radius.inset, backgroundColor: tints.warn }}>
               <Text style={{ fontSize: 14, lineHeight: 21, color: colors.text }}>
@@ -1072,6 +1119,27 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
           <If when={t()!.request}>
             {section("请求")}
             <View selectable><Rich text={t()!.request ?? ""} context={t()!.title} /></View>
+          </If>
+          <If when={talk().length}>
+            {section("对话")}
+            <View testID="task-talk" style={{ gap: 14 }}>
+              <Each of={talk()} key={(e) => e.id}>
+                {(e) => (
+                  <View style={{ gap: 3 }}>
+                    <Text style={{ fontSize: 13, color: colors.faint }}>
+                      <Text style={{ fontWeight: "600", color: e().from === "owner" ? colors.accent : colors.muted }}>{e().from === "owner" ? "你" : displayName(e().from)}</Text>
+                      {`  ${timeOf(e().ts)}`}
+                    </Text>
+                    <View selectable><Rich text={e().text} /></View>
+                    <If when={e().attachments?.length}>
+                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                        <Each of={e().attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} />}</Each>
+                      </View>
+                    </If>
+                  </View>
+                )}
+              </Each>
+            </View>
           </If>
           <If when={t()!.runs?.length}>
             {section("结果")}
@@ -1105,6 +1173,28 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
         </If>
       </View>
     </Scroll>
+    <If when={t()}>
+      <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 6, paddingHorizontal: props.wide ? 32 : 16, paddingTop: 10, paddingBottom: 16 }}>
+        <If when={note()}>
+          <Text style={{ fontSize: 13, color: colors.danger }}>{note()}</Text>
+        </If>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8, paddingLeft: 14, paddingRight: 6, paddingVertical: 6, borderRadius: radius.card, borderWidth: 1, borderColor: colors.fieldBorder, backgroundColor: colors.surface }}>
+          <Input
+            testID="task-composer"
+            multiline
+            value={text()}
+            onChange={({ value }) => text.set(value)}
+            submitBehavior={touch ? "newline" : "submit"}
+            onSubmit={() => void say()}
+            placeholder={`在 ${props.id} 里继续说…`}
+            class="placeholder:text-faint"
+            style={{ flex: 1, minHeight: 36, maxHeight: 160, paddingVertical: 8, fontSize: 15, lineHeight: 21, color: colors.text, borderWidth: 0, backgroundColor: "transparent" }}
+          />
+          <Btn testID="task-send" label={sending() ? "发送中…" : "发送"} kind="primary" disabled={!text().trim() || sending()} onPress={() => void say()} />
+        </View>
+      </View>
+    </If>
+    </View>
   );
 }
 
@@ -1196,7 +1286,7 @@ function MachineDetail(props: { hub: Hub; host: string; wide: boolean; onTask: (
           <If when={h()!.running?.length} else={<Text style={{ fontSize: 14, color: colors.faint }}>空闲</Text>}>
             <View>
               <Each of={h()!.running ?? []} key={(t) => t.id}>
-                {(t) => row(t().id, t().title, `${displayName(t().agent)} · ${since(t().started)}`, <Dot tone="run" />)}
+                {(t) => row(t().id, t().title, [displayName(t().agent), since(t().started), activityLine(t().activity)?.text].filter(Boolean).join(" · "), <Dot tone="run" />)}
               </Each>
             </View>
           </If>
@@ -1738,6 +1828,7 @@ const SETTINGS_TABS = [
   ["routines", "例行任务", "play"],
   ["parallel", "并行", "layers"],
   ["commands", "常用指令", "terminal"],
+  ["storage", "存储", "photos"],
   ["version", "版本", "github"],
   ["rules", "规则与记忆", "scroll"],
   ["account", "账号与连接", "lock"],
@@ -1830,32 +1921,35 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               </If>
 
               <If when={on("routines")}>
-              <Group title="例行任务" hint="开关与运行间隔">
+              <Group title="例行任务" hint="定时生成任务的规则：开关和运行时间">
                 <Each of={e().routines} key={(r) => r.name}>
                   {(r, i) => (
-                    <View style={{ ...row, borderTopWidth: i() === 0 ? 0 : 1 }}>
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-                        <Toggle
-                          testID={`routine-${r().name}`}
-                          label={r().name}
-                          value={r().enabled}
-                          onChange={(on) => save(patches.routine(r().name, { enabled: on }))}
-                        />
-                        <Text style={{ flex: 1, fontSize: 15.5, color: r().enabled ? colors.text : colors.faint }}>{r().name}</Text>
-                        <Text style={{ fontSize: 13, color: colors.faint }}>{r().agent}</Text>
+                    <View style={{ ...row, flexDirection: "row", alignItems: "center", gap: 12, borderTopWidth: i() === 0 ? 0 : 1 }}>
+                      <Toggle
+                        testID={`routine-${r().name}`}
+                        label={r().name}
+                        value={r().enabled}
+                        onChange={(on) => save(patches.routine(r().name, { enabled: on }))}
+                      />
+                      <View style={{ flex: 1, gap: 3 }}>
+                        <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
+                          <Text style={{ fontSize: 15.5, fontWeight: "500", color: r().enabled ? colors.text : colors.faint }}>{r().name}</Text>
+                          <If when={r().agent}>
+                            <Text style={{ fontSize: 12.5, color: colors.faint }}>{e().agents.find((a) => a.id === r().agent)?.title ?? r().agent}</Text>
+                          </If>
+                        </View>
+                        <If when={r().desc}>
+                          <Text testID={`routine-desc-${r().name}`} style={{ fontSize: 13, lineHeight: 18, color: colors.muted }}>{r().desc}</Text>
+                        </If>
                       </View>
-                      <View style={{ ...chips, paddingLeft: 52 }}>
-                        <Each of={intervalsWith(r().every)}>
-                          {(iv) => (
-                            <Chip
-                              testID={`every-${r().name}-${iv()}`}
-                              label={iv()}
-                              on={iv() === r().every}
-                              onPress={() => save(patches.routine(r().name, { every: iv() }))}
-                            />
-                          )}
-                        </Each>
-                      </View>
+                      <Dropdown
+                        testID={`every-${r().name}`}
+                        label="运行"
+                        value={everyLabel(r().every)}
+                        options={intervalsWith(r().every).map((iv) => ({ id: iv, label: everyLabel(iv), testID: `every-${r().name}-${iv}` }))}
+                        selected={r().every}
+                        onPick={(iv) => save(patches.routine(r().name, { every: iv }))}
+                      />
                     </View>
                   )}
                 </Each>
@@ -1881,6 +1975,11 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
         <If when={on("commands")}>
         <Group title="常用指令" hint="在输入框里输入 / 选用。内置指令执行操作，你添加的指令把一段话发给团队。">
           <CommandRows settings={props.settings} />
+        </Group>
+        </If>
+        <If when={on("storage")}>
+        <Group title="图片保留" hint={MEDIA_HINT}>
+          <MediaDaysChoices settings={props.settings} />
         </Group>
         </If>
         <If when={on("version")}>
@@ -2130,21 +2229,49 @@ function CommandEditor(props: { settings: Settings }) {
 
 function VersionRows(props: { hub: Hub }) {
   const hosts = () => props.hub.status()?.hosts ?? [];
+  // the lines age (waiting → not responding, finished → hidden): re-read the clock every few seconds
+  const clock = signal(Date.now());
+  const timer = setInterval(() => clock.set(Date.now()), 5000);
+  cleanup(() => clearInterval(timer));
+  const request = () => props.hub.status()?.update?.at;
+  const summary = () => updateSummary(props.hub.status(), clock());
+  const toneColor = (t: UpdateLine["tone"]) => (t === "ok" ? colors.up : t === "bad" ? colors.danger : colors.muted);
   return (
     <>
-      <Each of={hosts()}>
-        {(h, i) => (
-          <SetRow
-            first={i() === 0}
-            label={h().host}
-            value={h().rev?.slice(0, 7) ?? "未知"}
-            chevron={!!h().rev_url}
-            onPress={h().rev_url ? () => void openUrl(h().rev_url!).catch(() => {}) : undefined}
-            testID={`version-${h().host}`}
-          />
-        )}
+      <Each of={hosts()} key={(h) => h.host}>
+        {(h, i) => {
+          const line = () => updateLine(h(), request(), clock());
+          return (
+            <SetRow
+              first={i() === 0}
+              label={h().host}
+              value={h().rev?.slice(0, 7) ?? "未知"}
+              chevron={!!h().rev_url}
+              onPress={h().rev_url ? () => void openUrl(h().rev_url!).catch(() => {}) : undefined}
+              testID={`version-${h().host}`}
+              below={
+                <If when={line()}>
+                  <View testID={`update-${h().host}`} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <If when={line()!.busy}>
+                      <Spinner size={12} tint={colors.muted} />
+                    </If>
+                    <Text style={{ flexShrink: 1, fontSize: 13, lineHeight: 18, color: toneColor(line()!.tone) }}>{line()!.text}</Text>
+                  </View>
+                </If>
+              }
+            />
+          );
+        }}
       </Each>
-      <SetRow first={!hosts().length} label="更新所有机器" tone="accent" onPress={() => void updateAllMachines(props.hub)} testID="update-fleet" />
+      <SetRow
+        first={!hosts().length}
+        label={summary()?.busy ? "正在更新…" : "更新所有机器"}
+        detail={summary()?.text}
+        tone="accent"
+        disabled={!!summary()?.busy}
+        onPress={() => void updateAllMachines(props.hub)}
+        testID="update-fleet"
+      />
     </>
   );
 }
@@ -2158,6 +2285,8 @@ function SetRow(props: {
   tone?: "danger" | "accent";
   leading?: JSX.Element;
   trailing?: JSX.Element;
+  /** Under the label and detail (a progress line). */
+  below?: JSX.Element;
   inset?: number;
   disabled?: boolean;
   onPress?: () => void;
@@ -2192,6 +2321,7 @@ function SetRow(props: {
         <If when={props.detail}>
           <Text style={{ fontSize: 13, lineHeight: 18, color: colors.muted }}>{props.detail}</Text>
         </If>
+        {props.below}
       </View>
       <If when={props.value}>
         <Text style={{ flexShrink: 1, fontSize: 16, color: colors.muted, numberOfLines: 1 }}>{props.value}</Text>
@@ -2201,6 +2331,21 @@ function SetRow(props: {
         <Icon name="chevron" size={14} tint={colors.faint} />
       </If>
     </View>
+  );
+}
+
+const MEDIA_HINT = "聊天里的截图和图片保存多久，过期后自动删除。";
+
+/** How long images are kept: 7, 14, 30 or 90 days. */
+function MediaDaysChoices(props: { settings: Settings }) {
+  const { view, save } = props.settings;
+  return (
+    <Choices
+      label="图片保留"
+      choices={MEDIA_DAYS.map((d) => ({ id: String(d), label: `${d} 天`, testID: `media-days-${d}` }))}
+      selected={view() ? String(mediaDaysOf(view())) : null}
+      onPick={(id) => save(patches.mediaDays(Number(id)))}
+    />
   );
 }
 
@@ -2260,7 +2405,7 @@ function SaveNote(props: { settings: Settings }) {
   );
 }
 
-const routineValue = (r: { enabled: boolean; every: string }) => (r.enabled ? `每 ${r.every}` : "已关闭");
+const routineValue = (r: { enabled: boolean; every: string }) => (r.enabled ? everyLabel(r.every) : "已关闭");
 
 /** 设置 on a phone: a list of sections; 通知, each member and each routine push pages of their own. */
 function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen: (r: Route) => void; onDisconnect: () => void }) {
@@ -2353,6 +2498,9 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       </If>
       <Section title="常用指令" hint="在输入框里输入 / 选用。内置指令执行操作，你添加的指令把一段话发给团队。">
         <CommandRows settings={props.settings} />
+      </Section>
+      <Section title="图片保留" hint={MEDIA_HINT}>
+        <MediaDaysChoices settings={props.settings} />
       </Section>
       <Section title="版本" hint="每台机器运行的代码。更新会让所有机器拉取最新代码，主控机同时重新发布线上。">
         <VersionRows hub={props.hub} />
@@ -2473,7 +2621,7 @@ function PhoneRoutine(props: { name: string; settings: Settings }) {
       <If when={routine()} else={<Text style={{ paddingHorizontal: 32, fontSize: 14, color: colors.faint }}>没有这个例行任务</Text>}>
         {(r) => (
           <>
-            <Section hint={`由 ${r().agent} 执行。`}>
+            <Section hint={[r().desc, r().agent && `由 ${r().agent} 执行。`].filter(Boolean).join("\n")}>
               <SetRow
                 first
                 label="启用"
@@ -2483,7 +2631,7 @@ function PhoneRoutine(props: { name: string; settings: Settings }) {
             <Section title="运行间隔">
               <Choices
                 label="运行间隔"
-                choices={intervalsWith(r().every).map((iv) => ({ id: iv, label: `每 ${iv}`, testID: `every-${props.name}-${iv}` }))}
+                choices={intervalsWith(r().every).map((iv) => ({ id: iv, label: everyLabel(iv), testID: `every-${props.name}-${iv}` }))}
                 selected={r().every}
                 onPick={(iv) => save(patches.routine(props.name, { every: iv }))}
               />
@@ -2727,6 +2875,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   effect(() => { if (onChannel() && !jumping) { atEnd.set(true); unseen.set(0); toEnd(); } });
   const draft = signal("");
   const replyTo = signal<string | null>(null);
+  /** What the reply answers, for the chip ("Kai：nsh #812 主要修的是…"); none for a decision (its id says it). */
+  const replyNote = signal<string | null>(null);
   const focused = signal(false);
   const inputHeight = signal(28);
   const outbox = signal<Outgoing[]>([]);
@@ -2787,7 +2937,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     toEnd(true);
   };
 
-  const reply = (ref: string) => {
+  const reply = (ref: string, note?: string) => {
+    replyNote.set(note ?? null);
     replyTo.set(ref);
     if (!untracked(onChannel)) nav.popToRoot();
     composer?.focus();
@@ -2810,6 +2961,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     outbox.update((list) => list.filter((x) => x.id !== o.id));
     if (!/^[DLP]-[A-Z]?\d{4} \S+$/.test(o.text) || o.ref || o.files.length) {
       draft.set(o.text);
+      replyNote.set(null);
       replyTo.set(o.ref);
       attachments.update((a) => [...o.files, ...a]);
       composer?.focus();
@@ -2903,12 +3055,19 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     }
     composer?.focus();
   }
-  // Dictation (语音输入): the browser's speech recognition through host.js. Its words land in the
-  // composer where the caret was (or at the end), live as they are heard; nothing is sent. Where the
-  // page has none (other browsers, the native apps) there is no button.
+  // Dictation (语音输入): nsh's Speech in the native apps, the browser's speech recognition (through
+  // host.js) on the web. Its words land in the composer where the caret was (or at the end), live as
+  // they are heard; nothing is sent. Where there is neither, there is no button.
   const canDictate = signal(false);
   const speech = signal<"off" | "on" | "stopping">("off");
-  void hostCall<{ supported: boolean }>("speechState").then((s) => canDictate.set(!!s?.supported));
+  let native = false;
+  let session: SpeechSession | null = null;
+  void Speech.available()
+    .catch(() => false)
+    .then(async (ok) => {
+      native = ok;
+      canDictate.set(ok || !!(await hostCall<{ supported: boolean }>("speechState"))?.supported);
+    });
   let caret: { start: number; end: number } | null = null;
   let before = "";
   let after = "";
@@ -2919,11 +3078,29 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     return /^zh\b/i.test(l) ? l : "zh-CN";
   };
   const speechError = (e: string) =>
-    e === "not-allowed" || e === "service-not-allowed" ? "没有麦克风权限，请在浏览器设置里允许使用麦克风"
+    e === "not-allowed" || e === "service-not-allowed" ? (native ? "没有麦克风或语音识别权限，请在系统设置里允许" : "没有麦克风权限，请在浏览器设置里允许使用麦克风")
       : e === "no-speech" ? "没有听到声音"
       : e === "audio-capture" ? "找不到麦克风"
       : e === "network" ? "语音识别需要联网"
+      : e === "language-not-supported" ? "这台设备不支持中文语音识别"
+      : e === "unavailable" ? "这台设备不能语音输入"
       : "语音输入出错了";
+  /** The whole transcript so far (final and still-being-heard words). */
+  const heard = (text: string) => {
+    if (untracked(speech) === "off") return;
+    const words = text.trim();
+    // a space between Latin words, none in Chinese
+    const gap = /[A-Za-z0-9.,!?;:]$/.test(before) && /^[A-Za-z0-9]/.test(words) ? " " : "";
+    const head = before + gap + words;
+    dictated = head + after;
+    draft.set(dictated);
+    composer?.setSelection(head.length, head.length);
+  };
+  const ended = (error?: string | null) => {
+    if (untracked(speech) === "off") return;
+    speech.set("off");
+    if (error) attachNote.set(speechError(error));
+  };
   async function startDictation() {
     const v = draft();
     const start = Math.min(caret?.start ?? v.length, v.length);
@@ -2933,6 +3110,23 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     dictated = v;
     attachNote.set(null);
     speech.set("on");
+    if (native) {
+      try {
+        const s = Speech.start({ lang: speechLang() });
+        session = s;
+        s.on("result", (r) => session === s && heard(r.text));
+        s.on("end", (e) => {
+          if (session !== s) return;
+          session = null;
+          ended(e.error);
+        });
+      } catch {
+        session = null;
+        speech.set("off");
+        attachNote.set("无法开始语音输入");
+      }
+      return;
+    }
     if (!(await hostCall("speechStart", { lang: speechLang() })) && untracked(speech) === "on") {
       speech.set("off");
       attachNote.set("无法开始语音输入");
@@ -2942,33 +3136,21 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   function stopDictation(drop = false) {
     if (drop) {
       speech.set("off");
-      void hostCall("speechAbort");
+      if (session) { const s = session; session = null; s.abort(); }
+      else void hostCall("speechAbort");
     } else {
       speech.set("stopping");
-      void hostCall("speechStop");
+      if (session) session.stop();
+      else void hostCall("speechStop");
     }
   }
   const toggleDictation = () => (speech() === "off" ? void startDictation() : speech() === "on" ? stopDictation() : undefined);
   if (host.available()) {
-    host.on("speech", (p) => {
-      if (untracked(speech) === "off") return;
-      const heard = String((p as { text?: string })?.text ?? "").trim();
-      // a space between Latin words, none in Chinese
-      const gap = /[A-Za-z0-9.,!?;:]$/.test(before) && /^[A-Za-z0-9]/.test(heard) ? " " : "";
-      const head = before + gap + heard;
-      dictated = head + after;
-      draft.set(dictated);
-      composer?.setSelection(head.length, head.length);
-    });
-    host.on("speechEnd", (p) => {
-      if (untracked(speech) === "off") return;
-      speech.set("off");
-      const error = (p as { error?: string })?.error;
-      if (error) attachNote.set(speechError(error));
-    });
+    host.on("speech", (p) => heard(String((p as { text?: string })?.text ?? "")));
+    host.on("speechEnd", (p) => ended((p as { error?: string })?.error));
   }
   cleanup(() => {
-    if (untracked(speech) !== "off") void hostCall("speechAbort");
+    if (untracked(speech) !== "off") stopDictation(true);
   });
 
   const canSend = () => !!draft().trim() || attachments().length > 0;
@@ -3348,8 +3530,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               >
                 <If when={replyTo()}>
                   {(ref) => (
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, alignSelf: "flex-start", height: 30, paddingLeft: 10, paddingRight: 4, borderRadius: 8, backgroundColor: tints.accent }}>
-                      <Text style={{ fontSize: 14, fontWeight: "500", color: colors.accent }}>回复 {ref()}</Text>
+                    <View testID="reply-chip" style={{ flexDirection: "row", alignItems: "center", gap: 8, alignSelf: "flex-start", maxWidth: "100%", height: 30, paddingLeft: 10, paddingRight: 4, borderRadius: 8, backgroundColor: tints.accent }}>
+                      <Text style={{ ...chipText, flexShrink: 1, numberOfLines: 1, fontSize: 14, fontWeight: "500", color: colors.accent }}>{replyNote() ? `回复 ${replyNote()}` : `回复 ${ref()}`}</Text>
                       <View
                         onPress={() => replyTo.set(null)}
                         role="button"

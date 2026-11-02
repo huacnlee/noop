@@ -8,7 +8,7 @@ import {
 } from "./core";
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
-import { agentProcs, ask, buildPrompt, parseResult, runAgent } from "./runner";
+import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { writeRules } from "./rules";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
@@ -19,10 +19,10 @@ import { collect, LEARN_PROMPT } from "./sessions";
 import { medic } from "./medic";
 import { githubStarved } from "./github";
 import { doctor, visual } from "./visual";
-import { drainInbound, handleOwnerMessage, recentChat, setAppendToTask, setCancelTask, setUpdateFleet, onSettingsSaved, startServer } from "./server";
+import { drainInbound, handleOwnerMessage, mediaDays, pruneMedia, recentChat, setCancelTask, setUpdateFleet, onSettingsSaved, startServer } from "./server";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { judgeAccuracy, level, needsApproval, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
-import { CODE, UPDATE_REQUEST, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
@@ -130,6 +130,24 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note), meta.repo || P(), cfg, log, !!meta.gate_override,
       { ...b.env, ...accountEnv(acct) });
     if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; } // the owner cancelled it while it ran
+    if (out.includes(STALLED)) { // went quiet and was stopped: run it again from where it got to, up to twice
+      const why = out.slice(out.indexOf(STALLED) + STALLED.length).trim();
+      const stalls = Number(meta.stalls ?? 0) + 1;
+      if (stalls <= 2) {
+        await locked(async () => {
+          await _pull();
+          writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, stalls: String(stalls),
+            requeue_note: `Your previous run was stopped: ${why}. Continue from where it got to: first check what is already done (branch agent/${meta.id}-*, commits, PRs, comments you posted) and don't redo it. If you are waiting on something slow, return "waiting" instead of sitting idle.` },
+            body);
+          if (existsSync(path)) unlinkSync(path);
+          journal(host, `🔁 ${meta.id} 没有动静被中止（${why}），接着跑（第 ${stalls} 次）`);
+          await _commitPush(`[${host}] ${meta.id} stalled, rerun`);
+        });
+        return;
+      }
+      res = { status: "failed", summary: `连续 ${stalls} 次运行都卡住没有动静（${why}），已停止重试` };
+      break;
+    }
     res = parseResult(out);
     const failure = res.status === "failed" ? classify(out) : null;
     if (!failure) break;
@@ -169,7 +187,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     children.push(id);
     journal(host, `  ↳ ${id} → ${f.agent ?? agent}: ${f.title}`);
   }
-  const done = { ...meta, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined };
+  const done = { ...meta, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined };
   const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
   const latest = existsSync(path) ? readDoc(path).body : body;
@@ -310,7 +328,14 @@ async function drainAndExit(why: string, host: string) {
   try {
     mkdirSync(P("logs"), { recursive: true });
     writeFileSync(LAST_RESTART(), new Date().toISOString());
-    await locked(async () => { await _pull(); journal(host, `🔄 daemon ${why}: all running work finished, exiting`); await _commitPush(`[${host}] ${why}`); });
+    const u = updateState();
+    if (u?.state === "waiting") setUpdateState({ at: u.at, state: "restarting", from: u.from });
+    await locked(async () => {
+      await _pull();
+      if (u?.state === "waiting") heartbeat(loadConfig(), running, sample(loadConfig()));
+      journal(host, `🔄 daemon ${why}: all running work finished, exiting`);
+      await _commitPush(`[${host}] ${why}`);
+    });
   } catch {}
   process.exit(0);
 }
@@ -325,19 +350,33 @@ async function ownerUpdate(c: Cfg, host: string) {
   try { done = readFileSync(UPDATE_DONE(), "utf8").trim(); } catch {}
   if (!at || at <= done) return;
   writeFileSync(UPDATE_DONE(), at);
-  const before = runningRev().rev?.slice(0, 7) ?? "?";
+  const from = runningRev().rev;
+  const before = from?.slice(0, 7) ?? "?";
+  // each step goes out in the heartbeat at once, so the owner watches it in Settings › 版本
+  const report = async (state: UpdateState["state"], detail?: string) => {
+    setUpdateState({ at, state, detail, from });
+    await locked(async () => { await _pull(); heartbeat(c, running, sample(c)); await _commitPush(`[${host}] update: ${state}`); }).catch(() => {});
+  };
+  await report("updating", "拉取并测试新代码");
   const updated = await selfUpdate({ force: true, deploy: true }).catch(() => false);
   if (updated) {
     journal(host, `⬆️ updated on the owner's request (was ${before}); restarting${running ? ` after ${running} running task(s)` : ""}`);
+    await report(running ? "waiting" : "restarting", running ? `等 ${running} 个任务跑完后重启` : undefined);
     void drainAndExit("self-update", host);
     return;
   }
   const now7 = (Bun.spawnSync(["git", "-C", CODE, "rev-parse", "--short", "HEAD"], { stdout: "pipe" }).stdout.toString().trim()) || before;
+  const stale = now7 !== before; // the code moved but this process could not take it (local edits, failing tests)
   if (isPrimary(c, host) && c.cloud?.url) {
+    await report("deploying", "重新发布线上");
     const cloud = await import("./cloud");
     const err = await cloud.cloudDeploy(c).then((u) => (u ? "" : cloud.lastDeployError || "unknown"), (e) => String(e));
     journal(host, `⬆️ already at ${now7}; ${err ? `redeploying the Worker failed: ${err.replace(/\s+/g, " ").slice(-300)}` : "redeployed the Worker and the web app"}`);
-  } else journal(host, now7 === before ? `⬆️ already at ${now7}` : `⬆️ not updated (still running ${before}; local edits or failing tests)`);
+    await report(err ? "failed" : "current", err ? `代码已是最新，重新发布线上失败：${err.replace(/\s+/g, " ").slice(0, 120)}` : "已重新发布线上");
+  } else {
+    journal(host, stale ? `⬆️ not updated (still running ${before}; local edits or failing tests)` : `⬆️ already at ${now7}`);
+    await report(stale ? "failed" : "current", stale ? "有本地改动或测试没通过，仍在运行旧代码" : undefined);
+  }
 }
 
 /** A good report doesn't forward raw errors. Retry, call the medic for tooling problems, and only after that
@@ -426,6 +465,17 @@ Build the owner's next-action menu per your profile and return needs_decision.${
   journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff drafting a next-steps menu`);
 }
 
+/** This machine's copies of images (served media, downloaded attachments) go after `media_days`, checked hourly. */
+let mediaPruned = 0;
+function pruneMediaHourly(cfg: Cfg) {
+  if (Date.now() - mediaPruned < 3_600_000) return;
+  mediaPruned = Date.now();
+  try {
+    const n = pruneMedia(mediaDays(cfg));
+    if (n) console.log(`media: removed ${n} older than ${mediaDays(cfg)} days`);
+  } catch (e) { console.error(`media prune: ${e}`); }
+}
+
 export async function tick(cfg: Cfg, background = false) {
   const host = hostName(cfg);
   const primary = isPrimary(cfg, host);
@@ -442,6 +492,7 @@ export async function tick(cfg: Cfg, background = false) {
     } else reapStale(cfg, host, true);
     await _commitPush(`[${host}] tick`);
   });
+  pruneMediaHourly(cfg);
   await retryLogins(cfg);
   if (primary || pendingLoginIds().size) await handleReplies(cfg, host);
   if (primary) await planInbox(cfg, host);
@@ -530,19 +581,26 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
   });
 }
 
-/** What an owner message continues, in one short judge call: `same`, an open task (queued, running or waiting on sub-tasks)
- * to add it to; else `follows`, a task the channel just talked about (often finished) that it corrects or builds on. */
-async function relatedTask(text: string, cfg: Cfg, chat: string[] = []): Promise<{ same: string | null; follows: string | null }> {
+/** Where an owner message in the team channel goes, decided by a quick model (seconds, not a judgement):
+ * - "same": an OPEN task (queued, running, waiting) it is part of → add it there
+ * - "follows": a task from the channel it refers to (often finished) → a new task that continues it
+ * - "amend": a change to the decision the owner just answered
+ * - "new": new, unrelated work */
+export async function routeMessage(text: string, cfg: Cfg, chat: string[] = [], answered?: string):
+  Promise<{ action: "same" | "follows" | "amend" | "new"; id?: string }> {
   const open = ["inbox", "active", "waiting"].flatMap((d) => list(P("tasks", d), /^T-.*\.md$/))
-    .map((f) => readDoc(f)).map(({ meta, body }) => ({ id: meta.id, title: meta.title, ask: body.slice(0, 300).replace(/\s+/g, " ") }));
+    .map((f) => readDoc(f)).map(({ meta, body }) => ({ id: String(meta.id), title: meta.title, ask: body.slice(0, 300).replace(/\s+/g, " ") }));
   const recent = [...new Set(chat.join("\n").match(/\bT-\d{4}\b/g) ?? [])];
-  if (!open.length && !recent.length) return { same: null, follows: null };
-  const r = await ask(`The owner sent a new chat message to their AI team. Decide what it continues.
-- "same": one of the team's OPEN tasks when it is clearly the same work (same goal, same repo/release/PR — e.g. "keep following up
-  the gpui-kit release" while a task is releasing gpui-kit). A different repo, goal or an unrelated question is not.
-- "follows": otherwise, a task from the channel below that the message refers to — corrects its result ("不行，…"), asks for more
-  of it, or asks to remember how it was done ("这个细节记录下来，以后都这样"). The owner writes tersely; read the channel.
-  null when the message is new, unrelated work.
+  const decision = answered && existsSync(P("decisions", "closed", `${answered}.md`)) ? readDoc(P("decisions", "closed", `${answered}.md`)).meta : null;
+  if (!open.length && !recent.length && !decision) return { action: "new" };
+  const r = await quickAsk(`You route the owner's chat messages for their AI team. The team channel is the main conversation;
+each task is its own conversation. Decide where this new message belongs:
+- "same": one of the OPEN tasks below when it is clearly about the same work (same goal, same repo/PR/release). Two messages
+  sent close together are NOT the same task just for that: "Review NSH#743" and "nsh#812 为何图片不清晰" are different PRs.
+- "follows": a task from the channel that the message refers to — corrects its result ("不行，…"), asks about it or for more
+  of it, or asks to remember how it was done. The owner writes tersely: read the channel.
+- "amend": ${decision ? `the owner just answered ${answered} ("${decision.question}" → ${decision.answer}); the message changes or qualifies that answer ("等等，选错了", "B 但是先…").` : "(not possible now)"}
+- "new": new, unrelated work.
 
 Message:
 ${text.slice(0, 1500)}
@@ -550,10 +608,13 @@ ${chat.length ? `\nThe channel just before it (oldest first):\n${chat.join("\n")
 Open tasks:
 ${open.map((t) => `- ${t.id}: ${t.title} — ${t.ask}`).join("\n") || "(none)"}
 
-Reply with exactly one fenced json block: {"same": "<open task id>" | null, "follows": "<task id from the channel>" | null, "why": "<short reason>"}`, cfg, P("logs", "runs", `dedupe-${Date.now()}.log`));
-  const same = typeof r?.same === "string" && open.some((t) => t.id === r.same) ? r.same : null;
-  const follows = !same && typeof r?.follows === "string" && recent.includes(r.follows) ? r.follows : null;
-  return { same, follows };
+Reply with exactly one fenced json block: {"action": "same" | "follows" | "amend" | "new", "id": "<task id for same/follows>" | null}`,
+    cfg, P("logs", "runs", `route-${Date.now()}.log`));
+  const action = r?.action;
+  if (action === "same" && open.some((t) => t.id === r.id)) return { action, id: r.id };
+  if (action === "follows" && (recent.includes(r.id) || open.some((t) => t.id === r.id))) return { action, id: r.id };
+  if (action === "amend" && decision) return { action, id: answered };
+  return { action: "new" };
 }
 
 async function daemon(cfg: Cfg) {
@@ -585,7 +646,6 @@ async function daemon(cfg: Cfg) {
     }
     return "";
   });
-  setAppendToTask(async (tid, text) => !!(await appendFollowUp(tid, text)));
   setUpdateFleet(() => locked(async () => {
     await _pull();
     mkdirSync(P("fleet"), { recursive: true });
@@ -617,24 +677,27 @@ async function daemon(cfg: Cfg) {
     await _commitPush(`[${host}] cancel ${tid}`);
     return "cancelled";
   }));
-  if (isPrimary(cfg, host)) startServer(cfg, async (text, replyTo) => {
-    // Same work as an open task? Add the message to it instead of opening a duplicate.
+  if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered }) => {
+    // A reply (or a message on a task's page) names its task; anything else is routed by a quick model.
     const chat = recentChat(text);
-    // replying to a task's message names the task: no guessing
-    const replied = replyTo && ["inbox", "active", "waiting"].some((d) => existsSync(P("tasks", d, `${replyTo}.md`)));
-    const { same, follows } = replyTo
-      ? { same: replied ? replyTo : null, follows: replied ? null : replyTo }
-      : await relatedTask(text, cfg, chat).catch(() => ({ same: null, follows: null }));
+    const isOpen = (t: string) => ["inbox", "active", "waiting"].some((d) => existsSync(P("tasks", d, `${t}.md`)));
+    const route = reply
+      ? { action: isOpen(reply) ? "same" : "follows", id: reply }
+      : await routeMessage(text, cfg, chat, answered).catch(() => ({ action: "new" as const, id: undefined }));
+    if (route.action === "amend" && route.id) return { amend: route.id };
+    const same = route.action === "same" ? route.id! : null;
+    const follows = route.action === "follows" ? route.id! : null;
     const title = same ? await appendFollowUp(same, text) : "";
     if (same && title) return { id: same, title };
     return locked(async () => {
     await _pull();
     // A short reply ("不行，…", "这个细节记下来") only makes sense with what came before it: the new task carries the
     // channel's recent conversation and the task it most likely continues (finished tasks included).
-    const prev = follows;
+    const prev = follows ?? same; // `same` here: it finished meanwhile, so the new task continues it
     const prevFile = prev ? ["done", "failed", "rejected", "blocked", "inbox", "active", "waiting"].map((d) => P("tasks", d, `${prev}.md`)).find(existsSync) : undefined;
-    const context = chat.length
-      ? `\n\n## The channel just before this message\nThe owner writes tersely: words like "this", "不行", "这个细节", "以后都这样" refer to what was just said here.\n\n${chat.map((l) => `- ${l}`).join("\n")}\n` +
+    const context = chat.length || reply
+      ? (reply ? `\n\nThe owner wrote this as a reply to the team's message about ${reply}.` : "") +
+        `\n\n## The channel just before this message\nThe owner writes tersely: words like "this", "不行", "这个细节", "以后都这样" refer to what was just said here.\n\n${chat.map((l) => `- ${l}`).join("\n")}\n` +
         (prevFile ? `\nThis continues ${prev} (${prevFile.split("/").slice(-2, -1)[0]}): read tasks/${prevFile.split("/").slice(-2).join("/")} for what was done and how. If the owner is correcting that result, fix it; if they say to remember something ("记录下来", "以后都这样"), write it as a durable rule/memory for the agent and kind of work it concerns, not just in this task.\n` : "")
       : "";
     const id = newTask(text.split("\n")[0].slice(0, 80), `The owner (CEO) said in chat:\n\n> ${text.replace(/\n/g, "\n> ")}${context}\nHandle it like a capable chief of staff (see your profile: "Owner requests").`,

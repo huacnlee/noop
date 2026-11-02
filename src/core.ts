@@ -216,7 +216,41 @@ export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null
 
 // ------------------------------------------------------------------ fleet presence (heartbeats)
 export type HostBeat = { host: string; caps: string[]; seen: string; busy: number; version: string; stats?: any;
-  /** The noop code this host runs: its commit and that commit's page. */ rev?: string; rev_url?: string };
+  /** The noop code this host runs: its commit and that commit's page. */ rev?: string; rev_url?: string;
+  /** How this host is doing with the owner's latest "update every machine". */ update?: UpdateState;
+  /** Per running task: when its agent last showed a sign of life and what it was doing. */ activity?: Record<string, Activity> };
+
+/** A running agent's latest sign of life: any output; for Claude also the step it took ("Bash · gh pr checks 814"). */
+export type Activity = { at: string; step?: string; steps: number };
+/** This process's running agents (written by runAgent, published in the heartbeat). */
+export const agentActivity = new Map<string, Activity>();
+
+/** One host's progress on an update request (`at` names the request), shown per machine in Settings › 版本. */
+export type UpdateState = {
+  at: string; ts: string;
+  state: "updating" | "waiting" | "restarting" | "deploying" | "done" | "current" | "failed";
+  detail?: string;
+  /** The commit it ran when the update started (a restart onto another commit means it updated). */ from?: string;
+};
+const STARTED = Date.now();
+const UPDATE_STATE = () => join(HOME_DIR, "update-state.json"); // machine-local: survives the restart it reports on
+export function setUpdateState(u: Omit<UpdateState, "ts">) {
+  mkdirSync(HOME_DIR, { recursive: true });
+  writeFileSync(UPDATE_STATE(), JSON.stringify({ ...u, ts: now() }, null, 2));
+}
+/** This host's update progress; a restart that finished turns "restarting" into "done" (or "failed" on the same commit). */
+export function updateState(): UpdateState | undefined {
+  let u: UpdateState;
+  try { u = JSON.parse(readFileSync(UPDATE_STATE(), "utf8")); } catch { return undefined; }
+  // written by the process before this one: the restart it waited for has happened
+  if ((u.state === "restarting" || u.state === "waiting") && Date.parse(u.ts) < STARTED) {
+    const rev = runningRev().rev;
+    if (rev && rev !== u.from) setUpdateState({ at: u.at, state: "done", detail: rev.slice(0, 7), from: u.from });
+    else setUpdateState({ at: u.at, state: "failed", detail: "重启后仍是旧代码", from: u.from });
+    return updateState();
+  }
+  return u;
+}
 
 /** The commit of the code this process runs (read once: an update restarts the daemon) and its GitHub page. */
 let codeRev: { rev?: string; rev_url?: string } | undefined;
@@ -235,7 +269,7 @@ export function heartbeat(cfg: Cfg, busy: number, stats?: unknown) {
   const host = hostName(cfg);
   const f = P("fleet", "hosts", `${host}.json`);
   mkdirSync(dirname(f), { recursive: true });
-  writeFileSync(f, JSON.stringify({ host, caps: hostCaps(cfg), seen: now(), busy, version: "1", stats, ...runningRev() } satisfies HostBeat, null, 2));
+  writeFileSync(f, JSON.stringify({ host, caps: hostCaps(cfg), seen: now(), busy, version: "1", stats, ...runningRev(), update: updateState(), activity: agentActivity.size ? Object.fromEntries(agentActivity) : undefined } satisfies HostBeat, null, 2));
 }
 
 export function onlineHosts(cfg: Cfg): HostBeat[] {
@@ -319,8 +353,7 @@ export function precedents(n = 30): string {
 }
 
 export function signature(agent: string, host: string, cfg: Cfg) {
-  const name = agentName(agent);
-  return `— 🤖 ${name} (${agent}) · AI agent acting for @${cfg.owner?.github ?? "owner"}`;
+  return `🤖 Noop (${agent}) · AI agent acting for @${cfg.owner?.github ?? "owner"}`;
 }
 
 export function agentName(agent: string): string {

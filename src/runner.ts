@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import {
-  type Cfg, P, ROOT, agentName, precedents, readAll, readIf, recentJournal, signature,
+  type Cfg, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, recentJournal, signature,
 } from "./core";
 import { claudeDisallowed } from "./gates";
 
@@ -65,7 +65,7 @@ ${recentJournal() || "(empty)"}
 ${rosterLine()}
 
 # External signature (MANDATORY)
-Anything you post outside the hub — GitHub PR/issue/review comments, PR descriptions, Slack, Discord, email, OKR entries — must end with:
+Anything you post outside the hub — GitHub PR/issue/review comments, PR descriptions, Slack, Discord, email, OKR entries — must end with this exact line, after a blank line:
 ${signature(agent, host, cfg)}
 Git commits you create must carry the trailer:  Agent: ${agent}
 
@@ -94,7 +94,7 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
   const c = cfg.clis?.[cli] ?? {};
   if (Array.isArray(c.command)) return c.command;
   if (cli === "claude") {
-    const cmd = ["claude", "-p", "--output-format", "text", "--permission-mode", c.permission_mode ?? "bypassPermissions"];
+    const cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", c.permission_mode ?? "bypassPermissions"];
     cmd.push("--model", c.model ?? "claude-opus-5-5");
     // the agent signature is the only attribution; drop Claude Code's own "Generated with" / co-author lines
     cmd.push("--settings", JSON.stringify({ attribution: { commit: "", pr: "" }, includeCoAuthoredBy: false }));
@@ -115,10 +115,21 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
 /** Running agent processes by task id (so the owner can cancel one). */
 export const agentProcs = new Map<string, { kill: (sig?: number | NodeJS.Signals) => void }>();
 
+/** One line saying what a tool call does ("gh pr checks 814 -R longbridge/nsh", "读 src/cli.ts"), for "最近在做". */
+function toolStep(name: string, input: any): string {
+  const i = input ?? {};
+  const v = i.description || i.command || i.file_path || i.path || i.pattern || i.url || i.query || i.prompt || "";
+  return `${name}${v ? ` · ${String(v).split("\n")[0].slice(0, 120)}` : ""}`;
+}
+
+/** Marker runAgent appends when it stopped a run that went quiet (see stall_minutes). */
+export const STALLED = "\n[stalled]";
+
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
   extraEnv: Record<string, string> = {}): Promise<string> {
   const cmd = cliCommand(cli, cfg, gateOverride);
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
+  const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
   const proc = Bun.spawn(cmd, {
     cwd: existsSync(dir) ? dir : ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
@@ -127,12 +138,63 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const tid = logFile.split("/").pop()!.match(/^([A-Z]-[\w]*?\d{4})-\d{10,}/)?.[1];
   if (tid) agentProcs.set(tid, proc);
   void proc.exited.then(() => { if (tid && agentProcs.get(tid) === proc) agentProcs.delete(tid); });
+
+  // what the agent is doing: every chunk of output is a sign of life; Claude's stream also names each step
+  const json = cmd.includes("stream-json");
+  const act = { at: Date.now(), step: undefined as string | undefined, steps: 0 };
+  const inFlight = new Map<string, string>(); // tool_use id → tool name, until its result comes back
+  let resultText: string | undefined, assistantText = "";
+  const touch = () => {
+    act.at = Date.now();
+    if (tid) agentActivity.set(tid, { at: new Date(act.at).toISOString(), step: act.step, steps: act.steps });
+  };
+  touch();
+  const onLine = (line: string) => {
+    let e: any;
+    try { e = JSON.parse(line); } catch { return; }
+    if (e.type === "assistant") {
+      for (const c of e.message?.content ?? []) {
+        if (c.type === "tool_use") { inFlight.set(c.id, c.name); act.step = toolStep(c.name, c.input); act.steps++; }
+        else if (c.type === "text" && !e.parent_tool_use_id) assistantText += c.text;
+      }
+    } else if (e.type === "user") {
+      for (const c of e.message?.content ?? []) if (c.type === "tool_result") inFlight.delete(c.tool_use_id);
+    } else if (e.type === "result") resultText = typeof e.result === "string" ? e.result : "";
+  };
+  const read = async (stream: ReadableStream<Uint8Array>, lines: boolean) => {
+    const dec = new TextDecoder();
+    let all = "", buf = "";
+    for await (const chunk of stream) {
+      const t = dec.decode(chunk, { stream: true });
+      all += t;
+      if (lines) {
+        buf += t;
+        const parts = buf.split("\n");
+        buf = parts.pop()!;
+        parts.forEach(onLine);
+      }
+      touch();
+    }
+    if (lines && buf) onLine(buf);
+    return all;
+  };
+
+  let stalled = false;
   const timer = setTimeout(() => proc.kill(), timeoutMs);
-  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  // a run that has gone quiet: no output at all, and nothing slow in flight (a sub-agent may work quietly for long)
+  const watch = setInterval(() => {
+    const slow = [...inFlight.values()].some((n) => /^(Task|Agent)$/.test(n));
+    if (!slow && Date.now() - act.at > stallMs) { stalled = true; proc.kill(); }
+  }, 30_000);
+  const [raw, err] = await Promise.all([read(proc.stdout, json), read(proc.stderr, false)]);
   const code = await proc.exited;
   clearTimeout(timer);
+  clearInterval(watch);
+  if (tid) agentActivity.delete(tid);
   mkdirSync(P("logs", "runs"), { recursive: true });
-  writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${out}\n\n[stderr]\n${err}`);
+  writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${raw}\n\n[stderr]\n${err}`);
+  const out = json ? (resultText ?? assistantText) : raw;
+  if (stalled) return `${out}${STALLED} no output for ${Math.round(stallMs / 60_000)} minutes${act.step ? `; last step: ${act.step}` : ""}`;
   return out + (code ? `\n[exit ${code}] ${err.slice(-2000)}` : "");
 }
 
@@ -145,6 +207,31 @@ export function parseResult(out: string): Result {
     } catch {}
   }
   return { status: "failed", summary: `agent returned no result block. tail: ${out.slice(-300)}` };
+}
+
+/** The models that route each owner message, fastest first: a choice made within seconds, not a judgement.
+ * `[router] cli/model` in config.toml puts one first; the others are fallbacks when its CLI is missing or fails. */
+const ROUTERS = [{ cli: "claude", model: "claude-haiku-5-5" }, { cli: "codex", model: "gpt-6-luna" }];
+
+/** One quick structured call for routing (the fastest model available); null when none answered. */
+export async function quickAsk(prompt: string, cfg: Cfg, logFile: string): Promise<any> {
+  const own = cfg.router?.cli ? [{ cli: String(cfg.router.cli), model: String(cfg.router.model ?? "") }] : [];
+  for (const r of [...own, ...ROUTERS.filter((x) => x.cli !== own[0]?.cli)]) {
+    if (!Bun.which(r.cli)) continue;
+    const cmd = r.cli === "claude"
+      ? ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config", ...(r.model ? ["--model", r.model] : [])]
+      : ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", ...(r.model ? ["-m", r.model] : []), "-c", 'model_reasoning_effort="low"', "-"];
+    const proc = Bun.spawn(cmd, { cwd: ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => proc.kill("SIGKILL"), (cfg.router?.timeout_seconds ?? 45) * 1000);
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    clearTimeout(timer);
+    mkdirSync(P("logs", "runs"), { recursive: true });
+    writeFileSync(logFile, `${r.cli} ${r.model}\n${out}`);
+    const m = [...out.matchAll(/```json\s*(\{[\s\S]*?\})\s*```/g)].pop() ?? out.match(/(\{[\s\S]*\})/);
+    try { return JSON.parse(m![1]); } catch {}
+  }
+  return null;
 }
 
 /** One-shot structured call (used by the judge). */

@@ -23,12 +23,26 @@ export type HostInfo = {
   arch?: string;
   clis?: string[];
   accounts?: { cli: string; name: string; state: "ok" | "cooldown" | "login"; until?: string }[];
-  running?: { id: string; title: string; agent: string; started?: string }[];
+  running?: { id: string; title: string; agent: string; started?: string; activity?: Activity }[];
   recent?: { id: string; title: string; state?: string; finished?: string }[];
   /** The code the machine runs: its git commit, and that commit on GitHub. */
   rev?: string;
   rev_url?: string;
+  /** Its progress on the owner's latest "update every machine". */
+  update?: { at: string; ts: string; state: string; detail?: string; from?: string };
 };
+
+/** A running agent's latest sign of life, and (Claude) the step it took. */
+export type Activity = { at: string; step?: string; steps?: number };
+
+/** "最近：Bash · gh pr checks 814 · 2 分钟前"; quiet for 10+ minutes reads as such (the fleet stops it at 20 and runs it again). */
+export function activityLine(a: Activity | undefined, now = Date.now()): { text: string; quiet: boolean } | null {
+  if (!a?.at) return null;
+  const min = Math.max(0, Math.floor((now - Date.parse(a.at)) / 60_000));
+  const when = min < 1 ? "刚刚" : `${min} 分钟前`;
+  if (min >= 10) return { text: `已经 ${min} 分钟没有动静${a.step ? `，最后一步：${a.step}` : ""}；20 分钟没动静会自动中止并接着跑`, quiet: true };
+  return { text: a.step ? `最近：${a.step} · ${when}` : `最近有输出 · ${when}`, quiet: false };
+}
 
 export type TaskInfo = {
   id: string; title: string; agent: string; host?: string; state?: string;
@@ -36,6 +50,8 @@ export type TaskInfo = {
   needs?: string;
   started?: string; created?: string; finished?: string; updated?: string; attempt?: string; decision?: string; cli?: string; model?: string;
   request?: string;
+  /** state "active": its agent's latest sign of life. */
+  activity?: Activity;
   runs?: { ts: string; host: string; cli: string; status: string; summary: string }[];
   steps?: { day?: string; time?: string; host?: string; kind?: string; text: string }[];
 };
@@ -46,6 +62,8 @@ export type Status = {
   recent?: TaskInfo[];
   decisions: { id: string; kind: string; question?: string; held: boolean }[];
   hosts: HostInfo[];
+  /** The owner's latest "update every machine" request. */
+  update?: { at: string };
 };
 
 /** An item id the owner answers: decisions, proposals (lists to approve) and logins. */
@@ -201,8 +219,9 @@ export type SettingsView = {
   effective: {
     agents: { id: string; title?: string; about?: string; clis: string[]; autonomy: Autonomy }[];
     autonomy: Autonomy;
-    routines: { name: string; every: string; agent: string; enabled: boolean }[];
+    routines: { name: string; desc?: string; every: string; agent: string; enabled: boolean }[];
     max_parallel: number | null;
+    media_days?: number;
   };
   options: { clis: string[][]; autonomy: string[] };
 };
@@ -218,14 +237,34 @@ export const cliLabel = (clis: string[]) => CLI_LABELS[cliKey(clis)] ?? clis.joi
 const AUTONOMY_LABELS: Record<string, string> = { onboarding: "学习期", assisted: "协助", autonomous: "自主" };
 export const autonomyLabel = (a: string) => AUTONOMY_LABELS[a] ?? a;
 export const INTERVALS = ["15m", "30m", "1h", "2h", "6h", "1d"];
+const DAYS: Record<string, string> = { MON: "一", TUE: "二", WED: "三", THU: "四", FRI: "五", SAT: "六", SUN: "日" };
+/** A routine's schedule in words: "30m" → 每 30 分钟, "weekly FRI 17:00" → 每周五 17:00. */
+export function everyLabel(every: string): string {
+  const e = every.trim();
+  let m = e.match(/^(\d+)\s*([mhd])$/);
+  if (m) return m[1] === "1" ? { m: "每分钟", h: "每小时", d: "每天" }[m[2]]! : `每 ${m[1]} ${{ m: "分钟", h: "小时", d: "天" }[m[2]]}`;
+  if (e === "hourly") return "每小时";
+  if ((m = e.match(/^daily\s+(\d\d?:\d\d)$/))) return `每天 ${m[1]}`;
+  if ((m = e.match(/^weekdays\s+(\d\d?:\d\d)$/))) return `工作日 ${m[1]}`;
+  if ((m = e.match(/^weekly\s+(\w{3})\s+(\d\d?:\d\d)$/i)) && DAYS[m[1].toUpperCase()]) return `每周${DAYS[m[1].toUpperCase()]} ${m[2]}`;
+  return e;
+}
 export const intervalsWith = (every: string) => (INTERVALS.includes(every) ? INTERVALS : [...INTERVALS, every]);
 
 /** The PUT bodies the settings screen sends (whitelisted keys of the hub). */
+/** How long images are kept, in days: the choices and the one in force (7 by default). */
+export const MEDIA_DAYS = [7, 14, 30, 90];
+export const mediaDaysOf = (v: SettingsView | null | undefined): number => {
+  const d = Number(v?.current?.media_days ?? v?.effective?.media_days);
+  return MEDIA_DAYS.includes(d) ? d : 7;
+};
+
 export const patches = {
   clis: (agent: string, clis: string[]) => ({ clis: { agents: { [agent]: clis } } }),
   autonomy: (agent: string, level: string) => ({ autonomy: { agents: { [agent]: level } } }),
   routine: (name: string, change: { enabled?: boolean; every?: string }) => ({ routines: { [name]: change } }),
   maxParallel: (n: number) => ({ host: { max_parallel: n } }),
+  mediaDays: (days: number) => ({ media_days: days }),
   /** The whole list: an array replaces the saved one. */
   commands: (list: Command[]) => ({ commands: list }),
 };
@@ -338,3 +377,44 @@ export function needsLabel(needs = ""): string {
 
 /** Waiting its turn: queued, waiting on sub-tasks, or waiting for a machine that can run it. */
 export const isQueued = (state?: string) => state === "inbox" || state === "waiting" || state === "nohost";
+
+/** A machine's line under 版本 while (and after) an update runs; `busy` while it is still on the way. */
+export type UpdateLine = { text: string; tone: "muted" | "ok" | "bad" | "busy"; busy: boolean };
+
+/** How long a machine may stay silent on an update request before it reads as not responding (old code never reports). */
+const UPDATE_SILENT_MS = 3 * 60_000;
+/** After this long, a finished update is history: the rows go back to showing only the commit. */
+const UPDATE_SHOWN_MS = 30 * 60_000;
+
+export function updateLine(h: HostInfo, request: string | undefined, now = Date.now()): UpdateLine | null {
+  if (!request) return null;
+  const age = now - Date.parse(request);
+  const u = h.update?.at === request ? h.update : undefined;
+  if (!u) {
+    if (age > UPDATE_SHOWN_MS) return null;
+    return age < UPDATE_SILENT_MS
+      ? { text: "等待响应…", tone: "busy", busy: true }
+      : { text: "没有响应：可能还在运行不会汇报进度的旧版本，需要在这台机器上手动更新一次", tone: "bad", busy: false };
+  }
+  const settled = ["done", "current", "failed"].includes(u.state);
+  if (settled && now - Date.parse(u.ts) > UPDATE_SHOWN_MS) return null;
+  switch (u.state) {
+    case "updating": return { text: "正在拉取并测试新代码…", tone: "busy", busy: true };
+    case "waiting": return { text: `${u.detail ?? "等运行中的任务跑完后重启"}…`, tone: "busy", busy: true };
+    case "restarting": return { text: "正在重启…", tone: "busy", busy: true };
+    case "deploying": return { text: "正在重新发布线上…", tone: "busy", busy: true };
+    case "done": return { text: `已更新到 ${u.detail ?? h.rev?.slice(0, 7) ?? "最新"}`, tone: "ok", busy: false };
+    case "current": return { text: u.detail ? `已是最新 · ${u.detail}` : "已是最新", tone: "ok", busy: false };
+    case "failed": return { text: `更新失败：${u.detail ?? "原因未知"}`, tone: "bad", busy: false };
+    default: return { text: u.state, tone: "muted", busy: false };
+  }
+}
+
+/** The fleet's update as one line: "正在更新 · 1/3 完成", or null when nothing is on the way. */
+export function updateSummary(s: Status | null | undefined, now = Date.now()): { text: string; busy: boolean } | null {
+  const lines = (s?.hosts ?? []).map((h) => updateLine(h, s?.update?.at, now)).filter((l): l is UpdateLine => !!l);
+  if (!lines.length) return null;
+  const done = lines.filter((l) => l.tone === "ok").length, bad = lines.filter((l) => l.tone === "bad").length;
+  const busy = lines.some((l) => l.busy);
+  return { text: `${busy ? "正在更新" : "更新结束"} · ${done}/${lines.length} 完成${bad ? ` · ${bad} 台有问题` : ""}`, busy };
+}

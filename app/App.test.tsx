@@ -190,7 +190,27 @@ describe("channel", () => {
     await app.waitFor("任务 T-0005");
   });
 
-  test("a decision's PR references are links, host-lettered ids are chips, option buttons shorten PR links", async () => {
+  test("a task page is its conversation: what was said about it, and a box that adds to it", async () => {
+    const posts: { text: string; reply_to?: string }[] = [];
+    const said = [
+      { id: "e10", ts: ts(10), from: "owner", kind: "owner", ref: "T-0005", text: "登录页在手机上也看一下" },
+      { id: "e11", ts: ts(11), from: "dev@linux-box", kind: "notice", ref: "T-0005", text: "手机上也正常，截图附上" },
+      { id: "e12", ts: ts(12), from: "hub", kind: "system", ref: "T-0005", text: "收到，已补充到 T-0005" },
+    ];
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, said), width: 1200, height: 800, platform: "macos" });
+    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.waitFor("id:task-talk");
+    expect(app.shows("text:登录页在手机上也看一下")).toBe(true);
+    expect(app.shows("text:手机上也正常，截图附上")).toBe(true);
+    await app.type("id:task-composer", "再看下 iPad");
+    await app.press("id:task-send");
+    await app.waitUntil(() => posts.length === 1);
+    expect(posts[0]).toEqual({ text: "再看下 iPad", reply_to: "T-0005" });
+    await app.waitUntil(() => app.value("id:task-composer") === "");
+    await app.waitFor("text:再看下 iPad");
+  });
+
+    test("a decision's PR references are links, host-lettered ids are chips, option buttons shorten PR links", async () => {
     const app = await open("./App.tsx", { storage: STORAGE, network: hub([], [prDecision]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:/D-H0002/");
     expect(app.shows("id:gh-chip-nsh-747")).toBe(false);
@@ -236,6 +256,25 @@ describe("channel", () => {
     // the sidebar drops it at once, before the hub's status catches up
     expect(app.shows("text:要不要升级依赖？")).toBe(true);
     await app.waitUntil(() => !app.shows("text:要不要升级依赖？"));
+  });
+
+  test("replies to an agent's message: the reply names its task and quotes it", async () => {
+    const posts: { text: string; reply_to?: string }[] = [];
+    const kai = { id: "e9", ts: ts(9), from: "Kai@lb", kind: "notice", ref: "T-0125", text: "nsh #812 主要修的是文字排版\n细节在 PR 里" };
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, [kai]), width: 1200, height: 800, platform: "macos" });
+    await app.waitFor("id:reply-e9");
+    expect(app.shows("id:reply-e1")).toBe(false); // a message with no task can't be replied to
+    await app.hover("text:/主要修的是文字排版/");
+    await app.press("id:reply-e9");
+    await app.waitFor("id:reply-chip");
+    expect(app.shows("text:回复 Kai：nsh #812 主要修的是文字排版")).toBe(true);
+    await app.type("id:composer", "为何我看图片不清晰呢");
+    await app.press("id:send");
+    await app.waitUntil(() => posts.length === 1, { timeout: 10_000 });
+    expect(posts[0]).toEqual({ text: "为何我看图片不清晰呢", reply_to: "T-0125" });
+    expect(app.shows("id:reply-chip")).toBe(false);
+    await app.waitFor("id:reply-to-T-0125");
+    expect(app.shows("text:/Kai：nsh #812 主要修的是文字排版/")).toBe(true);
   });
 
   test("a question can be ignored from its card or from the sidebar", async () => {
@@ -328,6 +367,29 @@ describe("channel", () => {
     app.onDialog((d) => (d.title === "更新所有机器？" ? "更新" : null));
     await app.press("id:update-fleet");
     await app.waitUntil(() => updates === 1);
+  });
+
+  test("while an update runs, each machine shows its progress and the button waits", async () => {
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const mk = (state: string, detail?: string) => ({ at, ts: new Date().toISOString(), state, detail });
+    const hosts = [
+      { ...status.hosts[0], update: mk("waiting", "等 1 个任务跑完后重启") },
+      { ...status.hosts[0], host: "mac-mini", update: mk("done", "abc1234") },
+      { ...status.hosts[0], host: "old-box", update: undefined },
+      { ...status.hosts[0], host: "win-box", update: mk("failed", "有本地改动或测试没通过，仍在运行旧代码") },
+    ];
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: { ...hub([]), [`GET ${URL}/api/settings`]: { status: 500 }, [`GET ${URL}/api/status`]: { body: { ...status, hosts, update: { at } } } },
+    });
+    await app.press("id:settings");
+    await app.press("id:settings-tab-version");
+    await app.waitFor("等 1 个任务跑完后重启…");
+    expect(app.shows("已更新到 abc1234")).toBe(true);
+    expect(app.shows("等待响应…")).toBe(true);
+    expect(app.shows("更新失败：有本地改动或测试没通过，仍在运行旧代码")).toBe(true);
+    expect(app.shows("正在更新 · 1/4 完成 · 1 台有问题")).toBe(true);
+    expect(app.shows("正在更新…")).toBe(true);
   });
 
   test("sends a task with the button, and the drawer opens on phones", async () => {
@@ -488,7 +550,7 @@ describe("team settings", () => {
       effective: {
         agents: [{ id: "reporter", clis: ["codex", "claude"], autonomy: "onboarding" }],
         autonomy: "onboarding",
-        routines: [{ name: "triage-inbound", every: "30m", agent: "lead", enabled: true }],
+        routines: [{ name: "triage-inbound", desc: "扫描收件箱", every: "30m", agent: "lead", enabled: true }],
         max_parallel: 4,
       },
       options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
@@ -519,7 +581,10 @@ describe("team settings", () => {
     await app.press("id:autonomy-reporter");
     await app.press("id:autonomy-reporter-assisted");
     await app.press("id:settings-tab-routines");
+    await app.waitFor("text:扫描收件箱");
+    await app.waitFor("text:每 30 分钟");
     await app.press("id:routine-triage-inbound");
+    await app.press("id:every-triage-inbound");
     await app.press("id:every-triage-inbound-1h");
     await app.press("id:settings-tab-parallel");
     await app.press("id:parallel-inc");
@@ -534,6 +599,34 @@ describe("team settings", () => {
     await app.waitFor("text:5");
     await app.press("label:返回频道");
     await app.waitFor("id:composer");
+  });
+
+  test("picks how long images are kept", async () => {
+    const puts: unknown[] = [];
+    let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2 }, options: { clis: [], autonomy: [] } };
+    const app = await open("./App.tsx", {
+      storage: STORAGE,
+      width: 1200,
+      height: 800,
+      platform: "macos",
+      network: {
+        ...hub([]),
+        [`GET ${URL}/api/settings`]: () => ({ body: view }),
+        [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
+          const p = JSON.parse(r.body!);
+          puts.push(p);
+          view = { ...view, current: { ...view.current, ...p } };
+          return { body: view };
+        },
+      },
+    });
+    await app.press("id:settings");
+    await app.press("id:settings-tab-storage");
+    await app.waitFor("id:media-days-90");
+    await app.press("id:media-days-30");
+    await app.waitUntil(() => puts.length === 1);
+    expect(puts).toEqual([{ media_days: 30 }]);
+    expect(app.shows("text:14 天")).toBe(true);
   });
 });
 
@@ -670,77 +763,44 @@ describe("notifications", () => {
 });
 
 describe("voice input", () => {
-  /** The browser's speech recognition host.js wraps, played by the test: it answers, the test sends what it hears. */
-  const recognizer = (supported = true) => ({
-    page: { origin: URL },
-    setSession: {},
-    setBadge: {},
-    clearNotifications: {},
-    speechState: { supported },
-    speechStart: {},
-    speechStop: {},
-    speechAbort: {},
-  });
-  const called = (app: Awaited<ReturnType<typeof open>>, name: string) => app.host.calls().filter((c) => c.name === name);
-
   test("the microphone dictates into the composer until pressed again; nothing is sent", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, host: { handlers: recognizer() }, network: hub(posts), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("label:语音输入");
     await app.type("id:composer", "提醒我：");
     await app.press("label:语音输入");
-    await app.waitUntil(() => called(app, "speechStart").length === 1);
-    expect(called(app, "speechStart")[0].data).toEqual({ lang: "zh-CN" });
+    await app.waitUntil(() => app.speechRequests().length === 1);
+    expect(app.speechRequests()[0].lang).toBe("zh-CN");
     await app.waitFor("label:停止语音输入");
     expect(app.shows("text:正在听…")).toBe(true);
 
     // interim results replace each other; the words land after what was typed
-    await app.host.send("speech", { text: "明天" });
-    await app.waitUntil(() => app.value("id:composer") === "提醒我：明天");
-    await app.host.send("speech", { text: "明天上午开会" });
-    await app.waitUntil(() => app.value("id:composer") === "提醒我：明天上午开会");
+    await app.hear("明天");
+    expect(app.value("id:composer")).toBe("提醒我：明天");
+    await app.hear("明天上午开会");
+    expect(app.value("id:composer")).toBe("提醒我：明天上午开会");
 
     await app.press("label:停止语音输入");
-    await app.waitUntil(() => called(app, "speechStop").length === 1);
-    await app.host.send("speech", { text: "明天上午开会。" }); // the last words, heard as it stops
-    await app.host.send("speechEnd", {});
     await app.waitFor("label:语音输入");
-    expect(app.value("id:composer")).toBe("提醒我：明天上午开会。");
+    expect(app.value("id:composer")).toBe("提醒我：明天上午开会");
     expect(app.shows("id:dictating")).toBe(false);
     expect(posts).toEqual([]);
-
-    // a later result of no dictation changes nothing
-    await app.host.send("speech", { text: "别的" });
-    expect(app.value("id:composer")).toBe("提醒我：明天上午开会。");
   });
 
   test("sending while listening stops it; a refused microphone is explained", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, host: { handlers: recognizer() }, network: hub([]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
     await app.press("label:语音输入");
-    await app.host.send("speech", { text: "看一下日志" });
-    await app.waitUntil(() => app.value("id:composer") === "看一下日志");
+    await app.hear("看一下日志");
+    expect(app.value("id:composer")).toBe("看一下日志");
     await app.press("id:send");
-    await app.waitUntil(() => called(app, "speechAbort").length === 1);
     await app.waitFor("label:语音输入");
-    await app.host.send("speech", { text: "看一下日志吧" });
     expect(app.value("id:composer")).toBe("");
 
     await app.press("label:语音输入");
-    await app.host.send("speechEnd", { error: "not-allowed" });
+    await app.endSpeech("not-allowed");
     await app.waitFor("id:attach-note");
-    expect(app.shows("text:/没有麦克风权限/")).toBe(true);
+    expect(app.shows("text:/没有麦克风或语音识别权限/")).toBe(true);
     expect(app.shows("label:停止语音输入")).toBe(false);
-  });
-
-  test("no microphone button where the page cannot recognize speech", async () => {
-    const unsupported = await open("./App.tsx", { storage: STORAGE, host: { handlers: recognizer(false) }, network: hub([]) });
-    await unsupported.waitFor("id:composer");
-    await unsupported.waitUntil(() => called(unsupported, "speechState").length === 1);
-    expect(unsupported.shows("id:dictate")).toBe(false);
-
-    const native = await open("./App.tsx", { storage: STORAGE, network: hub([]) });
-    await native.waitFor("id:composer");
-    expect(native.shows("id:dictate")).toBe(false);
   });
 });
 
