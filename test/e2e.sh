@@ -14,6 +14,9 @@ p=$(cat)
 if grep -q "You are the owner.s JUDGE" <<<"$p"; then echo '```json
 {"verdict":"hold","reason":"new taste call"}
 ```'; exit; fi
+if grep -q "You place tasks for an AI agent fleet" <<<"$p"; then
+  echo '```json'; grep -oE '^- T-[0-9]+' <<<"$p" | sed 's/^- //' | awk 'BEGIN{printf "{"} {printf "%s\"%s\": {\"requires\": \"\", \"cli\": \"claude\", \"difficulty\": \"normal\"}", (NR>1?",":""), $0} END{print "}"}'; echo '```'; exit
+fi
 if grep -q "Decision D-" <<<"$p"; then echo '```json
 {"status":"done","summary":"followed owner decision"}
 ```'
