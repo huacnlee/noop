@@ -24,7 +24,7 @@ import {
   untracked,
   Video,
   View,
-  windowSize, token, openUrl, keyboardFrame, Picker } from "nsh";
+  windowSize, token, openUrl, keyboardFrame, Picker, Clipboard } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ViewStyle } from "nsh";
 import { AlertDialog, ContextMenu, Dialog, Menu, MenuItem, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
@@ -762,13 +762,42 @@ function askLine(text: string): string {
   return (text.split("\n").find((l) => l.trim()) ?? "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*`_]/g, "").replace(/\\$/, "").trim();
 }
 
+/** A message's quick actions under it (like ChatGPT's): copy its text, reply to what it is about. Shown on hover
+ * on a desktop, always on a phone (no hover there). */
+function MsgActions(props: { text: string; show: () => boolean; onReply?: () => void; align?: "flex-start" | "flex-end"; id: string }) {
+  const copied = signal(false);
+  let t: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(t));
+  const copy = () => {
+    void Clipboard.writeText(props.text.trim()).then(() => {
+      copied.set(true);
+      clearTimeout(t);
+      t = setTimeout(() => copied.set(false), 1500);
+    }, () => {});
+  };
+  const btn = { width: 28, height: 28, borderRadius: 6, alignItems: "center", justifyContent: "center", cursor: "pointer" } as const;
+  return (
+    <View style={{ flexDirection: "row", alignSelf: props.align ?? "flex-start", gap: 2, height: 28, marginLeft: props.align === "flex-end" ? 0 : -6, opacity: props.show() || copied() ? 1 : 0, transitionProperty: "opacity", transitionDuration: 120 }}>
+      <View role="button" testID={`copy-${props.id}`} accessibilityLabel={copied() ? "已复制" : "复制"} tooltip={<Tip label="复制" />} onPress={copy} hoverStyle={hovered()} style={btn}>
+        <Icon name={copied() ? "check" : "copy"} size={15} tint={colors.muted} />
+      </View>
+      <If when={props.onReply}>
+        <View role="button" testID={`reply-${props.id}`} accessibilityLabel="回复" tooltip={<Tip label="回复" />} onPress={() => props.onReply?.()} hoverStyle={hovered()} style={btn}>
+          <Icon name="reply" size={15} tint={colors.muted} />
+        </View>
+      </If>
+    </View>
+  );
+}
+
 function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry?: () => void; onUndo?: () => void; onRef?: (ref: string) => void }) {
   const e = props.event;
   // an answer sent from the sidebar or a card ("D-0015 忽略") names its card in the text, not in `ref`
   const ref = e.ref ?? e.text.match(/^([DLP]-[A-Z]?\d{4}) \S/)?.[1];
+  const over = signal(false);
   const asked = () => (ref ? askLine(props.hub.events().find((x) => x.ref === ref && isAsk(x))?.text ?? "") || (props.hub.status()?.decisions.find((d) => d.id === ref)?.question ?? "") : "");
   return (
-    <View style={{ flexDirection: "row", justifyContent: "flex-end", paddingVertical: 8 }}>
+    <View style={{ flexDirection: "row", justifyContent: "flex-end", paddingVertical: 8 }} onMouseEnter={() => over.set(true)} onMouseLeave={() => over.set(false)}>
       <View style={{ maxWidth: "82%", alignItems: "flex-end", gap: 4 }}>
         {/* what this answers, quoted above the bubble (press: back to the card) */}
         <If when={ref}>
@@ -809,7 +838,14 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
         </If>
         <If
           when={props.out}
-          else={<Text style={{ fontSize: size.tiny, color: colors.faint }}>{timeOf(e.ts)}</Text>}
+          else={
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <If when={e.text.trim()}>
+                <MsgActions id={e.id} text={/^[DLP]-[A-Z]?\d{4} \S/.test(e.text) && !e.text.includes("\n") ? answerText(e.text) : e.text} show={() => touch || over()} align="flex-end" />
+              </If>
+              <Text style={{ fontSize: size.tiny, color: colors.faint }}>{timeOf(e.ts)}</Text>
+            </View>
+          }
         >
           <If when={props.out?.state === "held"}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -857,6 +893,7 @@ function Message(props: {
   const done = () => !!e.ref && props.answered().has(e.ref);
   const targeted = () => ask && !done() && props.target() === e.ref;
   const rec = recommended(e);
+  const over = signal(false);
   if (isHub(e.from) && !ask && e.kind === "system" && !e.attachments?.length)
     return (
       <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, paddingVertical: 4, paddingLeft: 50 }} ref={(r) => props.cardRef?.(r)}>
@@ -865,7 +902,7 @@ function Message(props: {
       </View>
     );
   return (
-    <View style={{ flexDirection: "row", gap: 14, paddingVertical: 10 }} ref={(r) => props.cardRef?.(r)}>
+    <View style={{ flexDirection: "row", gap: 14, paddingVertical: 10 }} ref={(r) => props.cardRef?.(r)} onMouseEnter={() => over.set(true)} onMouseLeave={() => over.set(false)}>
       <Avatar from={e.from} />
       <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 22 }}>
@@ -922,6 +959,9 @@ function Message(props: {
         ) : (
           body
         )}
+        <If when={e.text.trim()}>
+          <MsgActions id={e.id} text={e.text} show={() => touch || over()} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!) : undefined} />
+        </If>
       </View>
     </View>
   );

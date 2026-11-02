@@ -251,6 +251,25 @@ describe("channel", () => {
     expect(app.value("id:composer")).toBe("");
   });
 
+  test("a message's quick actions copy its text and reply to its task", async () => {
+    const posts: { text: string; reply_to?: string }[] = [];
+    const done = { id: "e8", ts: ts(8), from: "lead@mac", kind: "notice", ref: "T-0009", text: "T-0009 已完成，PR 已开" };
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, [done]), width: 1200, height: 800, platform: "macos" });
+    await app.waitFor("id:copy-e8");
+    await app.hover("text:/已完成，PR 已开/");
+    await app.press("id:copy-e8");
+    await app.waitUntil(() => app.clipboard() === "T-0009 已完成，PR 已开");
+    await app.waitFor("label:已复制");
+    // an open question answers through its card, so it has no reply action
+    expect(app.shows("id:reply-e2")).toBe(false);
+    await app.press("id:reply-e8");
+    await app.waitFor("回复 T-0009");
+    await app.type("id:composer", "再加个截图");
+    await app.keyboard.press("mod+enter");
+    await app.waitUntil(() => posts.length === 1);
+    expect(posts[0]).toEqual({ text: "再加个截图", reply_to: "T-0009" });
+  });
+
   test("a machine in the sidebar opens its page, and its tasks open theirs", async () => {
     const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("团队频道");

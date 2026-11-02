@@ -32,7 +32,7 @@ const sockets = new Set<ServerWebSocket<unknown>>();
 type Inbound = { id: string; answer: string; source: string };
 const inbound: Inbound[] = [];
 /** The owner's chat request becomes a task: a new one, or (with its title) the open task it continues. */
-type OwnerTask = (text: string) => Promise<{ id: string; title?: string; follows?: string }>;
+type OwnerTask = (text: string, replyTo?: string) => Promise<{ id: string; title?: string; follows?: string }>;
 let ownerTask: OwnerTask | null = null;
 
 const today = () => new Date().toLocaleDateString("sv-SE");
@@ -306,7 +306,7 @@ export async function handleOwnerMessage(
     followUp.at = Date.now();
     appendEvent({ from: "hub", kind: "system", text: `已补充到 ${followUp.tid}`, ref: followUp.tid });
   } else if (ownerTask) {
-    const { id: tid, title, follows } = await ownerTask(text);
+    const { id: tid, title, follows } = await ownerTask(text, reply_to && /^T-[A-Z]?\d{4}$/.test(reply_to) ? reply_to : undefined);
     followUp = { tid, at: Date.now() };
     appendEvent(title
       ? { from: "hub", kind: "system", text: `收到，这是 ${tid}「${title}」的后续，已补充进去，Kai 接着处理。`, ref: tid }

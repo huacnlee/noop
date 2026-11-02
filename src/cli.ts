@@ -617,10 +617,14 @@ async function daemon(cfg: Cfg) {
     await _commitPush(`[${host}] cancel ${tid}`);
     return "cancelled";
   }));
-  if (isPrimary(cfg, host)) startServer(cfg, async (text) => {
+  if (isPrimary(cfg, host)) startServer(cfg, async (text, replyTo) => {
     // Same work as an open task? Add the message to it instead of opening a duplicate.
     const chat = recentChat(text);
-    const { same, follows } = await relatedTask(text, cfg, chat).catch(() => ({ same: null, follows: null }));
+    // replying to a task's message names the task: no guessing
+    const replied = replyTo && ["inbox", "active", "waiting"].some((d) => existsSync(P("tasks", d, `${replyTo}.md`)));
+    const { same, follows } = replyTo
+      ? { same: replied ? replyTo : null, follows: replied ? null : replyTo }
+      : await relatedTask(text, cfg, chat).catch(() => ({ same: null, follows: null }));
     const title = same ? await appendFollowUp(same, text) : "";
     if (same && title) return { id: same, title };
     return locked(async () => {
