@@ -50,7 +50,7 @@ enabled = false
 F
 # judge uses 'claude' binary directly → shim PATH
 mkdir -p "$W/bin"; ln -s "$W/fake-agent" "$W/bin/claude"; export PATH="$W/bin:$PATH"
-sed -i 's/^\[\[routine\]\]/[[routine_disabled]]/' config.toml
+sed -i.bak 's/^\[\[routine\]\]/[[routine_disabled]]/' config.toml && rm config.toml.bak
 hub add "plain task" -a rust-maintainer >/dev/null
 hub add "ASKME task" -a release-manager >/dev/null
 hub add "mac only" -r os:macos >/dev/null
