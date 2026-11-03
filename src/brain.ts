@@ -40,31 +40,32 @@ export function localStore(o: { acts: Acts; status: () => any; feed: () => { ts:
 }
 
 /** Writes that only touch task metadata or memory files: done right here (git-synced data repo). */
-export function dataActs(host: string): Acts {
+export function dataActs(host: string, io = { pull: _pull, push: _commitPush }): Acts {
+  const pull = () => io.pull(), push = (m: string) => io.push(m);
   const findTask = (id: string, dirs: string[]) => dirs.map((d) => P("tasks", d, `${id}.md`)).find(existsSync);
   return {
     set_priority: (op) => locked(async () => {
-      await _pull();
+      await pull();
       const f = findTask(op.id, ["inbox", "active", "waiting", "blocked"]);
       if (!f) return { ok: false, error: `${op.id} is not open` };
       const { meta, body } = readDoc(f);
       writeDoc(f, { ...meta, priority: op.priority }, body);
       journal(host, `↕️ ${op.id} priority → ${op.priority} (owner chat)`);
-      await _commitPush(`[${host}] priority ${op.id} ${op.priority}`);
+      await push(`[${host}] priority ${op.id} ${op.priority}`);
       return { ok: true, id: op.id, priority: op.priority };
     }),
     reassign_task: (op) => locked(async () => {
-      await _pull();
+      await pull();
       const f = findTask(op.id, ["inbox", "waiting", "blocked"]);
       if (!f) return { ok: false, error: `${op.id} is not queued, waiting or blocked` };
       const { meta, body } = readDoc(f);
       writeDoc(f, { ...meta, agent: op.agent }, `${body}\n\n## Reassigned ${now()}\nThe owner gave this task to ${op.agent} (was ${meta.agent ?? "?"}).\n`);
       journal(host, `🔀 ${op.id} reassigned ${meta.agent ?? "?"} → ${op.agent} (owner chat)`);
-      await _commitPush(`[${host}] reassign ${op.id} ${op.agent}`);
+      await push(`[${host}] reassign ${op.id} ${op.agent}`);
       return { ok: true, id: op.id, agent: op.agent };
     }),
     remember: (op) => locked(async () => {
-      await _pull();
+      await pull();
       const f = P(...op.file.split("/"));
       mkdirSync(join(f, ".."), { recursive: true });
       const line = `- ${op.text.replace(/\s*\n\s*/g, " ")} _(owner, ${now().slice(0, 10)}, via chat)_\n`;
@@ -72,7 +73,7 @@ export function dataActs(host: string): Acts {
       if (prev.includes(op.text.trim())) return { ok: true, file: op.file, note: "already there" };
       writeFileSync(f, prev && !prev.endsWith("\n") ? `${prev}\n${line}` : prev + line);
       journal(host, `🧠 remembered in ${op.file}: ${op.text.slice(0, 80)}`);
-      await _commitPush(`[${host}] memory ${op.file}`);
+      await push(`[${host}] memory ${op.file}`);
       return { ok: true, file: op.file };
     }),
   };

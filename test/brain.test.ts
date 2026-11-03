@@ -24,7 +24,7 @@ function store() {
   const st = localStore({
     status: () => ({ hosts: [{ host: "h1", online: true }], decisions: [{ id: "D-0099" }], tasks: { active: 1 } }),
     feed: () => [{ id: "e1", ts: "2026-11-03T10:00:00Z", from: "lead", kind: "notice", text: "T-0184 tests pass" }],
-    acts: { ...dataActs("pc"), create_task: rec, amend_task: rec, cancel_task: rec, answer_decision: rec },
+    acts: { ...dataActs("pc", { pull: async () => true, push: async () => true }), create_task: rec, amend_task: rec, cancel_task: rec, answer_decision: rec },
   });
   return { st, did };
 }
