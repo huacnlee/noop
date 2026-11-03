@@ -16,7 +16,7 @@
 // MCP (Claude / ChatGPT connectors): /mcp + OAuth 2.1 at /oauth/* and /.well-known/oauth-* — see mcp.ts and docs/mcp.md.
 // Every other /api/* and /media/* needs Bearer <HUB_TOKEN|session> (or ?token= for WebSocket / <img>).
 import { DurableObject } from "cloudflare:workers";
-import { handleFiles, handleReadFiles, initFilesSchema } from "./files";
+import { b64dec, b64enc, handleFiles, handleReadFiles, initFilesSchema } from "./files";
 import { ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
 import { sendMail, type SmtpCfg } from "./smtp";
 import { EmailMessage } from "cloudflare:email";
@@ -386,7 +386,35 @@ export class Hub extends DurableObject<Env> {
       this.sql.exec("DELETE FROM push_subs");
       return json({ ok: true, revoked: n });
     }
-
+    // Moving the hub to another Cloudflare account, one page at a time (media blobs are large):
+    //   GET /api/host/export → {tables: {name: rows}} · GET /api/host/export?table=t&offset=0&limit=50 → {rows}
+    //   POST /api/host/import {table, rows, reset} (reset empties the table first)
+    if (p === "/api/host/export" && m === "GET") {
+      if (who !== "machine") return json({ error: "forbidden" }, 403);
+      const t = url.searchParams.get("table");
+      const names = this.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'").toArray().map((r) => r.name as string);
+      if (!t) return json({ tables: Object.fromEntries(names.map((n) => [n, this.sql.exec(`SELECT COUNT(*) AS n FROM "${n}"`).one().n])) });
+      if (!names.includes(t)) return json({ error: "no such table" }, 404);
+      const offset = Number(url.searchParams.get("offset") ?? 0), limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 1000);
+      const rows = this.sql.exec(`SELECT * FROM "${t}" ORDER BY rowid LIMIT ? OFFSET ?`, limit, offset).toArray().map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) =>
+        [k, v instanceof ArrayBuffer ? { $b64: b64enc(new Uint8Array(v)) } : v])));
+      return json({ rows });
+    }
+    if (p === "/api/host/import" && m === "POST") {
+      if (who !== "machine") return json({ error: "forbidden" }, 403);
+      const { table: t, rows, reset } = (await req.json()) as { table: string; rows: Record<string, unknown>[]; reset?: boolean };
+      const known = new Set(this.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'").toArray().map((r) => r.name as string));
+      if (!known.has(t)) return json({ error: "no such table" }, 404);
+      this.ctx.storage.transactionSync(() => {
+        if (reset) this.sql.exec(`DELETE FROM "${t}"`);
+        for (const r of rows) {
+          const cols = Object.keys(r);
+          const vals = cols.map((c) => { const v = r[c] as any; return v && typeof v === "object" && "$b64" in v ? b64dec(v.$b64) : v; });
+          this.sql.exec(`INSERT OR REPLACE INTO "${t}" (${cols.map((c) => `"${c}"`).join(",")}) VALUES (${cols.map(() => "?").join(",")})`, ...vals);
+        }
+      });
+      return json({ ok: true, n: rows.length });
+    }
     if (p === "/api/stream") {
       if (req.headers.get("upgrade") !== "websocket") return json({ error: "websocket expected" }, 426);
       const [client, server] = Object.values(new WebSocketPair());

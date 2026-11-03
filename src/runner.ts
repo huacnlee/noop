@@ -41,7 +41,8 @@ export function buildPrompt(meta: Record<string, string>, body: string, cfg: Cfg
   const agent = meta.agent || "lead";
   const host = meta.claimed_by || "?";
   return `You are **${agentName(agent)}**, a permanent member of ${cfg.owner?.name ?? "the owner"}'s AI agent fleet, running headless on host \`${host}\`.
-The fleet coordinates through the shared hub repository at ${ROOT} (tasks/, journal/, decisions/, agents/). Read it when you need context; you do not message other agents — you leave traces (commits, journal lines, follow-up tasks) that they pick up.
+The fleet coordinates through the shared hub folder at ${ROOT} (tasks/, journal/, decisions/, agents/). Read it when you need context; you do not message other agents — you leave traces (commits in project repos, journal lines, follow-up tasks) that they pick up.
+The hub folder is not a git repository: files you write there (reports/, memory) are synced to the cloud by the daemon after your run. Never git add/commit them, and never report a task as failed because the hub has no git metadata.
 
 # Your profile
 ${readIf(P("agents", agent, "profile.md"))}
@@ -179,8 +180,9 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
     return all;
   };
 
-  let stalled = false;
-  const timer = setTimeout(() => proc.kill(), timeoutMs);
+  let stalled = false, timedOut = false;
+  // hitting the run limit is not a tooling fault: report it like a stall so the task continues where it got to
+  const timer = setTimeout(() => { timedOut = true; proc.kill(); }, timeoutMs);
   // a run that has gone quiet: no output at all, and nothing slow in flight (a sub-agent may work quietly for long)
   const watch = setInterval(() => {
     const slow = [...inFlight.values()].some((n) => /^(Task|Agent)$/.test(n));
@@ -194,6 +196,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   mkdirSync(P("logs", "runs"), { recursive: true });
   writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${raw}\n\n[stderr]\n${err}`);
   const out = json ? (resultText ?? assistantText) : raw;
+  if (timedOut) return `${out}${STALLED} hit the ${Math.round(timeoutMs / 60_000)}-minute run limit (clis.timeout_minutes)${act.step ? `; last step: ${act.step}` : ""}; run long builds in the background and return "waiting"`;
   if (stalled) return `${out}${STALLED} no output for ${Math.round(stallMs / 60_000)} minutes${act.step ? `; last step: ${act.step}` : ""}`;
   return out + (code ? `\n[exit ${code}] ${err.slice(-2000)}` : "");
 }
