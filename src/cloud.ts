@@ -132,7 +132,10 @@ export async function cloudDeploy(cfg: Cfg) {
   const fail = (why: string) => { lastDeployError = why; console.log(why); return false as const; };
   const dir = join(CODE, "cloud");
   const wr = ["bunx", "wrangler"];
-  const who = await $`${wr} whoami`.cwd(dir).quiet().nothrow();
+  // a login with several accounts can't deploy non-interactively: [cloud] account (or CLOUDFLARE_ACCOUNT_ID) picks one
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID || cfg.cloud?.account;
+  const env = { ...process.env, ...(account ? { CLOUDFLARE_ACCOUNT_ID: account } : {}) };
+  const who = await $`${wr} whoami`.cwd(dir).env(env).quiet().nothrow();
   if (!/logged in/i.test(who.stdout.toString())) {
     return fail("先登录你自己的 Cloudflare 账号（免费版即可）：\n  bunx wrangler login\n然后重新运行：hub cloud deploy");
   }
@@ -140,7 +143,7 @@ export async function cloudDeploy(cfg: Cfg) {
   if (!existsSync(join(CODE, "app", "dist", "web", "noop", "index.html"))) console.log("提示：客户端网页还没构建，Worker 只提供接口");
   const name = cfg.cloud?.name ?? "noop";
   console.log(`部署到你的 Cloudflare 账号（Worker：${name}）…`);
-  const dep = await $`${wr} deploy --name ${name}`.cwd(dir).quiet().nothrow();
+  const dep = await $`${wr} deploy --name ${name}`.cwd(dir).env(env).quiet().nothrow();
   const out = dep.stdout.toString() + dep.stderr.toString();
   if (dep.exitCode !== 0) return fail(out.slice(-1500));
   const url = out.match(/https:\/\/[\w.-]+\.workers\.dev/)?.[0];
@@ -157,11 +160,11 @@ export async function cloudDeploy(cfg: Cfg) {
   secrets.HUB_VAPID_PUBLIC = vapid.publicKey;
   secrets.HUB_VAPID_PRIVATE = JSON.stringify(vapid.privateJwk);
   // `secret bulk` reads JSON from stdin — values never touch argv or the console.
-  const sec = Bun.spawn([...wr, "secret", "bulk", "--name", name], { cwd: dir, stdin: new Blob([JSON.stringify(secrets)]), stdout: "pipe", stderr: "pipe" });
+  const sec = Bun.spawn([...wr, "secret", "bulk", "--name", name], { cwd: dir, env, stdin: new Blob([JSON.stringify(secrets)]), stdout: "pipe", stderr: "pipe" });
   if ((await sec.exited) !== 0) return fail("设置 Worker 密钥失败：\n" + (await new Response(sec.stderr).text()).slice(-800));
   if (!url) return fail("部署成功，但没识别到地址；请把 workers.dev 地址写进 config.toml 的 [cloud] url");
   // ---- record the URL (machine-local noop.toml first: the data sync itself goes through this Worker)
-  writeHubToml({ cloud: { url, name } });
+  writeHubToml({ cloud: { url, name, ...(account ? { account } : {}) } });
   await locked(async () => {
     await _pull();
     const f = P("config.toml");
