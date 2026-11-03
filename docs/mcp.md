@@ -30,6 +30,17 @@ Open the session's SSE stream (`GET /mcp`, which clients do on their own) and yo
 - `notifications/resources/updated` for subscribed resources: a task's file changing or an event mentioning it
   (`noop://tasks/T-…`), the fleet snapshot (`noop://status`), decisions (`noop://decisions`), any event (`noop://feed`).
 
+- `notifications/resources/list_changed` when the set of open tasks or decisions changes (re-run `resources/list`).
+
+Transport details (Streamable HTTP, revisions 2025-06-18 and 2025-11-25):
+
+- Every SSE message has an `id` (`<stream>.<seq>`); reconnect with `Last-Event-ID` to replay what you missed on that
+  stream (kept 15 minutes / 500 messages per stream). Streams send a `retry:` hint and `: ping` keep-alives every 15 s.
+- `tools/call` with `_meta.progressToken` (and `wait_for_events`) answers as `text/event-stream` when you accept it:
+  `notifications/progress`, then the result. `notifications/cancelled` aborts the call and no result is sent.
+- Every request after `initialize` needs `Mcp-Session-Id` (400 without it). Unknown, deleted or 24 h idle sessions get
+  404, so the client initializes again. An unsupported `MCP-Protocol-Version` gets 400.
+
 Clients that drop notifications (most chat UIs today) can call `wait_for_events` with the `cursor` from `get_feed`.
 
 ## Sign-in
