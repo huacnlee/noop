@@ -19,8 +19,10 @@
 //   GET|POST /oauth/authorize (email-code sign-in page) · POST /oauth/token (authorization_code, refresh_token)
 // Never exposed: merge, release, settings, machine credentials.
 
+import { type Ev, type FileRow, type ToolStore, type WriteOp, DECISION_ID, TASK_ID, feedView, getTask, listDecisions, listTasks, runTool, statusView, toolsFor } from "./tools";
+export { parseDoc, listTasks, getTask, listDecisions } from "./tools";
+
 export interface McpSql { exec(query: string, ...bindings: any[]): { toArray(): any[] } }
-type Ev = { id: string; ts: string; from: string; kind: string; text: string; ref?: string; [k: string]: unknown };
 
 /** What the MCP layer needs from the Hub Durable Object. */
 export interface McpHost {
@@ -30,6 +32,10 @@ export interface McpHost {
   events(after: number, limit: number): { seq: number; ev: Ev }[];
   /** Same as POST /api/messages from the owner. */
   say(text: string, ref?: string): Ev;
+  /** Hands a write to the primary daemon (owner→fleet inbox), which performs it on the data repo. */
+  enqueue(op: WriteOp): void;
+  /** Is the primary daemon connected? (writes queue until it is) */
+  hostOnline?(): boolean;
   /** Email-code sign-in, reused from /api/auth/*. */
   startCode(email: string): Promise<{ status: number; body: any }>;
   /** Checks the code; on success returns the email (no browser session is created). */
@@ -43,8 +49,6 @@ export const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26"];
 const SERVER_INFO = { name: "noop", title: "noop", version: "1.0.0" };
 const LEVELS = ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"];
 const OAUTH_CODE_TTL = 5 * 60_000;
-const TASK_STATES = ["inbox", "active", "waiting", "blocked", "failed", "done"] as const;
-const TASK_ID = /^T-[\w-]*\d{4}$/, DECISION_ID = /^[DP]-[\w]*\d{4}$/;
 
 export const CORS = {
   "access-control-allow-origin": "*",
@@ -71,96 +75,19 @@ export function initMcpSchema(sql: McpSql) {
   }
 }
 
-// ---------------------------------------------------------------- hub data views (files table mirrors ~/.agent-hub/data)
+// ---------------------------------------------------------------- hub data (files table mirrors ~/.agent-hub/data)
 
-/** `---\nk: v\n---\nbody` → {meta, body}. */
-export function parseDoc(text: string): { meta: Record<string, string>; body: string } {
-  const m = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!m) return { meta: {}, body: text };
-  const meta: Record<string, string> = {};
-  for (const line of m[1].split("\n")) { const i = line.indexOf(":"); if (i > 0) meta[line.slice(0, i).trim()] = line.slice(i + 1).trim(); }
-  return { meta, body: m[2] };
-}
 const textOf = (c: unknown) => typeof c === "string" ? c : new TextDecoder().decode(c instanceof ArrayBuffer ? new Uint8Array(c) : c as Uint8Array);
-
-function readFile(sql: McpSql, path: string) {
+export function readFile(sql: McpSql, path: string): FileRow | null {
   const r = sql.exec("SELECT content, updated FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
-  return r ? { text: textOf(r.content), updated: r.updated as string } : null;
+  return r ? { path, text: textOf(r.content), updated: r.updated as string } : null;
 }
-function listDir(sql: McpSql, dir: string) {
+function listDir(sql: McpSql, dir: string): FileRow[] {
   return sql.exec("SELECT path, content, updated FROM files WHERE path >= ? AND path < ? AND deleted = 0 ORDER BY path DESC LIMIT 2000",
     dir, dir.slice(0, -1) + "0").toArray().map((r) => ({ path: r.path as string, text: textOf(r.content), updated: r.updated as string }));
 }
 
-type TaskRow = { id: string; title: string; state: string; agent?: string; host?: string; priority?: string; repo?: string; created?: string; updated?: string };
-const taskRow = (path: string, text: string, updated: string): TaskRow => {
-  const { meta } = parseDoc(text);
-  return { id: meta.id || path.split("/").pop()!.replace(/\.md$/, ""), title: meta.title ?? "", state: path.split("/")[1],
-    agent: meta.agent, host: meta.claimed_by || meta.host, priority: meta.priority, repo: meta.repo, created: meta.created, updated };
-};
-export function listTasks(sql: McpSql, state = "open", query = "", limit = 50): TaskRow[] {
-  const states = state === "all" ? TASK_STATES : state === "open" ? TASK_STATES.filter((s) => s !== "done" && s !== "failed") : [state];
-  const q = query.toLowerCase();
-  return states.flatMap((s) => listDir(sql, `tasks/${s}/`).filter((f) => /\/T-[^/]*\.md$/.test(f.path)).map((f) => taskRow(f.path, f.text, f.updated)))
-    .filter((t) => !q || `${t.id} ${t.title} ${t.repo ?? ""} ${t.agent ?? ""}`.toLowerCase().includes(q))
-    .sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? "")).slice(0, Math.max(1, Math.min(limit, 200)));
-}
-export function getTask(sql: McpSql, id: string) {
-  for (const s of TASK_STATES) {
-    const f = readFile(sql, `tasks/${s}/${id}.md`);
-    if (f) { const { meta, body } = parseDoc(f.text); return { ...taskRow(`tasks/${s}/${id}.md`, f.text, f.updated), meta, body: body.slice(0, 20_000) }; }
-  }
-  return null;
-}
-const options = (s?: string) => (s ?? "").split(" | ").map((x) => x.trim()).filter(Boolean);
-export function listDecisions(sql: McpSql, which: "open" | "closed" = "open", limit = 30) {
-  return listDir(sql, `decisions/${which}/`).filter((f) => f.path.endsWith(".md")).slice(0, limit).map((f) => {
-    const { meta, body } = parseDoc(f.text);
-    return { id: meta.id, question: meta.question, options: options(meta.options), recommendation: meta.recommendation, task: meta.task,
-      agent: meta.agent, created: meta.created, answer: meta.answer, context: body.match(/## Context\n([\s\S]*?)(\n## |$)/)?.[1]?.trim().slice(0, 4000) };
-  });
-}
-
-// ---------------------------------------------------------------- tools
-type Tool = { name: string; title: string; description: string; inputSchema: any; annotations: Record<string, boolean>; write?: boolean };
-const RO = { readOnlyHint: true, openWorldHint: false };
-const RW = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
-const str = (description: string, extra: object = {}) => ({ type: "string", description, ...extra });
-const int = (description: string, extra: object = {}) => ({ type: "integer", description, ...extra });
-const obj = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
-
-export const TOOLS: Tool[] = [
-  { name: "get_status", title: "Fleet status", annotations: RO, inputSchema: obj({}),
-    description: "Current state of the noop fleet: online machines, running tasks with their latest activity, task counts per state, and decisions waiting for the owner." },
-  { name: "list_tasks", title: "List tasks", annotations: RO,
-    inputSchema: obj({ state: str("Which tasks: open (default: queued, running, waiting, blocked), all, or one state", { enum: ["open", "all", ...TASK_STATES] }),
-      query: str("Case-insensitive filter on id, title, repo, agent"), limit: int("Max rows (default 50, max 200)", { minimum: 1, maximum: 200 }) }),
-    description: "List the fleet's tasks (id, title, state, agent, host, repo), newest first." },
-  { name: "get_task", title: "Get task", annotations: RO, inputSchema: obj({ id: str("Task id, e.g. T-0184") }, ["id"]),
-    description: "One task in full: its metadata, its description/result notes, and the recent feed events about it." },
-  { name: "list_decisions", title: "Open decisions", annotations: RO,
-    inputSchema: obj({ which: str("open (default) or closed", { enum: ["open", "closed"] }), limit: int("Max rows (default 30)", { minimum: 1, maximum: 100 }) }),
-    description: "Decision cards waiting for the owner (question, options, recommendation, context). Answer one with answer_decision." },
-  { name: "get_feed", title: "Read the feed", annotations: RO,
-    inputSchema: obj({ cursor: int("Return events after this cursor (from a previous call); omit for the latest ones"), limit: int("Max events (default 50, max 300)", { minimum: 1, maximum: 300 }) }),
-    description: "The chat/activity feed the owner sees in the noop app: agent reports, decisions, owner messages, system notices. Returns {cursor, events}; pass cursor back to get only newer events." },
-  { name: "wait_for_events", title: "Wait for new events", annotations: RO,
-    inputSchema: obj({ cursor: int("Cursor from get_feed / a previous wait"), timeout_seconds: int("How long to wait (default 30, max 50)", { minimum: 1, maximum: 50 }) }, ["cursor"]),
-    description: "Blocks until the fleet emits new events after `cursor` (or the timeout passes) and returns them. For clients that do not receive MCP notifications." },
-  { name: "send_message", title: "Message the fleet", annotations: RW, write: true,
-    inputSchema: obj({ text: str("The message, as the owner would type it in chat"), reply_to: str("Optional: task id (T-…) or event id this replies to") }, ["text"]),
-    description: "Send a chat message to the fleet as the owner (same as typing in the noop app). The lead agent turns requests into tasks." },
-  { name: "create_task", title: "Create a task", annotations: RW, write: true,
-    inputSchema: obj({ title: str("Short imperative title"), details: str("Goal, context and acceptance criteria"), repo: str("Optional repo, e.g. longbridge/nsh") }, ["title"]),
-    description: "Ask the fleet to do a piece of work. It is posted as an owner request; the lead agent plans it, picks the agent/machine and reports back in the feed." },
-  { name: "answer_decision", title: "Answer a decision", annotations: RW, write: true,
-    inputSchema: obj({ id: str("Decision id, e.g. D-0025"), answer: str("An option letter (A, B, …) or a free-text answer") }, ["id", "answer"]),
-    description: "Answer an open decision card, exactly like tapping an option in the noop app." },
-  { name: "search", title: "Search", annotations: RO, inputSchema: obj({ query: str("What to look for") }, ["query"]),
-    description: "Search noop tasks and decisions. Returns {results:[{id, title, url}]}; use fetch with an id for the full text." },
-  { name: "fetch", title: "Fetch", annotations: RO, inputSchema: obj({ id: str("An id from search: a task (T-…) or decision (D-…)") }, ["id"]),
-    description: "Full text of a task or decision found by search. Returns {id, title, text, url, metadata}." },
-];
+const MCP_TOOLS = toolsFor("mcp");
 
 // ---------------------------------------------------------------- server
 // Streams. Every SSE message carries `id: <stream>.<seq>` and is kept per session in mcp_events (bounded by count and age),
@@ -392,8 +319,8 @@ export class Mcp {
       { uri: "noop://status", name: "status", title: "Fleet status", mimeType: "application/json" },
       { uri: "noop://feed", name: "feed", title: "Latest feed events", mimeType: "application/json" },
       { uri: "noop://decisions", name: "decisions", title: "Open decisions", mimeType: "application/json" },
-      ...listDecisions(this.h.sql, "open", 100).filter((d) => d.id).map((d) => ({ uri: `noop://decisions/${d.id}`, name: d.id!, title: `${d.id} ${d.question ?? ""}`, mimeType: "application/json" })),
-      ...listTasks(this.h.sql, "open", "", 50).map((t) => ({ uri: `noop://tasks/${t.id}`, name: t.id, title: `${t.id} ${t.title}`, mimeType: "application/json" })),
+      ...listDecisions(this.store(), "open", 100).filter((d) => d.id).map((d) => ({ uri: `noop://decisions/${d.id}`, name: d.id!, title: `${d.id} ${d.question ?? ""}`, mimeType: "application/json" })),
+      ...listTasks(this.store(), "open", "", 50).map((t) => ({ uri: `noop://tasks/${t.id}`, name: t.id, title: `${t.id} ${t.title}`, mimeType: "application/json" })),
     ];
   }
 
@@ -410,7 +337,8 @@ export class Mcp {
             // Same feature set in every supported version. Tools are fixed (listChanged false); the resource list follows open tasks/decisions.
             capabilities: { tools: { listChanged: false }, resources: { subscribe: true, listChanged: true }, logging: {} },
             instructions: "noop is the owner's AI agent fleet. Read state with get_status / list_tasks / list_decisions / get_feed. "
-              + "Talk to the fleet with send_message or create_task (the lead agent plans the work), answer decision cards with answer_decision. "
+              + "Talk to the fleet with send_message, hand it work with create_task, adjust work with amend_task / set_priority / reassign_task / cancel_task, "
+              + "answer decision cards with answer_decision, write durable memory with remember (read it with read_memory). "
               + "Live events arrive as notifications/message on the GET stream (resumable with Last-Event-ID); without notifications, poll with wait_for_events." });
         }
         case "ping": return ok({});
@@ -418,7 +346,7 @@ export class Mcp {
           if (!LEVELS.includes(p.level)) return err(m.id, -32602, "unknown level");
           this.h.sql.exec("UPDATE mcp_sessions SET level = ? WHERE id = ?", p.level, sid);
           return ok({});
-        case "tools/list": return ok({ tools: TOOLS.map(({ write, ...t }) => t) });
+        case "tools/list": return ok({ tools: MCP_TOOLS.map(({ write, only, ...t }) => t) });
         case "tools/call": {
           const r = await this.call(String(p.name ?? ""), p.arguments ?? {}, base, ctx);
           return r === null ? null : ok(r);
@@ -454,106 +382,60 @@ export class Mcp {
   resource(uri: string): unknown {
     if (uri === "noop://status") return this.statusView();
     if (uri === "noop://feed") return this.feed(undefined, 50);
-    if (uri === "noop://decisions") return listDecisions(this.h.sql);
+    if (uri === "noop://decisions") return listDecisions(this.store());
     const d = uri.match(/^noop:\/\/decisions\/(.+)$/)?.[1];
-    if (d) return DECISION_ID.test(d) ? listDecisions(this.h.sql, "open", 100).find((x) => x.id === d) : undefined;
+    if (d) return DECISION_ID.test(d) ? listDecisions(this.store(), "open", 100).find((x) => x.id === d) : undefined;
     const t = uri.match(/^noop:\/\/tasks\/(.+)$/)?.[1];
-    if (t && TASK_ID.test(t)) return getTask(this.h.sql, t) ?? undefined;
+    if (t && TASK_ID.test(t)) return getTask(this.store(), t) ?? undefined;
     return undefined;
   }
 
-  statusView() {
-    const s = this.h.status() ?? {};
-    return { hub: s.hub, tasks: s.tasks, decisions: s.decisions,
-      hosts: (s.hosts ?? []).map((h: any) => ({ host: h.host, online: h.online, state: h.state, caps: h.caps, running: h.running ?? h.tasks })),
-      active: (s.active ?? []).map((t: any) => ({ id: t.id, title: t.title, agent: t.agent, host: t.host, started: t.started, activity: t.activity })) };
-  }
+  statusView() { return statusView(this.store()); }
 
-  feed(cursor: number | undefined, limit: number) {
-    const n = Math.max(1, Math.min(limit || 50, 300));
-    const after = cursor === undefined ? this.lastSeq() - n : cursor;
-    const rows = this.h.events(Math.max(0, after), n);
-    return { cursor: rows.length ? rows[rows.length - 1].seq : Math.max(cursor ?? 0, this.lastSeq()), events: rows.map((r) => r.ev) };
-  }
+
+  feed(cursor: number | undefined, limit: number) { return feedView(this.store(), cursor, limit); }
   lastSeq() { return Number(this.h.sql.exec("SELECT COALESCE(MAX(seq), 0) AS n FROM events").toArray()[0]?.n ?? 0); }
+
+  /** The tool layer's view of this Hub: the files mirror for reads, the daemon (via the inbox) for writes. */
+  store(): ToolStore {
+    const h = this.h;
+    return {
+      read: (p) => readFile(h.sql, p), list: (d) => listDir(h.sql, d), status: () => h.status(),
+      events: (after, limit) => h.events(after, limit), lastSeq: () => this.lastSeq(),
+      act: async (op) => {
+        // owner-equivalent messages stay messages; everything else is performed by the daemon that owns the data
+        if (op.tool === "send_message") { const ev = h.say(op.text, op.reply_to); return { ok: true, id: ev.id, ts: ev.ts }; }
+        if (op.tool === "answer_decision") { const ev = h.say(`${op.id} ${op.answer}`, op.id); return { ok: true, id: ev.id }; }
+        h.enqueue(op);
+        return { ok: true, queued: true, host_online: h.hostOnline?.() ?? undefined,
+          note: "Handed to the fleet's primary machine, which applies it within seconds and reports in the feed (watch with wait_for_events)." };
+      },
+    };
+  }
 
   async call(name: string, a: any, base: string, ctx: Ctx = {}): Promise<any | null> {
     const out = (data: unknown) => ({ content: [{ type: "text", text: JSON.stringify(data, null, 1) }], structuredContent: Array.isArray(data) ? { items: data } : data });
     const bad = (message: string) => ({ content: [{ type: "text", text: message }], isError: true });
-    const s = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-    switch (name) {
-      case "get_status": return out(this.statusView());
-      case "list_tasks": return out({ tasks: listTasks(this.h.sql, s(a.state) || "open", s(a.query), Number(a.limit) || 50) });
-      case "get_task": {
-        const id = s(a.id);
-        const t = TASK_ID.test(id) ? getTask(this.h.sql, id) : null;
-        if (!t) return bad(`task ${id} not found`);
-        const events = this.h.events(Math.max(0, this.lastSeq() - 2000), 2000).map((r) => r.ev)
-          .filter((e) => e.ref === id || String(e.text ?? "").includes(id)).slice(-20);
-        return out({ ...t, events });
+    if (name === "wait_for_events") {
+      const cursor = Number(a?.cursor) || 0, ms = Math.max(1, Math.min(Number(a?.timeout_seconds) || 30, 50)) * 1000, total = ms / 1000;
+      if (this.lastSeq() <= cursor) {
+        const t0 = Date.now(), { signal, progress } = ctx;
+        progress?.(0, total, "waiting for fleet events");
+        await new Promise<void>((res) => {
+          const done = () => { clearTimeout(t); if (tick) clearInterval(tick); this.waiters.delete(done); signal?.removeEventListener("abort", done); res(); };
+          const t = setTimeout(done, ms);
+          const tick = progress && setInterval(() => progress(Math.min(total, (Date.now() - t0) / 1000), total, "waiting for fleet events"), this.progressEveryMs);
+          signal?.addEventListener("abort", done);
+          this.waiters.add(done);
+          if (signal?.aborted) done();
+        });
+        if (signal?.aborted) return null; // cancelled: no response
       }
-      case "list_decisions": return out({ decisions: listDecisions(this.h.sql, a.which === "closed" ? "closed" : "open", Number(a.limit) || 30) });
-      case "get_feed": return out(this.feed(a.cursor === undefined || a.cursor === null ? undefined : Number(a.cursor), Number(a.limit) || 50));
-      case "wait_for_events": {
-        const cursor = Number(a.cursor) || 0, ms = Math.max(1, Math.min(Number(a.timeout_seconds) || 30, 50)) * 1000, total = ms / 1000;
-        if (this.lastSeq() <= cursor) {
-          const t0 = Date.now(), { signal, progress } = ctx;
-          progress?.(0, total, "waiting for fleet events");
-          await new Promise<void>((res) => {
-            const done = () => { clearTimeout(t); if (tick) clearInterval(tick); this.waiters.delete(done); signal?.removeEventListener("abort", done); res(); };
-            const t = setTimeout(done, ms);
-            const tick = progress && setInterval(() => progress(Math.min(total, (Date.now() - t0) / 1000), total, "waiting for fleet events"), this.progressEveryMs);
-            signal?.addEventListener("abort", done);
-            this.waiters.add(done);
-            if (signal?.aborted) done();
-          });
-          if (signal?.aborted) return null; // cancelled: no response
-        }
-        return out(this.feed(cursor, 100));
-      }
-      case "send_message": {
-        const text = s(a.text);
-        if (!text) return bad("text required");
-        const ev = this.h.say(text.slice(0, 20_000), s(a.reply_to) || undefined);
-        return out({ ok: true, id: ev.id, ts: ev.ts });
-      }
-      case "create_task": {
-        const title = s(a.title);
-        if (!title) return bad("title required");
-        const text = [`新任务：${title}`, s(a.repo) && `仓库：${s(a.repo)}`, s(a.details)].filter(Boolean).join("\n\n");
-        const ev = this.h.say(text.slice(0, 20_000));
-        return out({ ok: true, id: ev.id, note: "Posted to the fleet; the lead agent will plan it and report in the feed (watch with wait_for_events)." });
-      }
-      case "answer_decision": {
-        const id = s(a.id), answer = s(a.answer);
-        if (!DECISION_ID.test(id) || !answer) return bad("id (D-…) and answer required");
-        if (!readFile(this.h.sql, `decisions/open/${id}.md`)) return bad(`decision ${id} is not open`);
-        const ev = this.h.say(`${id} ${answer}`.slice(0, 5000), id);
-        return out({ ok: true, id: ev.id });
-      }
-      case "search": {
-        const q = s(a.query);
-        const tasks = listTasks(this.h.sql, "all", q, 20).map((t) => ({ id: t.id, title: `${t.id} ${t.title} (${t.state})`, url: `${base}/?ref=${t.id}` }));
-        const ql = q.toLowerCase();
-        const decisions = [...listDecisions(this.h.sql, "open", 100), ...listDecisions(this.h.sql, "closed", 100)]
-          .filter((d) => d.id && (!ql || `${d.id} ${d.question} ${d.context ?? ""}`.toLowerCase().includes(ql)))
-          .slice(0, 10).map((d) => ({ id: d.id, title: `${d.id} ${d.question}`, url: `${base}/?ref=${d.id}` }));
-        return out({ results: [...decisions, ...tasks] });
-      }
-      case "fetch": {
-        const id = s(a.id);
-        if (TASK_ID.test(id)) {
-          const t = getTask(this.h.sql, id);
-          if (t) return out({ id, title: `${id} ${t.title}`, text: t.body, url: `${base}/?ref=${id}`, metadata: { ...t.meta, state: t.state } });
-        }
-        if (DECISION_ID.test(id)) for (const w of ["open", "closed"] as const) {
-          const f = readFile(this.h.sql, `decisions/${w}/${id}.md`);
-          if (f) { const { meta, body } = parseDoc(f.text); return out({ id, title: `${id} ${meta.question ?? ""}`, text: body, url: `${base}/?ref=${id}`, metadata: { ...meta, state: w } }); }
-        }
-        return bad(`${id} not found`);
-      }
+      return out(this.feed(cursor, 100));
     }
-    return bad(`unknown tool: ${name}`);
+    if (!MCP_TOOLS.some((t) => t.name === name)) return bad(`unknown tool: ${name}`);
+    const r = await runTool(this.store(), name, a, base);
+    return r.ok ? out(r.data) : bad(r.error);
   }
 
   // -------- OAuth 2.1 (authorization server + protected resource, same origin)
