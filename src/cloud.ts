@@ -54,19 +54,25 @@ export function startCloudBridge(cfg: Cfg) {
   };
   setMirror((e) => { pending.push(e); void flush(); });
 
-  let after = 0, n = 0, busy = false, lastStatus = "";
-  // push the dashboard whenever it changes (an answered decision must leave "待你决定" at once), else every 10th poll
+  let after = 0, n = 0, busy = false, lastStatus = "", lastShape = "", lastPush = 0;
+  // push the dashboard at once when its shape changes (an answered decision must leave "待你决定" at once); live agent
+  // activity alone is pushed at most once a minute, and an unchanged dashboard every ~5 min (Worker writes are budgeted)
   const pushStatus = async (force = false) => {
-    const st = JSON.stringify(status());
-    if (!force && st === lastStatus) return;
-    if (await call(cfg, "/api/host/state", { method: "PUT", body: JSON.stringify({ status: JSON.parse(st), settings: settingsView() }) })) lastStatus = st;
+    const s = status();
+    const st = JSON.stringify(s);
+    const shape = JSON.stringify({ ...s, active: s.active.map(({ activity: _, ...t }) => t) });
+    const due = shape !== lastShape || (st !== lastStatus && Date.now() - lastPush > 60_000) || force;
+    if (!due) return;
+    if (await call(cfg, "/api/host/state", { method: "PUT", body: JSON.stringify({ status: s, settings: settingsView() }) })) {
+      lastStatus = st; lastShape = shape; lastPush = Date.now();
+    }
   };
   // housekeeping every few seconds: mirror events up, push the dashboard
   const loop = async () => {
     if (busy) return; busy = true;
     try {
       await flush();
-      await pushStatus(n++ % 10 === 0);
+      await pushStatus(n++ % 100 === 0); // a forced re-push every ~5 min; the Worker skips unchanged writes
     } catch (err) { console.error(`cloud bridge: ${err}`); }
     busy = false;
   };
