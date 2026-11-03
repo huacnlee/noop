@@ -3,8 +3,12 @@
 //
 // Transport: MCP Streamable HTTP (spec 2025-06-18 / 2025-11-25), hand-rolled JSON-RPC — no SDK dependency.
 //   POST   /mcp  one JSON-RPC message → application/json response (202 for notifications / responses)
-//   GET    /mcp  Accept: text/event-stream → server→client notifications for this Mcp-Session-Id
+//   POST   tools/call that reports progress (or wait_for_events) with Accept: text/event-stream → SSE: notifications/progress, then the response
+//   GET    /mcp  Accept: text/event-stream → server→client notifications for this Mcp-Session-Id; Last-Event-ID resumes any stream
 //   DELETE /mcp  ends the session
+// Sessions: 400 without Mcp-Session-Id, 404 when unknown or idle > 24h (client re-initializes); MCP-Protocol-Version validated.
+// Every SSE message has an id (<stream>.<seq>) and is kept for replay (15 min / 500 per stream); `retry:` hint, keep-alive comments.
+// notifications/cancelled aborts the matching in-flight request (no response is sent); resources/list_changed when open tasks/decisions change.
 // Notifications: every hub event as notifications/message (logger "noop", honours logging/setLevel), and
 //   notifications/resources/updated for subscribed resources (noop://status, noop://feed, noop://tasks/<id>).
 //   Clients that ignore notifications can poll with the `wait_for_events` tool.
@@ -60,7 +64,11 @@ export function initMcpSchema(sql: McpSql) {
   sql.exec(`CREATE TABLE IF NOT EXISTS oauth_clients (id TEXT PRIMARY KEY, json TEXT, created INTEGER);
     CREATE TABLE IF NOT EXISTS oauth_codes (hash TEXT PRIMARY KEY, client_id TEXT, redirect_uri TEXT, challenge TEXT, email TEXT, expires INTEGER);
     CREATE TABLE IF NOT EXISTS oauth_refresh (hash TEXT PRIMARY KEY, client_id TEXT, email TEXT, session TEXT, created INTEGER);
-    CREATE TABLE IF NOT EXISTS mcp_sessions (id TEXT PRIMARY KEY, level TEXT, subs TEXT, created INTEGER, last INTEGER);`);
+    CREATE TABLE IF NOT EXISTS mcp_sessions (id TEXT PRIMARY KEY, level TEXT, subs TEXT, created INTEGER, last INTEGER);
+    CREATE TABLE IF NOT EXISTS mcp_events (session TEXT, stream TEXT, seq INTEGER, data TEXT, ts INTEGER, PRIMARY KEY (session, stream, seq));`);
+  for (const col of ["version TEXT", "g_seen INTEGER DEFAULT 0"]) { // added after the first deploy
+    try { sql.exec(`ALTER TABLE mcp_sessions ADD COLUMN ${col}`); } catch { /* exists */ }
+  }
 }
 
 // ---------------------------------------------------------------- hub data views (files table mirrors ~/.agent-hub/data)
@@ -155,12 +163,28 @@ export const TOOLS: Tool[] = [
 ];
 
 // ---------------------------------------------------------------- server
-type Stream = { session: string; write: (s: string) => void; close: () => void };
+// Streams. Every SSE message carries `id: <stream>.<seq>` and is kept per session in mcp_events (bounded by count and age),
+// so a client that reconnects with Last-Event-ID gets exactly what it missed on *that* stream:
+//   "g"      the session's standalone GET stream (one live connection per session; a new GET replaces the old one)
+//   "p<hex>" the SSE response to one POST (progress notifications, then the JSON-RPC response)
+type Live = { session: string; stream: string; write: (s: string) => void; close: () => void };
 type Who = "machine" | { session: string };
+type Ctx = { signal?: AbortSignal; progress?: (progress: number, total?: number, message?: string) => void };
+
+export const SESSION_IDLE_MS = 24 * 3600_000;
+const REPLAY_KEEP_MS = 15 * 60_000, REPLAY_MAX = 500, RETRY_MS = 3000;
+const sseMsg = (id: string, m: unknown) => `id: ${id}\nevent: message\ndata: ${JSON.stringify(m)}\n\n`;
+const rpcErr = (status: number, code: number, message: string) => json({ jsonrpc: "2.0", id: null, error: { code, message } }, status);
 
 export class Mcp {
-  streams = new Set<Stream>();
+  /** Every open SSE connection (GET and POST). */
+  streams = new Set<Live>();
+  conns = new Map<string, Live>(); // `${session} ${stream}` → live connection
   waiters = new Set<() => void>();
+  inflight = new Map<string, { ac: AbortController; stream?: string }>(); // `${session} ${JSON(id)}`
+  keepAliveMs = 15_000;
+  progressEveryMs = 5_000;
+  private listSig: string | undefined;
   constructor(private h: McpHost) { initMcpSchema(h.sql); }
 
   // -------- live events
@@ -171,21 +195,90 @@ export class Mcp {
     for (const id of new Set([ev.ref, ...String(ev.text ?? "").matchAll(/\bT-[\w]*\d{4}\b/g)].map((x) => (Array.isArray(x) ? x[0] : x)).filter((x): x is string => typeof x === "string" && TASK_ID.test(x))))
       uris.push(`noop://tasks/${id}`);
     if (ev.kind === "decision") uris.push("noop://decisions");
-    this.broadcast({ level: ev.kind === "decision" ? "warning" : ev.kind === "system" ? "debug" : "info", data: ev }, uris);
+    this.broadcast({ level: ev.kind === "decision" ? "warning" : ev.kind === "system" ? "debug" : "info", data: ev }, uris, ev.kind === "decision" && this.listChanged());
   }
-  /** Status snapshot or task files changed. */
-  onChanged(uris: string[]) { this.broadcast(null, uris); }
+  /** Status snapshot or task/decision files changed. */
+  onChanged(uris: string[]) { this.broadcast(null, uris, uris.some((u) => u.startsWith("noop://tasks/") || u === "noop://decisions") && this.listChanged()); }
 
-  broadcast(log: { level: string; data: unknown } | null, uris: string[]) {
-    if (!this.streams.size) return;
-    const sessions = new Map(this.h.sql.exec("SELECT id, level, subs FROM mcp_sessions").toArray().map((r) => [r.id as string, r]));
-    for (const s of this.streams) {
-      const row = sessions.get(s.session);
-      const min = LEVELS.indexOf((row?.level as string) || "info");
-      if (log && LEVELS.indexOf(log.level) >= min) s.write(sse({ jsonrpc: "2.0", method: "notifications/message", params: { level: log.level, logger: "noop", data: log.data } }));
-      const subs: string[] = row ? JSON.parse(row.subs as string || "[]") : [];
-      for (const uri of uris) if (subs.includes(uri)) s.write(sse({ jsonrpc: "2.0", method: "notifications/resources/updated", params: { uri, title: uri } }));
+  /** Did the set of listed resources (open tasks, open decisions) change since we last looked? */
+  listChanged() {
+    const sig = this.resourceList().map((r) => r.uri).sort().join(" ");
+    const changed = this.listSig !== undefined && sig !== this.listSig;
+    this.listSig = sig;
+    return changed;
+  }
+
+  broadcast(log: { level: string; data: unknown } | null, uris: string[], listChanged = false) {
+    const now = Date.now();
+    const rows = this.h.sql.exec("SELECT id, level, subs, g_seen FROM mcp_sessions WHERE g_seen > 0").toArray();
+    for (const row of rows) {
+      const sid = row.id as string;
+      // Keep writing for a disconnected stream for a while, so a reconnect with Last-Event-ID can replay it.
+      if (!this.conns.has(`${sid} g`) && now - Number(row.g_seen) > REPLAY_KEEP_MS) continue;
+      const min = LEVELS.indexOf((row.level as string) || "info");
+      if (log && LEVELS.indexOf(log.level) >= min) this.send(sid, "g", { jsonrpc: "2.0", method: "notifications/message", params: { level: log.level, logger: "noop", data: log.data } });
+      const subs: string[] = JSON.parse(row.subs as string || "[]");
+      for (const uri of uris) if (subs.includes(uri)) this.send(sid, "g", { jsonrpc: "2.0", method: "notifications/resources/updated", params: { uri, title: uri } });
+      if (listChanged) this.send(sid, "g", { jsonrpc: "2.0", method: "notifications/resources/list_changed" });
     }
+  }
+
+  /** Stores the message for replay and writes it to the live connection of that stream, if any. */
+  send(session: string, stream: string, msg: unknown) {
+    const sql = this.h.sql;
+    const seq = Number(sql.exec("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM mcp_events WHERE session = ? AND stream = ?", session, stream).toArray()[0]?.n ?? 1);
+    sql.exec("INSERT INTO mcp_events (session, stream, seq, data, ts) VALUES (?, ?, ?, ?, ?)", session, stream, seq, JSON.stringify(msg), Date.now());
+    if (seq % 50 === 0) sql.exec("DELETE FROM mcp_events WHERE session = ? AND ((stream = ? AND seq <= ?) OR ts < ?)", session, stream, seq - REPLAY_MAX, Date.now() - REPLAY_KEEP_MS);
+    this.conns.get(`${session} ${stream}`)?.write(sseMsg(`${stream}.${seq}`, msg));
+  }
+
+  /** Opens an SSE response bound to (session, stream). */
+  connect(session: string, stream: string, version: string, req: Request, replayAfter?: number): { live: Live; res: Response } {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const w = writable.getWriter(), enc = new TextEncoder(), key = `${session} ${stream}`;
+    let timer: ReturnType<typeof setInterval> | undefined, closed = false;
+    const live: Live = {
+      session, stream,
+      write: (s) => { if (!closed) w.write(enc.encode(s)).catch(() => live.close()); },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        if (timer) clearInterval(timer);
+        this.streams.delete(live);
+        if (this.conns.get(key) === live) this.conns.delete(key);
+        if (stream === "g") this.h.sql.exec("UPDATE mcp_sessions SET g_seen = ? WHERE id = ?", Date.now(), session);
+        w.close().catch(() => {});
+      },
+    };
+    this.conns.get(key)?.close(); // one live connection per stream
+    this.conns.set(key, live);
+    this.streams.add(live);
+    live.write(`retry: ${RETRY_MS}\n\n`);
+    if (replayAfter !== undefined) {
+      for (const r of this.h.sql.exec("SELECT seq, data FROM mcp_events WHERE session = ? AND stream = ? AND seq > ? ORDER BY seq", session, stream, replayAfter).toArray())
+        live.write(`id: ${stream}.${r.seq}\nevent: message\ndata: ${r.data}\n\n`);
+    } else if (version >= "2025-11-25") { // prime the client with an event id so it can resume even before the first message
+      const n = Number(this.h.sql.exec("SELECT COALESCE(MAX(seq), 0) AS n FROM mcp_events WHERE session = ? AND stream = ?", session, stream).toArray()[0]?.n ?? 0);
+      live.write(`id: ${stream}.${n}\ndata: \n\n`);
+    }
+    timer = setInterval(() => live.write(": ping\n\n"), this.keepAliveMs);
+    req.signal?.addEventListener?.("abort", () => live.close());
+    return { live, res: new Response(readable, { headers: { ...CORS, "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", "x-accel-buffering": "no", "mcp-session-id": session } }) };
+  }
+
+  /** The session row if it exists and hasn't expired; expired sessions are dropped. */
+  session(sid: string): { id: string; version: string } | null {
+    if (!sid) return null;
+    const r = this.h.sql.exec("SELECT id, version, last FROM mcp_sessions WHERE id = ?", sid).toArray()[0];
+    if (!r) return null;
+    if (Number(r.last) < Date.now() - SESSION_IDLE_MS) { this.endSession(sid); return null; }
+    return { id: sid, version: (r.version as string) || "2025-03-26" };
+  }
+  endSession(sid: string) {
+    this.h.sql.exec("DELETE FROM mcp_sessions WHERE id = ?", sid);
+    this.h.sql.exec("DELETE FROM mcp_events WHERE session = ?", sid);
+    for (const s of [...this.streams]) if (s.session === sid) s.close();
+    for (const [k, f] of this.inflight) if (k.startsWith(`${sid} `)) f.ac.abort();
   }
 
   // -------- HTTP
@@ -201,51 +294,110 @@ export class Mcp {
     if (p !== "/mcp") return json({ error: "not found" }, 404);
     if (!who) return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "unauthorized" } }, 401,
       { "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", scope="noop"` });
-    if (req.method === "GET") return this.openStream(req);
-    if (req.method === "DELETE") {
-      const sid = req.headers.get("mcp-session-id");
-      if (sid) { this.h.sql.exec("DELETE FROM mcp_sessions WHERE id = ?", sid); for (const s of this.streams) if (s.session === sid) s.close(); }
-      return new Response(null, { status: 204, headers: CORS });
-    }
-    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+    if (!["GET", "POST", "DELETE"].includes(req.method)) return json({ error: "method not allowed" }, 405, { allow: "GET, POST, DELETE, OPTIONS" });
+
+    const pv = req.headers.get("mcp-protocol-version");
+    if (pv && !PROTOCOL_VERSIONS.includes(pv)) return rpcErr(400, -32600, `unsupported MCP-Protocol-Version: ${pv} (supported: ${PROTOCOL_VERSIONS.join(", ")})`);
+    const sidHeader = req.headers.get("mcp-session-id") ?? "";
+
     let msg: any;
-    try { msg = await req.json(); } catch { return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, 400); }
-    const sid = req.headers.get("mcp-session-id") ?? "";
-    if (Array.isArray(msg)) { // older clients (2025-03-26) may batch
-      const out = (await Promise.all(msg.map((m) => this.rpc(m, sid, who, base)))).filter((r) => r);
+    if (req.method === "POST") {
+      try { msg = await req.json(); } catch { return rpcErr(400, -32700, "parse error"); }
+      if (!Array.isArray(msg) && msg?.method === "initialize") return this.initialize(msg, who, base);
+    }
+    // Everything but initialize needs a live session (spec: 400 without the header, 404 once it's gone → re-initialize).
+    if (!sidHeader) return rpcErr(400, -32600, "Mcp-Session-Id header required");
+    const sess = this.session(sidHeader);
+    if (!sess) return rpcErr(404, -32001, "session not found; initialize a new one");
+    this.h.sql.exec("UPDATE mcp_sessions SET last = ? WHERE id = ?", Date.now(), sess.id);
+
+    if (req.method === "GET") return this.openStream(req, sess);
+    if (req.method === "DELETE") { this.endSession(sess.id); return new Response(null, { status: 204, headers: CORS }); }
+
+    if (Array.isArray(msg)) { // JSON-RPC batches only exist in 2025-03-26
+      if (sess.version !== "2025-03-26" || !msg.length || msg.some((m) => m?.method === "initialize")) return rpcErr(400, -32600, "batching is not supported in this protocol version");
+      const out = (await Promise.all(msg.map((m) => this.handle(m, sess.id, who, base)))).filter((r) => r);
       return out.length ? json(out) : new Response(null, { status: 202, headers: CORS });
     }
-    if (msg?.method === "initialize") {
-      const id = rand(16);
-      this.h.sql.exec("INSERT INTO mcp_sessions (id, level, subs, created, last) VALUES (?, 'info', '[]', ?, ?)", id, Date.now(), Date.now());
-      this.h.sql.exec("DELETE FROM mcp_sessions WHERE last < ?", Date.now() - 30 * 86_400_000);
-      return json(await this.rpc(msg, id, who, base), 200, { "mcp-session-id": id });
+    const isRequest = msg && typeof msg.method === "string" && "id" in msg;
+    if (!isRequest) { // notification or response → 202 Accepted
+      const r = await this.handle(msg, sess.id, who, base);
+      return r ? json(r, 400) : new Response(null, { status: 202, headers: CORS });
     }
-    if (sid) this.h.sql.exec("UPDATE mcp_sessions SET last = ? WHERE id = ?", Date.now(), sid);
-    const r = await this.rpc(msg, sid, who, base);
-    return r ? json(r) : new Response(null, { status: 202, headers: CORS });
+    const wantsSse = (req.headers.get("accept") ?? "").includes("text/event-stream");
+    const token = msg.params?._meta?.progressToken;
+    const streams = msg.method === "tools/call" && (token !== undefined || msg.params?.name === "wait_for_events");
+    if (!wantsSse || !streams) {
+      const r = await this.handle(msg, sess.id, who, base);
+      return r ? json(r) : new Response(null, { status: 202, headers: CORS });
+    }
+    // SSE response: progress notifications for this request first, then its response; resumable via GET + Last-Event-ID.
+    const stream = `p${rand(6)}`;
+    const { live, res } = this.connect(sess.id, stream, sess.version, req);
+    let last = -1;
+    const ctx: Ctx = {
+      progress: token === undefined ? undefined : (progress, total, message) => {
+        if (progress <= last) return; // progress MUST increase
+        last = progress;
+        this.send(sess.id, stream, { jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress, ...(total !== undefined ? { total } : {}), ...(message ? { message } : {}) } });
+      },
+    };
+    this.handle(msg, sess.id, who, base, ctx, stream).then((r) => {
+      if (r) this.send(sess.id, stream, r);
+      (this.conns.get(`${sess.id} ${stream}`) ?? live).close();
+    });
+    return res;
   }
 
-  openStream(req: Request): Response {
+  async initialize(msg: any, who: Who, base: string): Promise<Response> {
+    const id = rand(16), now = Date.now();
+    const v = PROTOCOL_VERSIONS.includes(msg.params?.protocolVersion) ? msg.params.protocolVersion : PROTOCOL_VERSIONS[0];
+    for (const r of this.h.sql.exec("SELECT id FROM mcp_sessions WHERE last < ?", now - SESSION_IDLE_MS).toArray()) this.endSession(r.id as string);
+    this.h.sql.exec("INSERT INTO mcp_sessions (id, level, subs, created, last, version, g_seen) VALUES (?, 'info', '[]', ?, ?, ?, 0)", id, now, now, v);
+    if (this.listSig === undefined) this.listChanged();
+    return json(await this.rpc(msg, id, who, base), 200, { "mcp-session-id": id });
+  }
+
+  /** rpc() with cancellation: notifications/cancelled for this request aborts it and suppresses the response. */
+  async handle(m: any, sid: string, who: Who, base: string, ctx: Ctx = {}, stream?: string): Promise<any | null> {
+    if (!m || typeof m !== "object" || !("id" in m) || typeof m.method !== "string") return this.rpc(m, sid, who, base, ctx);
+    const key = `${sid} ${JSON.stringify(m.id)}`, ac = new AbortController();
+    this.inflight.set(key, { ac, stream });
+    try {
+      const r = await this.rpc(m, sid, who, base, { ...ctx, signal: ac.signal });
+      return ac.signal.aborted ? null : r;
+    } finally { if (this.inflight.get(key)?.ac === ac) this.inflight.delete(key); }
+  }
+
+  openStream(req: Request, sess: { id: string; version: string }): Response {
     if (!(req.headers.get("accept") ?? "").includes("text/event-stream")) return json({ error: "Accept: text/event-stream required" }, 406);
-    const session = req.headers.get("mcp-session-id") ?? "";
-    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-    const w = writable.getWriter(), enc = new TextEncoder();
-    let timer: ReturnType<typeof setInterval> | undefined;
-    const st: Stream = {
-      session,
-      write: (s) => { w.write(enc.encode(s)).catch(() => st.close()); },
-      close: () => { if (timer) clearInterval(timer); this.streams.delete(st); w.close().catch(() => {}); },
-    };
-    this.streams.add(st);
-    st.write(": noop mcp stream\n\n");
-    timer = setInterval(() => st.write(": ping\n\n"), 25_000);
-    req.signal?.addEventListener?.("abort", () => st.close());
-    return new Response(readable, { headers: { ...CORS, "content-type": "text/event-stream", "cache-control": "no-cache", "mcp-session-id": session } });
+    const lastId = req.headers.get("last-event-id");
+    if (lastId) {
+      const m = lastId.match(/^(g|p[0-9a-f]+)\.(\d+)$/);
+      if (!m) return rpcErr(400, -32600, "bad Last-Event-ID");
+      const [, stream, seq] = m;
+      const { live, res } = this.connect(sess.id, stream, sess.version, req, Number(seq));
+      if (stream === "g") this.h.sql.exec("UPDATE mcp_sessions SET g_seen = ? WHERE id = ?", Date.now(), sess.id);
+      // A finished POST stream: replay, then close (its response was the last message).
+      else if (![...this.inflight.values()].some((f) => f.stream === stream)) queueMicrotask(() => live.close());
+      return res;
+    }
+    this.h.sql.exec("UPDATE mcp_sessions SET g_seen = ? WHERE id = ?", Date.now(), sess.id);
+    return this.connect(sess.id, "g", sess.version, req).res;
   }
 
   // -------- JSON-RPC
-  async rpc(m: any, sid: string, who: Who, base: string): Promise<any | null> {
+  resourceList() {
+    return [
+      { uri: "noop://status", name: "status", title: "Fleet status", mimeType: "application/json" },
+      { uri: "noop://feed", name: "feed", title: "Latest feed events", mimeType: "application/json" },
+      { uri: "noop://decisions", name: "decisions", title: "Open decisions", mimeType: "application/json" },
+      ...listDecisions(this.h.sql, "open", 100).filter((d) => d.id).map((d) => ({ uri: `noop://decisions/${d.id}`, name: d.id!, title: `${d.id} ${d.question ?? ""}`, mimeType: "application/json" })),
+      ...listTasks(this.h.sql, "open", "", 50).map((t) => ({ uri: `noop://tasks/${t.id}`, name: t.id, title: `${t.id} ${t.title}`, mimeType: "application/json" })),
+    ];
+  }
+
+  async rpc(m: any, sid: string, who: Who, base: string, ctx: Ctx = {}): Promise<any | null> {
     if (!m || m.jsonrpc !== "2.0" || typeof m.method !== "string") return m && "id" in m && !("result" in m || "error" in m) ? err(m.id ?? null, -32600, "invalid request") : null;
     const isNote = !("id" in m);
     const ok = (result: unknown) => (isNote ? null : { jsonrpc: "2.0", id: m.id, result });
@@ -255,10 +407,11 @@ export class Mcp {
         case "initialize": {
           const v = PROTOCOL_VERSIONS.includes(p.protocolVersion) ? p.protocolVersion : PROTOCOL_VERSIONS[0];
           return ok({ protocolVersion: v, serverInfo: SERVER_INFO,
-            capabilities: { tools: { listChanged: false }, resources: { subscribe: true, listChanged: false }, logging: {} },
+            // Same feature set in every supported version. Tools are fixed (listChanged false); the resource list follows open tasks/decisions.
+            capabilities: { tools: { listChanged: false }, resources: { subscribe: true, listChanged: true }, logging: {} },
             instructions: "noop is the owner's AI agent fleet. Read state with get_status / list_tasks / list_decisions / get_feed. "
               + "Talk to the fleet with send_message or create_task (the lead agent plans the work), answer decision cards with answer_decision. "
-              + "Live events arrive as notifications/message; without notifications, poll with wait_for_events." });
+              + "Live events arrive as notifications/message on the GET stream (resumable with Last-Event-ID); without notifications, poll with wait_for_events." });
         }
         case "ping": return ok({});
         case "logging/setLevel":
@@ -266,14 +419,14 @@ export class Mcp {
           this.h.sql.exec("UPDATE mcp_sessions SET level = ? WHERE id = ?", p.level, sid);
           return ok({});
         case "tools/list": return ok({ tools: TOOLS.map(({ write, ...t }) => t) });
-        case "tools/call": return ok(await this.call(String(p.name ?? ""), p.arguments ?? {}, base));
-        case "resources/list": return ok({ resources: [
-          { uri: "noop://status", name: "status", title: "Fleet status", mimeType: "application/json" },
-          { uri: "noop://feed", name: "feed", title: "Latest feed events", mimeType: "application/json" },
-          { uri: "noop://decisions", name: "decisions", title: "Open decisions", mimeType: "application/json" },
-          ...listTasks(this.h.sql, "open", "", 50).map((t) => ({ uri: `noop://tasks/${t.id}`, name: t.id, title: `${t.id} ${t.title}`, mimeType: "application/json" })),
-        ] });
-        case "resources/templates/list": return ok({ resourceTemplates: [{ uriTemplate: "noop://tasks/{id}", name: "task", title: "A task", mimeType: "application/json" }] });
+        case "tools/call": {
+          const r = await this.call(String(p.name ?? ""), p.arguments ?? {}, base, ctx);
+          return r === null ? null : ok(r);
+        }
+        case "resources/list": return ok({ resources: this.resourceList() });
+        case "resources/templates/list": return ok({ resourceTemplates: [
+          { uriTemplate: "noop://tasks/{id}", name: "task", title: "A task", mimeType: "application/json" },
+          { uriTemplate: "noop://decisions/{id}", name: "decision", title: "A decision card", mimeType: "application/json" }] });
         case "resources/read": {
           const data = this.resource(String(p.uri ?? ""));
           if (data === undefined) return err(m.id, -32002, "resource not found");
@@ -281,7 +434,6 @@ export class Mcp {
         }
         case "resources/subscribe": case "resources/unsubscribe": {
           const uri = String(p.uri ?? "");
-          if (!sid) return err(m.id, -32600, "Mcp-Session-Id required");
           const row = this.h.sql.exec("SELECT subs FROM mcp_sessions WHERE id = ?", sid).toArray()[0];
           if (!row) return err(m.id, -32600, "unknown session");
           const subs = new Set<string>(JSON.parse(row.subs as string || "[]"));
@@ -289,7 +441,11 @@ export class Mcp {
           this.h.sql.exec("UPDATE mcp_sessions SET subs = ? WHERE id = ?", JSON.stringify([...subs].slice(-200)), sid);
           return ok({});
         }
-        case "notifications/initialized": case "notifications/cancelled": case "notifications/roots/list_changed": return null;
+        case "notifications/cancelled": {
+          if (p.requestId !== undefined) this.inflight.get(`${sid} ${JSON.stringify(p.requestId)}`)?.ac.abort(p.reason);
+          return null;
+        }
+        case "notifications/initialized": case "notifications/roots/list_changed": case "notifications/progress": return null;
         default: return isNote ? null : err(m.id, -32601, `method not found: ${m.method}`);
       }
     } catch (e) { return isNote ? null : err(m.id, -32603, String((e as Error)?.message ?? e)); }
@@ -299,6 +455,8 @@ export class Mcp {
     if (uri === "noop://status") return this.statusView();
     if (uri === "noop://feed") return this.feed(undefined, 50);
     if (uri === "noop://decisions") return listDecisions(this.h.sql);
+    const d = uri.match(/^noop:\/\/decisions\/(.+)$/)?.[1];
+    if (d) return DECISION_ID.test(d) ? listDecisions(this.h.sql, "open", 100).find((x) => x.id === d) : undefined;
     const t = uri.match(/^noop:\/\/tasks\/(.+)$/)?.[1];
     if (t && TASK_ID.test(t)) return getTask(this.h.sql, t) ?? undefined;
     return undefined;
@@ -319,7 +477,7 @@ export class Mcp {
   }
   lastSeq() { return Number(this.h.sql.exec("SELECT COALESCE(MAX(seq), 0) AS n FROM events").toArray()[0]?.n ?? 0); }
 
-  async call(name: string, a: any, base: string) {
+  async call(name: string, a: any, base: string, ctx: Ctx = {}): Promise<any | null> {
     const out = (data: unknown) => ({ content: [{ type: "text", text: JSON.stringify(data, null, 1) }], structuredContent: Array.isArray(data) ? { items: data } : data });
     const bad = (message: string) => ({ content: [{ type: "text", text: message }], isError: true });
     const s = (v: unknown) => (typeof v === "string" ? v.trim() : "");
@@ -337,12 +495,20 @@ export class Mcp {
       case "list_decisions": return out({ decisions: listDecisions(this.h.sql, a.which === "closed" ? "closed" : "open", Number(a.limit) || 30) });
       case "get_feed": return out(this.feed(a.cursor === undefined || a.cursor === null ? undefined : Number(a.cursor), Number(a.limit) || 50));
       case "wait_for_events": {
-        const cursor = Number(a.cursor) || 0, ms = Math.max(1, Math.min(Number(a.timeout_seconds) || 30, 50)) * 1000;
-        if (this.lastSeq() <= cursor) await new Promise<void>((res) => {
-          const done = () => { clearTimeout(t); this.waiters.delete(done); res(); };
-          const t = setTimeout(done, ms);
-          this.waiters.add(done);
-        });
+        const cursor = Number(a.cursor) || 0, ms = Math.max(1, Math.min(Number(a.timeout_seconds) || 30, 50)) * 1000, total = ms / 1000;
+        if (this.lastSeq() <= cursor) {
+          const t0 = Date.now(), { signal, progress } = ctx;
+          progress?.(0, total, "waiting for fleet events");
+          await new Promise<void>((res) => {
+            const done = () => { clearTimeout(t); if (tick) clearInterval(tick); this.waiters.delete(done); signal?.removeEventListener("abort", done); res(); };
+            const t = setTimeout(done, ms);
+            const tick = progress && setInterval(() => progress(Math.min(total, (Date.now() - t0) / 1000), total, "waiting for fleet events"), this.progressEveryMs);
+            signal?.addEventListener("abort", done);
+            this.waiters.add(done);
+            if (signal?.aborted) done();
+          });
+          if (signal?.aborted) return null; // cancelled: no response
+        }
         return out(this.feed(cursor, 100));
       }
       case "send_message": {
@@ -496,7 +662,6 @@ export class Mcp {
 }
 
 const err = (id: unknown, code: number, message: string) => ({ jsonrpc: "2.0", id, error: { code, message } });
-const sse = (m: unknown) => `event: message\ndata: ${JSON.stringify(m)}\n\n`;
 export function okRedirect(u: string) {
   try { const x = new URL(u); return !x.hash && (x.protocol === "https:" || (x.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(x.hostname))); }
   catch { return false; }
