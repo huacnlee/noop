@@ -12,12 +12,22 @@ in the noop app, and receive live events.
 | `list_tasks` / `get_task` | Tasks by state (`open` by default) or text filter; one task in full plus its recent events |
 | `list_decisions` | Decision cards waiting for you: question, options, recommendation, context |
 | `get_feed` / `wait_for_events` | The feed you see in the app; `wait_for_events` blocks until something new happens |
-| `send_message` | A chat message to the fleet, as you |
-| `create_task` | Posts a request; the lead agent plans it and reports back in the feed |
+| `list_agents` / `list_routines` | The agent roster (what each is for); the recurring routines |
+| `read_memory` / `search_journal` | Durable memory (`memory/*.md`, `agents/<name>/memory.md`); the fleet's daily journal |
+| `send_message` | A chat message to the fleet, as you (the chat brain answers it) |
+| `create_task` | Hands work to an agent (default `lead`), optionally continuing a task (`follows`) |
+| `amend_task` | Adds your follow-up to an open task (a waiting task is woken) |
+| `cancel_task` (destructive) / `set_priority` / `reassign_task` | Stop a task; change its priority; give a not-yet-started task to another agent |
+| `remember` | Writes a rule or preference into memory for the whole fleet or one agent |
 | `answer_decision` | Answers a card, like tapping an option |
 | `search` / `fetch` | ChatGPT connector / deep research shape over tasks and decisions |
 
 Not exposed: merge, release, settings, machine credentials.
+
+The tools are defined and implemented once, in `cloud/src/tools.ts`; the chat brain on the primary (`src/brain.ts`) uses
+the same module. Over MCP, reads come from the Worker's mirror of the data files; writes other than `send_message` /
+`answer_decision` are queued on the owner→fleet inbox and performed by the primary daemon (it owns the data), so they
+answer `{queued: true}` and show up in the feed within seconds.
 
 Resources: `noop://status`, `noop://feed`, `noop://decisions`, `noop://tasks/{id}` (subscribable).
 

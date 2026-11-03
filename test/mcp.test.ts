@@ -24,6 +24,7 @@ function hub() {
   sql.exec(`CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, json TEXT);
     CREATE TABLE sessions (id TEXT PRIMARY KEY, email TEXT, created INTEGER, last_seen INTEGER, ua TEXT)`);
   const said: { text: string; ref?: string }[] = [];
+  const queued: any[] = [];
   let mcp: Mcp;
   const append = (e: any) => {
     const ev = { id: crypto.randomUUID(), ts: new Date().toISOString(), ...e };
@@ -38,6 +39,7 @@ function hub() {
     sql, status: () => ({ tasks: { active: 1 }, decisions: [{ id: "D-0099", question: "合并吗？" }], hosts: [{ host: "h1", online: true }], active: [], hub: { online: true } }),
     events: (after, limit) => sql.exec("SELECT seq, json FROM events WHERE seq > ? ORDER BY seq LIMIT ?", after, limit).toArray().map((r) => ({ seq: r.seq, ev: JSON.parse(r.json) })),
     say: (text, ref) => { said.push({ text, ref }); return append({ from: "owner", kind: "owner", text, ref }); },
+    enqueue: (op) => { queued.push(op); },
     startCode: async (email) => (email === "owner@example.com" ? { status: 200, body: { ok: true } } : { status: 400, body: { error: "invalid email" } }),
     checkCode: async (email, code) => (code === "123456" ? { email } : { error: "验证码不对" }),
     newSession: async (email) => { const s = crypto.randomUUID().replace(/-/g, ""); sql.exec("INSERT INTO sessions (id, email) VALUES (?, ?)", s, email); return s; },
@@ -47,7 +49,7 @@ function hub() {
   file("tasks/active/T-0184.md", "---\nid: T-0184\ntitle: noop: MCP server\nagent: lead\nrepo: huacnlee/noop\nclaimed_by: h1\n---\nBuild the MCP server.\n");
   file("tasks/done/T-0100.md", "---\nid: T-0100\ntitle: Fix typo\nagent: lead\n---\ndone\n");
   file("decisions/open/D-0099.md", "---\nid: D-0099\ntask: T-0184\nquestion: 合并吗？\nrecommendation: A\noptions: A: 合并 — 好 | B: 不合并 — 等\n---\n## Context\n需要你决定。\n\n## Options\n- A\n");
-  return { sql, mcp, said, append, file };
+  return { sql, mcp, said, queued, append, file };
 }
 
 const B = "https://noop.example.com";
@@ -130,7 +132,8 @@ test("initialize, tools/list, resources", async () => {
   expect(init.body.result.capabilities.resources.subscribe).toBe(true);
   expect((await rpc(mcp, "notifications/initialized", {}, init.sid, null)).status).toBe(202);
   const names = (await rpc(mcp, "tools/list", {}, init.sid)).body.result.tools.map((t: any) => t.name);
-  expect(names).toEqual(["get_status", "list_tasks", "get_task", "list_decisions", "get_feed", "wait_for_events", "send_message", "create_task", "answer_decision", "search", "fetch"]);
+  expect(names).toEqual(["get_status", "list_tasks", "get_task", "list_decisions", "get_feed", "wait_for_events", "list_agents", "list_routines", "read_memory",
+    "search_journal", "search", "fetch", "send_message", "create_task", "amend_task", "cancel_task", "set_priority", "reassign_task", "remember", "answer_decision"]);
   expect(names.some((n: string) => /merge|release|setting/.test(n))).toBe(false);
   const res = (await rpc(mcp, "resources/list")).body.result.resources.map((r: any) => r.uri);
   expect(res).toContain("noop://tasks/T-0184");
@@ -141,7 +144,7 @@ test("initialize, tools/list, resources", async () => {
 });
 
 test("tools: read and owner-level writes", async () => {
-  const { mcp, said } = hub();
+  const { mcp, said, queued } = hub();
   expect((await tool(mcp, "get_status")).data.decisions[0].id).toBe("D-0099");
   expect((await tool(mcp, "list_tasks")).data.tasks.map((t: any) => t.id)).toEqual(["T-0184"]);
   expect((await tool(mcp, "list_tasks", { state: "all", query: "typo" })).data.tasks.map((t: any) => t.id)).toEqual(["T-0100"]);
@@ -155,9 +158,11 @@ test("tools: read and owner-level writes", async () => {
   expect((await tool(mcp, "send_message", { text: "  hi team ", reply_to: "T-0184" })).data.ok).toBe(true);
   expect((await tool(mcp, "answer_decision", { id: "D-0099", answer: "A" })).data.ok).toBe(true);
   expect((await tool(mcp, "answer_decision", { id: "D-0001", answer: "A" })).isError).toBe(true); // not open
-  await tool(mcp, "create_task", { title: "Add dark mode", details: "Make it balanced.", repo: "huacnlee/noop" });
-  expect(said).toEqual([{ text: "hi team", ref: "T-0184" }, { text: "D-0099 A", ref: "D-0099" },
-    { text: "新任务：Add dark mode\n\n仓库：huacnlee/noop\n\nMake it balanced.", ref: undefined }]);
+  // other writes are performed by the primary daemon (which owns the data): queued on the owner→fleet inbox
+  expect((await tool(mcp, "create_task", { title: "Add dark mode", details: "Make it balanced.", repo: "huacnlee/noop" })).data.queued).toBe(true);
+  expect((await tool(mcp, "cancel_task", { id: "T-0100" })).isError).toBe(true); // finished: not open
+  expect(said).toEqual([{ text: "hi team", ref: "T-0184" }, { text: "D-0099 A", ref: "D-0099" }]);
+  expect(queued).toEqual([{ tool: "create_task", title: "Add dark mode", details: "Make it balanced.", repo: "huacnlee/noop", agent: undefined, follows: undefined }]);
 
   const feed = (await tool(mcp, "get_feed")).data;
   expect(feed.events.map((e: any) => e.text)).toContain("D-0099 A");
