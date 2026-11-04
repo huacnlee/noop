@@ -23,7 +23,7 @@ concurrency:
 env:
   # The app needs nsh's `speech` capability, which is newer than nsh v0.3.0: built from this commit (cached,
   # a cold build takes a while). Use a release of nsh here once one has it.
-  NSH_REF: bb6b7ad266cdcad0fcb8006ef42988e21581862c
+  NSH_REF: 8ec26daf3b312afd9a04de7be27bd44930e18ca8
 
 defaults:
   run:
