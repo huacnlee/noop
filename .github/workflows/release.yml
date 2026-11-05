@@ -23,7 +23,7 @@ concurrency:
 
 env:
   # Includes the virtual List with bottom alignment and the mobile sidebar animation used by the client.
-  NSH_REF: 78deae5a2185c185cef92a6faff830446c07cb6f
+  NSH_REF: 445fd332836813c57768b576f12c11f907217624
 
 defaults:
   run:
