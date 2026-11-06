@@ -1,6 +1,6 @@
 // Judge shadow mode + learning loop: every routed decision records the judge's answer; owner answers score it.
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -123,4 +123,8 @@ test("D: the judge never answers a merge card, even when allowed to decide", asy
   await dec.routeDecision(id, { judge: { enabled: true }, autonomy: { level: "trusted" } } as any, "h");
   expect(existsSync(core.P("decisions", "open", `${id}.md`))).toBe(true);
   expect(sent.at(-1)!.split("\n")[0]).toBe("https://github.com/huacnlee/omamail/pull/457 需要你点合并");
+  // the suite's files share one data dir and search covers open AND closed decisions: drop the card
+  // (its Chinese merge question would otherwise leak into other files' search results)
+  unlinkSync(core.P("decisions", "open", `${id}.md`));
+  expect(existsSync(core.P("decisions", "open", `${id}.md`))).toBe(false);
 });
