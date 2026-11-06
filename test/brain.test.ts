@@ -57,7 +57,9 @@ test("read tools over the local data repo", async () => {
   expect((await runTool(st, "read_memory", { file: "config.local.toml" })).ok).toBe(false); // not memory
   expect((await runTool(st, "read_memory", { file: "../x.md" })).ok).toBe(false);
   expect((await r("search_journal", { query: "t-0100 done" })).lines).toEqual([{ day: "2026-11-03", line: "- 10:05 [pc] ✅ T-0100 done: fixed typo" }]);
-  expect((await r("search", { query: "合并" })).results.map((x: any) => x.id)).toEqual(["D-0099"]);
+  const matches = (await r("search", { query: "合并" })).results.map((x: any) => x.id);
+  expect(matches).toContain("D-0099"); // other test files may add matching decisions to the shared data dir
+  for (const id of ["T-0184", "T-0190", "T-0100"]) expect(matches).not.toContain(id);
 });
 
 test("writes are validated once, then performed by the store's acts", async () => {
