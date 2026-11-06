@@ -8,9 +8,24 @@ import { ask, type Result } from "./runner";
 import { judgeMayDecide } from "./autonomy";
 import { isMergeCard, mergeHeadline } from "./waits";
 
+/** One live card per task: an agent that hand-writes its card mid-run (chief-of-staff menus did:
+ *  T-0335 → D-0022+23, T-0365 → D-0024+25) must not get a second card from the same run's result.
+ *  A fresh card (≤30 min) is this run's own — keep it as written; an older one is an unanswered ask
+ *  the task is re-raising — replace its content, keeping the id. */
+const CARD_REUSE_MS = 30 * 60_000;
+
 export function openDecision(task: Record<string, string>, res: Result, host: string): string {
-  const id = nextId("D", P("decisions"));
   const opts = res.options?.length ? res.options : ["A: approve", "B: reject"];
+  const dup = list(P("decisions", "open")).find((p) => readDoc(p).meta.task === task.id);
+  if (dup) {
+    const { meta } = readDoc(dup);
+    if (Date.now() - Date.parse(meta.updated ?? meta.created ?? "") < CARD_REUSE_MS) return meta.id;
+    writeDoc(dup, { ...meta, updated: now(), question: res.question ?? meta.question,
+      recommendation: res.recommendation ?? meta.recommendation, options: opts.join(" | ") },
+      `## Context\n${res.summary}\n\n## Options\n${opts.map((o) => `- ${o}`).join("\n")}\n`);
+    return meta.id;
+  }
+  const id = nextId("D", P("decisions"));
   writeDoc(P("decisions", "open", `${id}.md`), {
     id, task: task.id, agent: task.agent, host, created: now(),
     question: res.question ?? "", recommendation: res.recommendation ?? "", options: opts.join(" | "),
