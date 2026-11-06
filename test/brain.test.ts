@@ -57,7 +57,7 @@ test("read tools over the local data repo", async () => {
   expect((await runTool(st, "read_memory", { file: "config.local.toml" })).ok).toBe(false); // not memory
   expect((await runTool(st, "read_memory", { file: "../x.md" })).ok).toBe(false);
   expect((await r("search_journal", { query: "t-0100 done" })).lines).toEqual([{ day: "2026-11-03", line: "- 10:05 [pc] ✅ T-0100 done: fixed typo" }]);
-  expect((await r("search", { query: "合并" })).results.map((x: any) => x.id)).toEqual(["D-0099"]);
+  expect((await r("search", { query: "合并吗" })).results.map((x: any) => x.id)).toEqual(["D-0099"]);
 });
 
 test("writes are validated once, then performed by the store's acts", async () => {
