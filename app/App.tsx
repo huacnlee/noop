@@ -38,6 +38,7 @@ import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { checkForUpdate, downloadUpdate, installAndRestart } from "nsh/updater";
 import { avatarOf } from "./avatars";
 import { appendQuote } from "./quote";
+import { setupTray, type TrayChat } from "./tray";
 import { CHECK_EVERY_MS, createUpdates, type UpdateState } from "./update";
 import {
   alpha,
@@ -3319,7 +3320,7 @@ type Route =
   | { name: "doc"; path: string };
 const CHANNEL: Route = { name: "channel" };
 
-function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => void; onDisconnect: () => void }) {
+function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => void; onDisconnect: () => void; onTray?: (chat: TrayChat | null) => void }) {
   const hub = props.hub;
   const push = createPush(hub);
   const wide = () => windowSize().width >= WIDE;
@@ -3856,6 +3857,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (untracked(top).name === "team") { drawer.set(false); nav.popToRoot(); }
     else show({ name: "team" });
   };
+  // The tray menu counts the decisions waiting and opens the one the keys act on, or the team settings.
+  effect(() => props.onTray?.({ pending: pending().length, review: () => { const ref = untracked(target); if (ref) pick(ref); }, settings: openTeam }));
+  cleanup(() => props.onTray?.(null));
 
   // Shortcuts. Single keys never fire while typing (`notEditing`).
   keymap.bind("mod+enter", submit, { when: "always" });
@@ -4700,7 +4704,7 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
 
 // ---------------------------------------------------------------- app
 
-function Connected(props: { config: Config; openRef: string | null; onExpired: () => void; onLogout: () => void }) {
+function Connected(props: { config: Config; openRef: string | null; onExpired: () => void; onLogout: () => void; onTray: (chat: TrayChat | null) => void }) {
   const hub = createHub(props.config);
   cleanup(hub.dispose);
   // The service worker answers decisions from notifications with the session.
@@ -4714,6 +4718,7 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
       hub={hub}
       openRef={props.openRef}
       onConnection={props.onExpired}
+      onTray={props.onTray}
       onDisconnect={async () => {
         const off = await hostCall<{ endpoint: string | null }>("pushDisable");
         if (off?.endpoint) await hub.api("POST", "/api/push/unsubscribe", { endpoint: off.endpoint });
@@ -4734,6 +4739,8 @@ function App() {
   }
   Scrollbar.setTheme(scrollbarTheme);
   watchUpdates();
+  const trayChat = signal<TrayChat | null>(null);
+  setupTray(trayChat);
   const ready = signal(false);
   const config = signal<Config | null>(null);
   const url = signal("");
@@ -4774,7 +4781,7 @@ function App() {
             />
           }
         >
-          {(c) => <Connected config={c()} openRef={openRef} onExpired={() => forget(L("Your session expired. Please sign in again.", "登录已过期，请重新登录"))} onLogout={() => forget("")} />}
+          {(c) => <Connected config={c()} openRef={openRef} onExpired={() => forget(L("Your session expired. Please sign in again.", "登录已过期，请重新登录"))} onLogout={() => forget("")} onTray={(chat) => trayChat.set(chat)} />}
         </If>
       </If>
     </View>
