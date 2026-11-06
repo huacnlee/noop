@@ -22,8 +22,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Includes TextView selection export for quoting formatted message excerpts.
-  NSH_REF: 22140d235f163f0e90ab11aef689658b36fa832e
+  # Includes Tray and Notifications.show's `silent` (longbridge/nsh#1140).
+  NSH_REF: 21cc677dd71b317f4af64a1ac14e5257bb84b736
 
 defaults:
   run:

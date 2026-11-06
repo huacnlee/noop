@@ -2136,7 +2136,7 @@ function createPush(hub: Hub) {
     run(async () => {
       if (systemNotifications()) {
         showing.add("noop:test");
-        if (!(await Notifications.show({ id: "noop:test", title: "Noop", body: L("Test notification: system notifications are working.", "测试通知：系统通知已开通。") }))) throw new Error(L("The system didn’t accept the notification", "系统没有接收这条通知"));
+        if (!(await Notifications.show({ id: "noop:test", title: "Noop", body: L("Test notification: system notifications are working.", "测试通知：系统通知已开通。"), silent: true }))) throw new Error(L("The system didn’t accept the notification", "系统没有接收这条通知"));
         return L("Test notification sent", "测试通知已发出");
       }
       const r = await hub.api("POST", "/api/push/test");
@@ -3796,7 +3796,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
           if (!note) continue;
           const id = e.ref ?? `noop:${e.kind}`;
           showing.add(id);
-          void Notifications.show({ id, ...note });
+          void Notifications.show({ id, ...note, silent: true }); // Noop is quiet: the notification alone, no sound
         }
       });
     });
