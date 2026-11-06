@@ -89,7 +89,7 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
 
 function writeLocalConfig(me: string) {
   if (!existsSync(P("config.local.toml")))
-    writeFileSync(P("config.local.toml"), `# per-machine overrides & secrets (never synced)\n[host]\n# name = "${me}"\n# caps = []\n# max_parallel = 3\n\n[notify]\n# slack_bot_token = ""\n# discord_bot_token = ""\n`);
+    writeFileSync(P("config.local.toml"), `# per-machine overrides & secrets (never synced)\n[host]\n# name = "${me}"\n# caps = []\n# max_parallel = 3\n\n[notify]\n# slack_bot_token = ""\n# discord_bot_token = ""\n\n# env vars for agent CLIs (the background service never reads your shell rc)\n[env]\n# CLI_PROXY_API_KEY = ""\n`);
 }
 
 // ------------------------------------------------------------------ self-update

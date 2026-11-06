@@ -53,6 +53,8 @@ export function loadConfig(): Cfg {
     discord_bot_token: "HUB_DISCORD_BOT_TOKEN", discord_channel: "HUB_DISCORD_CHANNEL", discord_webhook: "HUB_DISCORD_WEBHOOK",
   };
   for (const [k, env] of Object.entries(envMap)) if (process.env[env]) cfg.notify[k] = process.env[env];
+  // [env] in config.local.toml: vars agent CLIs need (e.g. a codex provider env_key) that the service manager (launchd/systemd) never sources from the shell rc
+  for (const [k, v] of Object.entries(read("config.local.toml").env ?? {})) if (process.env[k] === undefined && v != null) process.env[k] = String(v);
   return cfg;
 }
 
