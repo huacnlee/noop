@@ -23,7 +23,7 @@ concurrency:
 
 env:
   # Includes Tray and Notifications.show's `silent` (longbridge/nsh#1140).
-  NSH_REF: 21cc677dd71b317f4af64a1ac14e5257bb84b736
+  NSH_REF: 05f77b7af55d6f7323ca371a133d72675f7fd908
 
 defaults:
   run:
