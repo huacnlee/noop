@@ -85,10 +85,11 @@ test("routine dedupe: a long-parked copy stops blocking, a fresh one still does"
   expect(A.routineQueued("parked")).toBe("T-0104");
 });
 
-test("read-only routines skip approval at onboarding; others and followups stay gated", () => {
+test("read-only routines and followups skip approval at onboarding; other work stays gated", () => {
   expect(A.needsApproval(cfg, "routine:uptime-watch")).toBe(false);
   expect(A.needsApproval(cfg, "routine:pr-review")).toBe(true);
-  expect(A.needsApproval(cfg, "followup:T-0001")).toBe(true);
+  expect(A.needsApproval(cfg, "followup:T-0001")).toBe(false); // event-driven channel: parent + depth cap + journal audit
+  expect(A.needsApproval(cfg, "routine:some-new-idea")).toBe(true); // new self-generated work still gated
   expect(A.needsApproval({ ...cfg, autonomy: { level: "onboarding", auto_routines: ["pr-review"] } }, "routine:pr-review")).toBe(false);
   expect(A.needsApproval(cfg, "routine:daily-report")).toBe(false); // housekeeping unchanged
 });
