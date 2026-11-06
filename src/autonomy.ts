@@ -19,8 +19,11 @@ export function needsApproval(cfg: Cfg, source: string): boolean {
   // want changed comes back as followups, which are still gated
   const rn = source.match(/^routine:(.+)$/)?.[1];
   if (rn && ((cfg.autonomy?.auto_routines ?? []).includes(rn) || (cfg.routine ?? []).some((r: any) => r.name === rn && r.readonly === true))) return false;
-  // onboarding: everything self-generated, except the hub's own housekeeping
-  return !/^idle|^routine:(evolve|triage-inbound|daily-report|learn)/.test(source);
+  // onboarding: everything self-generated, except the hub's own housekeeping and followups.
+  // Followups are the event-driven channel (an agent finishing a task hands the next step to a
+  // named agent): they always carry a parent task id, depth is capped by max_followup_depth, and
+  // every hop lands in the journal — the owner can reject or cancel any of them after the fact.
+  return !/^idle|^followup|^routine:(evolve|triage-inbound|daily-report|learn)/.test(source);
 }
 
 const QUEUED = ["inbox", "active", "waiting", "blocked"];
