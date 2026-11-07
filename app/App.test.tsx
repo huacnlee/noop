@@ -494,7 +494,7 @@ describe("channel", () => {
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:opt-D-0001-B");
     await app.press("id:other-D-0001");
-    await app.waitFor("Reply to D-0001");
+    await app.waitFor("id:reply-chip >> text:要不要升级依赖？建议：B");
     await app.type("id:composer", "先等一周");
     await app.keyboard.press("mod+enter");
     await app.waitUntil(() => posts.length === 1);
@@ -514,7 +514,7 @@ describe("channel", () => {
     // an open question answers through its card, so it has no reply action
     expect(app.shows("id:reply-e2")).toBe(false);
     await app.press("id:reply-e8");
-    await app.waitFor("Reply to Tripitaka: T-0009 已完成，PR 已开");
+    await app.waitFor("id:reply-chip >> text:T-0009 已完成，PR 已开");
     await app.type("id:composer", "再加个截图");
     await app.keyboard.press("mod+enter");
     await app.waitUntil(() => posts.length === 1);
@@ -818,9 +818,9 @@ describe("keyboard", () => {
     const app = await open("./App.tsx", { ...desk, network: hub([]) });
     await app.waitFor("id:opt-D-0001-B");
     await app.keyboard.press("r");
-    await app.waitFor("Reply to D-0001");
+    await app.waitFor("id:reply-chip >> text:要不要升级依赖？建议：B");
     await app.keyboard.press("escape");
-    expect(app.shows("Reply to D-0001")).toBe(false);
+    expect(app.shows("id:reply-chip")).toBe(false);
     await app.keyboard.press("escape");
     await app.keyboard.press("shift+/");
     await app.waitFor("Keyboard shortcuts");
