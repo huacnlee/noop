@@ -6,6 +6,7 @@ import { L, lang, LANG_KEY, LANGS } from "./i18n";
 import {
   cleanup,
   createAnimatedValue,
+  createMotion,
   colorScheme,
   computed,
   effect,
@@ -33,11 +34,12 @@ import {
   windowSize, token, openUrl, keyboardFrame, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, SpeechSession, ViewStyle } from "nsh";
-import { AlertDialog, Button, ContextMenu, Dialog, Menu, MenuItem, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline, type TextViewRef } from "nsh/base";
+import { AlertDialog, Button, ContextMenu, Dialog, Menu, MenuItem, MenuSeparator, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline, type TextViewRef } from "nsh/base";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
 import { checkForUpdate, downloadUpdate, installAndRestart } from "nsh/updater";
 import { avatarOf } from "./avatars";
 import { appendQuote } from "./quote";
+import { createTimelineWindow } from "./timeline";
 import { CHECK_EVERY_MS, createUpdates, type UpdateState } from "./update";
 import {
   alpha,
@@ -238,14 +240,16 @@ function createHub(cfg: Config) {
     ws.onopen = () => {
       failures = 0;
       conn.set("live");
+      loadStatus(); // whatever changed while disconnected; from here on the hub pushes it
     };
     ws.onmessage = (m: { data: unknown }) => {
       try {
-        events.update((evs) => merge(evs, [JSON.parse(String(m.data)) as HubEvent]));
+        const d = JSON.parse(String(m.data)) as HubEvent & { $status?: Status };
+        if (d.$status) status.set(d.$status);
+        else events.update((evs) => merge(evs, [d]));
       } catch {
-        return;
+        /* not JSON */
       }
-      loadStatus();
     };
     ws.onclose = () => {
       if (disposed) return;
@@ -279,7 +283,6 @@ function createHub(cfg: Config) {
     if (!r.ok) throw new Error(L(`Send failed (${r.status})`, `发送失败（${r.status}）`));
     const ev = (await r.json()) as HubEvent;
     if (ev?.id) events.update((evs) => merge(evs, [ev]));
-    loadStatus();
   }
 
   async function settings(patch?: Record<string, unknown>): Promise<SettingsView> {
@@ -316,7 +319,8 @@ function createHub(cfg: Config) {
 
   loadFeed().then(stream);
   loadStatus();
-  const timer = setInterval(loadStatus, 15000);
+  // the socket pushes the dashboard; only without it does the app poll, and slowly (Cloudflare free plan)
+  const timer = setInterval(() => untracked(conn) !== "live" && loadStatus(), 120_000);
   const dispose = () => {
     disposed = true;
     clearInterval(timer);
@@ -1329,31 +1333,14 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean }) {
   const cancellable = () => ["active", "inbox", "nohost", "waiting", "parked", "blocked", "proposed"].includes(t()?.state ?? "");
   const cancelling = signal(false);
   async function cancel() {
-    const running = t()?.state === "active";
-    const r = await AlertDialog.show({
-      title: L(`Cancel ${props.id}?`, `取消 ${props.id}？`),
-      description: running ? L("The running agent will be stopped. Changes it already made stay in the repository.", "正在运行的 agent 会被停下，已经做了的改动保留在仓库里。") : L("This task won’t run again.", "这个任务不会再执行。"),
-      actions: [
-        { id: "keep", label: L("Keep", "不取消"), role: "cancel" },
-        { id: "cancel", label: L("Cancel task", "取消任务"), role: "destructive" },
-      ],
-    });
-    if (r.action !== "cancel") return;
+    if (!(await confirmEndTask(props.id, false, t()?.state === "active"))) return;
     cancelling.set(true);
     try { await props.hub.api("POST", "/api/tasks/cancel", { id: props.id }); }
     catch { cancelling.set(false); }
   }
   // the owner already finished it himself (merged by hand, …): end it as done, not cancelled
   async function finish() {
-    const r = await AlertDialog.show({
-      title: L(`Mark ${props.id} as done?`, `把 ${props.id} 标记为完成？`),
-      description: t()?.state === "active" ? L("The running agent will be stopped and the task marked done.", "正在运行的 agent 会被停下，任务记为完成。") : L("The task will be marked done and won’t run again.", "任务记为完成，不再执行。"),
-      actions: [
-        { id: "keep", label: L("Back", "返回"), role: "cancel" },
-        { id: "done", label: L("Mark as done", "标记完成") },
-      ],
-    });
-    if (r.action !== "done") return;
+    if (!(await confirmEndTask(props.id, true, t()?.state === "active"))) return;
     cancelling.set(true);
     try { await props.hub.api("POST", "/api/tasks/cancel", { id: props.id, done: true }); }
     catch { cancelling.set(false); }
@@ -1680,6 +1667,28 @@ function SideRow(props: { onPress?: () => void; selected?: boolean; title?: stri
   );
 }
 
+/** Ask before ending a task: cancel it, or mark it done when the owner finished it himself. */
+async function confirmEndTask(id: string, done: boolean, running: boolean): Promise<boolean> {
+  const r = done
+    ? await AlertDialog.show({
+      title: L(`Mark ${id} as done?`, `把 ${id} 标记为完成？`),
+      description: running ? L("The running agent will be stopped and the task marked done.", "正在运行的 agent 会被停下，任务记为完成。") : L("The task will be marked done and won’t run again.", "任务记为完成，不再执行。"),
+      actions: [
+        { id: "keep", label: L("Back", "返回"), role: "cancel" },
+        { id: "end", label: L("Mark as done", "标记完成") },
+      ],
+    })
+    : await AlertDialog.show({
+      title: L(`Cancel ${id}?`, `取消 ${id}？`),
+      description: running ? L("The running agent will be stopped. Changes it already made stay in the repository.", "正在运行的 agent 会被停下，已经做了的改动保留在仓库里。") : L("This task won’t run again.", "这个任务不会再执行。"),
+      actions: [
+        { id: "keep", label: L("Keep", "不取消"), role: "cancel" },
+        { id: "end", label: L("Cancel task", "取消任务"), role: "destructive" },
+      ],
+    });
+  return r.action === "end";
+}
+
 /** How far the wide layout's floating sidebar sits from the window's edges. */
 const sidebarInset = 8;
 
@@ -1709,6 +1718,21 @@ function Sidebar(props: {
   const s = () => props.hub.status();
   // the hub closes a decision on its next tick: one the channel already shows answered leaves the list now
   const waits = computed(() => { const done = answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
+  // the sidebar's right-click menu: end a task that can't go on without opening it
+  const endTask = async (id: string, done: boolean) => {
+    const running = (s()?.active ?? []).some((a) => a.id === id);
+    if (await confirmEndTask(id, done, running)) await props.hub.api("POST", "/api/tasks/cancel", done ? { id, done: true } : { id }).catch(() => {});
+  };
+  const menuStyle = () => ({ minWidth: 160, padding: 4, borderRadius: radius.control, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface });
+  const itemStyle = { height: 32, justifyContent: "center" as const, paddingHorizontal: 10, borderRadius: 6 };
+  const taskItems = (id: string) => [
+    <MenuItem testID={`side-done-${id}`} onSelect={() => void endTask(id, true)} hoverStyle={hovered()} style={itemStyle}>
+      <Text style={{ fontSize: 14, color: colors.text }}>{L("Mark as done", "标记完成")}</Text>
+    </MenuItem>,
+    <MenuItem testID={`side-cancel-${id}`} onSelect={() => void endTask(id, false)} hoverStyle={hovered()} style={itemStyle}>
+      <Text style={{ fontSize: 14, color: colors.danger }}>{L("Cancel task", "取消任务")}</Text>
+    </MenuItem>,
+  ];
   const queue = () => {
     const q = s()?.tasks;
     return [
@@ -1773,6 +1797,7 @@ function Sidebar(props: {
                 >
                   <Text style={{ fontSize: 14, color: colors.text }}>{L("Ignore, you decide", "忽略，你来定")}</Text>
                 </MenuItem>
+                {d().task ? taskItems(d().task!) : null}
               </ContextMenu>
             )}
           </Each>
@@ -1783,11 +1808,15 @@ function Sidebar(props: {
           <SideHeading title={L("In progress", "进行中")} count={s()?.active.length || undefined} />
           <Each of={s()?.active ?? []} key={(a) => a.id}>
             {(a) => (
-              <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${a().agent}${a().host ? ` @ ${a().host}` : ""}`}>
-                <Dot tone="run" />
-                <Text style={rowText()}>{a().title}</Text>
-                <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{since(a().started)}</Text>
-              </SideRow>
+              <ContextMenu margin={8} popupStyle={menuStyle()} trigger={
+                <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${a().agent}${a().host ? ` @ ${a().host}` : ""}`}>
+                  <Dot tone="run" />
+                  <Text style={rowText()}>{a().title}</Text>
+                  <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{since(a().started)}</Text>
+                </SideRow>
+              }>
+                {taskItems(a().id)}
+              </ContextMenu>
             )}
           </Each>
           <If when={!s()?.active.length}>
@@ -1798,11 +1827,15 @@ function Sidebar(props: {
             <SideHeading title={L("Queued", "排队")} count={(s()?.recent ?? []).filter((t) => !(s()?.active ?? []).some((a) => a.id === t.id) && isQueued(t.state)).length} />
             <Each of={(s()?.recent ?? []).filter((t) => !(s()?.active ?? []).some((a) => a.id === t.id) && isQueued(t.state))} key={(a) => a.id}>
               {(a) => (
+                <ContextMenu margin={8} popupStyle={menuStyle()} trigger={
                 <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`}>
                   <Dot tone={TONE[a().state ?? ""] ?? "off"} />
                   <Text style={{ ...rowText(), color: colors.muted }}>{a().title}</Text>
                   <Text style={{ maxWidth: "50%", minWidth: 0, flexShrink: 1, numberOfLines: 1, fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{a().state === "waiting" ? L("Waiting on subtasks", "等子任务") : a().state === "parked" ? L("Waiting", "等待") : a().state === "nohost" ? L(`Waiting for ${needsLabel((a() as { needs?: string }).needs)}`, `等 ${needsLabel((a() as { needs?: string }).needs)}`) : L("Queued", "排队中")}</Text>
                 </SideRow>
+                }>
+                  {taskItems(a().id)}
+                </ContextMenu>
               )}
             </Each>
           </If>
@@ -1859,14 +1892,63 @@ function Sidebar(props: {
           paddingBottom: touch ? safeArea().bottom : 0,
         }}
       >
-        <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-          <Text style={{ fontSize: 13, fontWeight: "600", color: colors.text }}>{L("Channel", "主会话")}</Text>
-          <Text style={{ fontSize: 12, color: colors.muted, numberOfLines: 1 }}>{props.hub.cfg.url.replace(/^https?:\/\//, "")}</Text>
-        </View>
-        <ToolButton icon={isDark() ? "sun" : "moon"} label={isDark() ? L("Light appearance", "浅色外观") : L("Dark appearance", "深色外观")} noTooltip onPress={toggleTheme} testID="theme" />
-        <ToolButton icon="settings" label={L("Settings", "设置")} shortcut={keymap.label("mod+,")} onPress={props.onSettings} testID="settings" />
+        <UserMenu hub={props.hub} onSettings={props.onSettings} />
       </View>
     </View>
+  );
+}
+
+/** The sidebar footer: who and where, opening the user menu (settings, appearance, language). */
+function UserMenu(props: { hub: Hub; onSettings: () => void }) {
+  const who = () => L("Channel", "主会话");
+  const item = { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, height: 32, paddingHorizontal: 10, borderRadius: 6 };
+  const label = (t: string) => <Text style={{ fontSize: 12, fontWeight: "600", color: colors.faint, paddingHorizontal: 10, paddingTop: 6, paddingBottom: 2 }}>{t}</Text>;
+  const sep = () => <MenuSeparator style={{ height: 1, marginVertical: 4, marginHorizontal: 4, backgroundColor: colors.line }} />;
+  const radio = (text: string, on: () => boolean, pick: () => void, testID: string) => (
+    <MenuItem testID={testID} role="menuitemradio" checked={on()} onSelect={() => !on() && pick()} hoverStyle={hovered()} style={item}>
+      <View style={{ width: 14 }}>
+        <If when={on()}>
+          <Icon name="check" size={13} tint={colors.text} />
+        </If>
+      </View>
+      <Text style={{ fontSize: 14, color: colors.text }}>{text}</Text>
+    </MenuItem>
+  );
+  return (
+    <Menu
+      align="start"
+      offset={6}
+      margin={8}
+      popupStyle={{ minWidth: 220, padding: 4, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
+      trigger={
+        <View
+          role="button"
+          testID="user-menu"
+          accessibilityLabel={L("Account menu", "用户菜单")}
+          hoverStyle={hovered()}
+          style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 8, minHeight: 40, paddingHorizontal: 8, marginLeft: -8, borderRadius: radius.control }}
+        >
+          <View style={{ flex: 1, gap: 1 }}>
+            <Text style={{ fontSize: 13, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{who()}</Text>
+            <Text style={{ fontSize: 12, color: colors.muted, numberOfLines: 1 }}>{props.hub.cfg.url.replace(/^https?:\/\//, "")}</Text>
+          </View>
+          <Icon name="chevron-up" size={13} tint={colors.muted} />
+        </View>
+      }
+    >
+      <MenuItem testID="settings" onSelect={props.onSettings} hoverStyle={hovered()} style={item}>
+        <Icon name="settings" size={15} tint={colors.muted} />
+        <Text style={{ flex: 1, fontSize: 14, color: colors.text }}>{L("Settings", "设置")}</Text>
+        <Text style={{ fontSize: 12, color: colors.faint }}>{keymap.label("mod+,")}</Text>
+      </MenuItem>
+      {sep()}
+      {label(L("Appearance", "外观"))}
+      {radio(L("Light", "浅色"), () => !isDark(), () => toggleTheme(), "theme-light")}
+      {radio(L("Dark", "深色"), () => isDark(), () => toggleTheme(), "theme-dark")}
+      {sep()}
+      {label(L("Language", "语言"))}
+      <Each of={LANGS}>{(l) => radio(l().label, () => lang() === l().id, () => pickLang(l().id), `menu-lang-${l().id}`)}</Each>
+    </Menu>
   );
 }
 
@@ -3420,14 +3502,20 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const PAGE = 200;
   const limit = signal(PAGE);
   let built = new Map<string, TimelineRow>();
+  const timelineWindow = createTimelineWindow(PAGE);
   const UNREAD: TimelineRow = { key: "unread", unread: true };
   const timeline = computed((): TimelineRow[] => {
     const d = divider();
     const next = new Map<string, TimelineRow>();
     const out: TimelineRow[] = [];
     const all = shown();
-    const hidden = Math.max(0, all.length - limit());
-    if (hidden) out.push({ key: "more", more: hidden });
+    const hidden = timelineWindow.update(all, hub.loaded(), limit(), untracked(atEnd) && untracked(onChannel));
+    if (hidden) {
+      const old = built.get("more");
+      const more = old && "more" in old && old.more === hidden ? old : { key: "more", more: hidden };
+      next.set("more", more);
+      out.push(more);
+    }
     for (const row of rows(hidden ? all.slice(hidden) : all)) {
       if ("event" in row && row.event.id === d) out.push(UNREAD);
       const old = built.get(row.key);
@@ -4012,27 +4100,32 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                         </View>
                       );
                     }
+                    const entrance = timelineWindow.takeArrival(row.event.id) ? createMotion({
+                      enter: { keyframes: { opacity: [0, 1], translateY: [8, 0] }, duration: 180, easing: "easeOut" },
+                    }) : undefined;
                     if (row.event.kind === "owner") {
                       const out = () => outbox().find((o) => o.id === row.event.id);
-                      return <OwnerBubble hub={hub} event={row.event} out={out()} onRetry={() => void deliver(row.event.id)} onRecall={() => undo(row.event.id)} onRef={pick} />;
+                      return <View style={entrance?.style}><OwnerBubble hub={hub} event={row.event} out={out()} onRetry={() => void deliver(row.event.id)} onRecall={() => undo(row.event.id)} onRef={pick} /></View>;
                     }
                     return (
-                      <Message
-                        hub={hub}
-                        event={row.event}
-                        answered={answered}
-                        target={target}
-                        onAnswer={answer}
-                        onReply={reply}
-                        onQuote={(markdown, ref) => {
-                          draft.update((value) => appendQuote(value, markdown));
-                          replyNote.set(null);
-                          replyTo.set(ref ?? null);
-                          composer?.focus();
-                          composer?.setSelection(draft().length);
-                        }}
-                        selection={proposalSelection}
-                      />
+                      <View style={entrance?.style}>
+                        <Message
+                          hub={hub}
+                          event={row.event}
+                          answered={answered}
+                          target={target}
+                          onAnswer={answer}
+                          onReply={reply}
+                          onQuote={(markdown, ref) => {
+                            draft.update((value) => appendQuote(value, markdown));
+                            replyNote.set(null);
+                            replyTo.set(ref ?? null);
+                            composer?.focus();
+                            composer?.setSelection(draft().length);
+                          }}
+                          selection={proposalSelection}
+                        />
+                      </View>
                     );
                   }}
                 </Each>

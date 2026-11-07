@@ -18,6 +18,8 @@ beforeAll(async () => {
   hosts.a = join(W, "a", "data"); hosts.b = join(W, "b", "data");
   mkdirSync(hosts.a, { recursive: true }); mkdirSync(hosts.b, { recursive: true });
   t = await sync.fakeTransport(join(W, "worker.sqlite"), "test");
+  // these tests check sync semantics; pacing (pull debounce, lazy journal pushes) is test/budget.test.ts's
+  sync.syncTiming.pullMinMs = 0; sync.syncTiming.lazyPushMs = 0;
 });
 afterAll(() => { try { rmSync(W, { recursive: true, force: true }); } catch {} }); // Windows keeps the open worker.sqlite locked
 
@@ -127,6 +129,32 @@ test("history pruning keeps the latest row of each path", async () => {
   for (const [p, v] of [["a", 1], ["a", 2], ["b", 1]] as const) sql.exec("INSERT INTO history (path, version, ts) VALUES (?, ?, ?)", p, v, old);
   pruneHistory(sql);
   expect(sql.exec("SELECT path, version FROM history ORDER BY path").toArray()).toEqual([{ path: "a", version: 2 }, { path: "b", version: 1 }]);
+});
+
+test("history pruning caps versions per path and drops journals and heartbeats", async () => {
+  const { initFilesSchema, pruneHistory } = await import("../cloud/src/files");
+  const { Database } = await import("bun:sqlite");
+  const db = new Database(":memory:");
+  const sql = { exec: (q: string, ...b: any[]) => { if (!b.length && q.includes(";")) { db.exec(q); return { toArray: () => [] }; } const rows = db.query(q).all(...b); return { toArray: () => rows as any[] }; } };
+  initFilesSchema(sql);
+  const ts = new Date().toISOString();
+  for (let v = 1; v <= 40; v++) for (const p of ["tasks/done/T-1.md", "journal/2026-11-06.md", "fleet/hosts/a.json"])
+    sql.exec("INSERT INTO history (path, version, ts) VALUES (?, ?, ?)", p, v, ts);
+  pruneHistory(sql);
+  const rows = sql.exec("SELECT path, COUNT(*) AS n, MIN(version) AS lo, MAX(version) AS hi FROM history GROUP BY path ORDER BY path").toArray();
+  expect(rows).toEqual([{ path: "tasks/done/T-1.md", n: 30, lo: 11, hi: 40 }]);
+});
+
+test("worker API: a journal keeps no history; its history view is the current version", async () => {
+  const b64 = (s: string) => Buffer.from(s).toString("base64");
+  let v = 0;
+  for (const text of ["- a\n", "- a\n- b\n", "- a\n- b\n- c\n"]) {
+    const r = await api("/api/files/commit", { msg: "beat", changes: [{ path: "journal/2026-01-01.md", base_version: v, content: b64(text) }] });
+    expect(r!.status).toBe(200); v = r!.json.files[0].version;
+  }
+  const h = (await api("/api/files/history?path=journal/2026-01-01.md&content=1"))!.json.history;
+  expect(h.map((x: any) => x.version)).toEqual([v]);
+  expect(Buffer.from(h[0].content, "base64").toString()).toBe("- a\n- b\n- c\n");
 });
 
 test("own commit echoing back on the next pull does not clobber newer local edits", async () => {

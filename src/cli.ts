@@ -13,7 +13,7 @@ import { writeRules } from "./rules";
 import { backoffMinutes, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
 import { computeMetrics } from "./metrics";
 import { collect, LEARN_PROMPT } from "./sessions";
@@ -24,7 +24,7 @@ import { answerFromChat, appendEvent, cancelTask, drainInbound, feed, handleOwne
 import { reopenTask, type BrainOut, ClaudeModel, SYSTEM, dataActs, localStore, logBrain, think } from "./brain";
 import { runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
-import { adoptCloudUrl } from "./sync";
+import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
 import { CODE, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
@@ -359,7 +359,7 @@ async function drainAndExit(why: string, host: string) {
       await _pull();
       if (u?.state === "waiting") heartbeat(loadConfig(), running, sample(loadConfig()));
       journal(host, `🔄 daemon ${why}: all running work finished, exiting`);
-      await _commitPush(`[${host}] ${why}`);
+      await _commitPush(`[${host}] ${why}`, { force: true });
     });
   } catch {}
   process.exit(0);
@@ -380,7 +380,7 @@ async function ownerUpdate(c: Cfg, host: string) {
   // each step goes out in the heartbeat at once, so the owner watches it in Settings › 版本
   const report = async (state: UpdateState["state"], detail?: string) => {
     setUpdateState({ at, state, detail, from });
-    await locked(async () => { await _pull(); heartbeat(c, running, sample(c)); await _commitPush(`[${host}] update: ${state}`); }).catch(() => {});
+    await locked(async () => { await _pull(); heartbeat(c, running, sample(c)); await _commitPush(`[${host}] update: ${state}`, { force: true }); }).catch(() => {});
   };
   await report("updating", "拉取并测试新代码");
   const updated = await selfUpdate({ force: true, deploy: true }).catch(() => false);
@@ -722,6 +722,13 @@ async function daemon(cfg: Cfg) {
       else writeDoc(P("tasks", "rejected", `${kid}.md`), { ...kd.meta, cancelled: now() }, `${kd.body}\n\n## Cancelled ${now()}\nParent ${tid} was cancelled.\n`);
       unlinkSync(P("tasks", k, `${kid}.md`));
     }
+    for (const d of list(P("decisions", "open"))) { // its open cards go too: nothing is left to answer
+      const dd = readDoc(d);
+      if (dd.meta.task !== tid) continue;
+      writeDoc(P("decisions", "closed", basename(d)), { ...dd.meta, answer: done ? "已完成" : "已取消", answered_by: "owner(app)", answered: now() },
+        `${dd.body}\n## Closed (owner)\nTask ${tid} was ${done ? "marked done" : "cancelled"} by the owner.\n`);
+      unlinkSync(d);
+    }
     journal(host, done ? `✅ ${tid} 你已标记为完成` : `🛑 ${tid} 已按你的要求取消`);
     await _commitPush(`[${host}] ${done ? "finish" : "cancel"} ${tid}`);
     return done ? "done" : "cancelled";
@@ -832,13 +839,22 @@ async function daemon(cfg: Cfg) {
   }
 }
 
-function status(cfg: Cfg, brief = false) {
+async function status(cfg: Cfg, brief = false) {
   if (brief) { // what a person wants to see right after installing
     const url = cfg.cloud?.url;
     const hosts = onlineHosts(cfg).map((h) => h.host);
     console.log(`  ✓ ${hostName(cfg)} is part of your team${hosts.length > 1 ? ` (${hosts.length} machines online)` : ""}`);
     if (url) console.log(`\n  Open ${url}\n  and sign in with the code sent to your email.`);
     return;
+  }
+  // the server this machine actually syncs with is noop.toml's; the shared config only proposes one (adopted next tick)
+  const hub = String(readHubToml().cloud?.url ?? "").replace(/\/$/, ""), shared = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
+  console.log(`server: ${hub || "local (not connected to a hub)"}${shared && hub && shared !== hub ? `   (shared config says ${shared}: switching on the next tick)` : ""}`);
+  if (hub) { // today's Cloudflare usage against the free plan (cloud/src/budget.ts)
+    const u = await fetch(`${hub}/api/usage`, { headers: { Authorization: `Bearer ${cfg.server?.token}` }, signal: AbortSignal.timeout(5000) })
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null) as any;
+    const pct = (k: string) => `${Math.round((100 * u[k]) / u.free[k])}%`;
+    if (u?.free) console.log(`cloudflare today (UTC): ${u.requests} requests ${pct("requests")} · ${u.rowsRead} rows read ${pct("rowsRead")} · ${u.rowsWritten} rows written ${pct("rowsWritten")} of the free plan · db ${(u.dbBytes / 1e6).toFixed(0)} MB · ${u.level}`);
   }
   console.log(`autonomy: ${level(cfg)}   shadow judge: ${JSON.stringify(judgeAccuracy())}`);
   console.log(`host ${hostName(cfg)}  caps: ${hostCaps(cfg).join(", ")}  primary: ${cfg.fleet?.primary}`);
@@ -937,7 +953,7 @@ async function main() {
       await commitPush(`[${host}] decide ${id}`);
       return;
     }
-    case "status": return status(cfg, rest.includes("--brief"));
+    case "status": return void (await status(cfg, rest.includes("--brief")));
     case "learn": {
       const d = collect(cfg, { full: rest.includes("--full") });
       if (!d.file) return void console.log(`no new sessions (${d.sessions})`);

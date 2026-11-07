@@ -64,7 +64,7 @@ export type Status = {
   tasks: Record<"proposed" | "inbox" | "active" | "blocked" | "failed" | "done", number>;
   active: TaskInfo[];
   recent?: TaskInfo[];
-  decisions: { id: string; kind: string; question?: string; held: boolean }[];
+  decisions: { id: string; kind: string; question?: string; held: boolean; task?: string }[];
   hosts: HostInfo[];
   /** The owner's latest "update every machine" request. */
   update?: { at: string };
@@ -180,8 +180,9 @@ export function normalizeUrl(url: string): string {
   return u;
 }
 
+/** v=2: the hub also pushes {"$status": …} frames, so a connected client never polls /api/status. */
 export const wsUrl = (base: string, token: string) =>
-  `${base.replace(/^http/i, "ws")}/api/stream?token=${encodeURIComponent(token)}`;
+  `${base.replace(/^http/i, "ws")}/api/stream?v=2&token=${encodeURIComponent(token)}`;
 
 export const mediaUrl = (base: string, token: string, path: string) =>
   /^(blob|data):/i.test(path)
