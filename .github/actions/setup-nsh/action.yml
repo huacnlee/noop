@@ -121,6 +121,13 @@ runs:
           *) echo "::error::unknown target $TARGET"; exit 1 ;;
         esac
 
+    # Preserve the expensive macOS build even if a later packaging or validation step fails.
+    - if: inputs.target == 'macos' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.nsh-dist
+        key: nsh-dist-${{ runner.os }}-${{ inputs.target }}-${{ inputs.ref }}-${{ runner.arch }}-${{ inputs.rust-target || 'native' }}
+
     - shell: bash
       run: |
         bin="$HOME/.nsh-dist/bin"

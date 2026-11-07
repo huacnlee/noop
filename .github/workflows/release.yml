@@ -108,7 +108,7 @@ jobs:
           app="$RUNNER_TEMP/verify/Noop.app"
           ditto -x -k "assets/$ASSET" "$RUNNER_TEMP/verify"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-          lipo -verify_arch "$ARCH" "$app/Contents/MacOS/$executable"
+          lipo "$app/Contents/MacOS/$executable" -verify_arch "$ARCH"
           codesign --verify --deep --strict "$app"
 
       - name: Try the installer on this package
