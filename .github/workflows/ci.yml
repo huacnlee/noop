@@ -2,7 +2,7 @@ name: ci
 on: [push, pull_request]
 jobs:
   test:
-    strategy: { matrix: { os: [ubuntu-latest, macos-latest] } }
+    strategy: { matrix: { os: [ubuntu-latest, macos-latest, macos-15-intel] } }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

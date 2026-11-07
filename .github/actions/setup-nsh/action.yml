@@ -16,7 +16,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.nsh-dist
-        key: nsh-dist-${{ runner.os }}-${{ inputs.target }}-${{ inputs.ref }}
+        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ inputs.ref }}
 
     # `nsh package` needs a JDK and the SDK's platform for Android, cached or not.
     - if: inputs.target == 'android'
