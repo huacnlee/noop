@@ -1249,7 +1249,7 @@ function Message(props: {
           body
         )}
         <If when={e.text.trim()}>
-          <MsgActions id={e.id} text={e.text} show={() => touch || over()} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? `${displayName(e.from)}${L(": ", "：")}${firstLine(e.text)}` : undefined) : undefined} />
+          <MsgActions id={e.id} text={e.text} show={() => touch || over()} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? firstLine(e.text) : undefined) : undefined} />
         </If>
       </View>
     </View>
@@ -4304,7 +4304,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                 <If when={replyTo()}>
                   {(ref) => (
                     <View testID="reply-chip" style={{ flexDirection: "row", alignItems: "center", gap: 8, alignSelf: "flex-start", maxWidth: "100%", height: 30, paddingLeft: 10, paddingRight: 4, borderRadius: 8, backgroundColor: tints.accent }}>
-                      <Text style={{ ...chipText, flexShrink: 1, numberOfLines: 1, fontSize: 14, fontWeight: "500", color: colors.accent }}>{replyNote() ? L(`Reply to ${replyNote()}`, `回复 ${replyNote()}`) : L(`Reply to ${ref()}`, `回复 ${ref()}`)}</Text>
+                      <Text style={{ ...chipText, flexShrink: 1, numberOfLines: 1, fontSize: 14, fontWeight: "500", color: colors.accent }}>{firstLine(replyNote() ?? shown().findLast((e) => e.ref === ref())?.text ?? ref()).replace(/\s+/g, " ").trim()}</Text>
                       <View
                         onPress={() => replyTo.set(null)}
                         role="button"

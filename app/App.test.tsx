@@ -436,21 +436,22 @@ describe("channel", () => {
 
   test("replies to an agent's message: the reply names its task and quotes it", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const kai = { id: "e9", ts: ts(9), from: "Kai@lb", kind: "notice", ref: "T-0125", text: "nsh #812 主要修的是文字排版\n细节在 PR 里" };
+    const kai = { id: "e9", ts: ts(9), from: "Kai@lb", kind: "notice", ref: "T-0125", text: "\n  \t nsh #812   主要修的是文字排版\n细节在 PR 里" };
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, [kai]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:reply-e9");
     expect(app.shows("id:reply-e1")).toBe(false); // a message with no task can't be replied to
     await app.hover("text:/主要修的是文字排版/");
     await app.press("id:reply-e9");
     await app.waitFor("id:reply-chip");
-    expect(app.shows("text:Reply to Tripitaka: nsh #812 主要修的是文字排版")).toBe(true);
+    expect(app.shows("id:reply-chip >> text:nsh #812 主要修的是文字排版")).toBe(true);
+    expect(app.shows("text:/^Reply to Tripitaka:/")).toBe(false);
     await app.type("id:composer", "为何我看图片不清晰呢");
     await app.press("id:send");
     await app.waitUntil(() => posts.length === 1, { timeout: 10_000 });
     expect(posts[0]).toEqual({ text: "为何我看图片不清晰呢", reply_to: "T-0125" });
     expect(app.shows("id:reply-chip")).toBe(false);
     await app.waitFor("id:reply-to-T-0125");
-    expect(app.shows("text:/Tripitaka: nsh #812 主要修的是文字排版/")).toBe(true);
+    expect(app.shows("text:/Tripitaka: nsh #812 +主要修的是文字排版/")).toBe(true);
   });
 
   test("a question can be ignored from its card or from the sidebar", async () => {
