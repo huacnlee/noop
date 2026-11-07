@@ -162,7 +162,8 @@ async function processTask(path: string, cfg: Cfg, host: string) {
       const was = `${acct.cli}/${acct.name}`;
       await locked(async () => {
         await _pull();
-        journal(host, `🔀 ${meta.id} ${was} ${failure === "quota" ? "额度用完" : "需要登录"}，立即改用 ${next.cli}/${next.name} 在本机重跑`);
+        const why = failure === "quota" ? "额度用完" : failure === "transient" ? "接口暂时连不上" : "需要登录";
+        journal(host, `🔀 ${meta.id} ${was} ${why}，立即改用 ${next.cli}/${next.name} 在本机重跑`);
         await _commitPush(`[${host}] ${meta.id} switch to ${next.cli}`);
       });
       acct = next;
@@ -410,7 +411,10 @@ async function ownerUpdate(c: Cfg, host: string) {
 async function handleFailure(meta: Record<string, string>, body: string, summary: string, out: string, cfg: Cfg, host: string) {
   const attempt = Number(meta.attempt ?? 1);
   // no keyword matching: when the agent could not even report a result, the medic (AI) decides whether the tooling broke
-  const tooling = /agent returned no result block/.test(summary);
+  // The account failover loop already classified a transient endpoint outage and retried/cleared it; that is not
+  // a broken install, so don't spawn the medic (or tell the owner to fix a flapping local gateway).
+  const transient = classify(out) === "transient";
+  const tooling = /agent returned no result block/.test(summary) && !transient;
   if (tooling) void medic(`Agent run for ${meta.id} on ${host} ended without a result. Decide whether the tooling (CLI, auth, environment) is at fault and fix it; ignore it if the task itself failed:\n${out.slice(-2500)}`,
     cfg, { auto: true, kind: `tool-${meta.cli_used ?? "agent"}` });
   if (attempt < (cfg.fleet?.max_attempts ?? 2)) {
