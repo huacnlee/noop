@@ -1268,14 +1268,19 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
   return (
     <Scroll testID="task-history" style={{ flex: 1 }}>
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 32 : 16, paddingVertical: 20 }}>
-        <Input
-          testID="task-search"
-          value={query()}
-          onChange={({ value }) => { query.set(value); void load(true); }}
-          placeholder={L("Search by ID, title or member", "搜索编号、标题或成员")}
-          class="placeholder:text-faint"
-          style={{ height: 38, paddingHorizontal: 12, fontSize: 15, color: colors.text, borderRadius: radius.control, borderWidth: 1, borderColor: colors.fieldBorder, backgroundColor: colors.surface }}
-        />
+        {/* searched on the button or Enter, not on every keystroke: each search reads every task on the server */}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Input
+            testID="task-search"
+            value={query()}
+            onChange={({ value }) => query.set(value)}
+            onSubmit={() => void load(true)}
+            placeholder={L("Search by ID, title or member", "搜索编号、标题或成员")}
+            class="placeholder:text-faint"
+            style={{ flex: 1, height: 38, paddingHorizontal: 12, fontSize: 15, color: colors.text, borderRadius: radius.control, borderWidth: 1, borderColor: colors.fieldBorder, backgroundColor: colors.surface }}
+          />
+          <Btn testID="task-search-button" label={L("Search", "搜索")} kind="secondary" disabled={loading()} onPress={() => void load(true)} />
+        </View>
         <If when={error()}><Text style={{ fontSize: 14, color: colors.danger }}>{error()}</Text></If>
         <If when={total() === 0 && !loading()}><Text style={{ fontSize: 14, color: colors.faint }}>{L("No matching tasks", "没有符合的任务")}</Text></If>
         <View>
@@ -3410,14 +3415,20 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
   // List diffs its items by identity: rebuilt rows would read as all replaced on every new message,
   // losing their measurements and the reader's place. Reuse each row while its event is the same.
-  type TimelineRow = Row | { key: string; unread: true };
+  type TimelineRow = Row | { key: string; unread: true } | { key: string; more: number };
+  /** The newest messages shown; older ones wait behind 「加载更早的消息」 so the list stays short. */
+  const PAGE = 200;
+  const limit = signal(PAGE);
   let built = new Map<string, TimelineRow>();
   const UNREAD: TimelineRow = { key: "unread", unread: true };
   const timeline = computed((): TimelineRow[] => {
     const d = divider();
     const next = new Map<string, TimelineRow>();
     const out: TimelineRow[] = [];
-    for (const row of rows(shown())) {
+    const all = shown();
+    const hidden = Math.max(0, all.length - limit());
+    if (hidden) out.push({ key: "more", more: hidden });
+    for (const row of rows(hidden ? all.slice(hidden) : all)) {
       if ("event" in row && row.event.id === d) out.push(UNREAD);
       const old = built.get(row.key);
       const keep = old && ("event" in row ? "event" in old && old.event === row.event : "day" in old);
@@ -3698,7 +3709,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
 
   const canSend = () => !!draft().trim() || attachments().length > 0;
-  const compactComposer = () => !focused() && !draft() && !attachments().length && !replyTo();
+  const compactComposer = () => !focused() && !draft() && !attachments().length && !replyTo() && speech() === "off";
   const answer = (ref: string, c: string) => {
     clearNotification(ref);
     return send(`${ref} ${c}`, null);
@@ -3718,6 +3729,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   }
   /** Virtualized cards can be off screen; locate the row by identity instead of measuring a view. */
   function toCard(ref: string, tries: number) {
+    const at = shown().findIndex((e) => e.ref === ref && isAsk(e));
+    if (at >= 0 && shown().length - at > untracked(limit)) limit.set(shown().length - at); // older than the page: show it
     const index = timeline().findIndex((row) => "event" in row && row.event.ref === ref && isAsk(row.event));
     if (index >= 0 && scroller) {
       scroller.scrollToIndex({ index, animated: true, viewOffset: 24 });
@@ -3974,6 +3987,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                 <Each of={[item()]} key={(r) => r.key}>
                   {(r) => {
                     const row = r();
+                    if ("more" in row) {
+                      return (
+                        <View style={{ alignItems: "center", marginTop: 16, marginBottom: 4 }}>
+                          <Btn testID="timeline-more" label={L(`Load earlier messages (${row.more})`, `加载更早的消息（还有 ${row.more} 条）`)} kind="secondary" onPress={() => limit.set(untracked(limit) + PAGE)} />
+                        </View>
+                      );
+                    }
                     if ("unread" in row) {
                       return (
                         <View testID="unread" style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 16, marginBottom: 4 }}>
@@ -4094,11 +4114,12 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               </If>
               <View
                 style={{
-                  flexDirection: compactComposer() ? "row" : "column",
-                  alignItems: compactComposer() ? "center" : "stretch",
+                  flexDirection: "column",
+                  alignItems: "stretch",
+                  overflow: "hidden",
                   gap: 6,
                   paddingTop: compactComposer() ? 4 : 12,
-                  paddingBottom: compactComposer() ? 4 : 8,
+                  paddingBottom: compactComposer() ? 4 : (touch ? 44 : 36) + 14,
                   paddingLeft: 18,
                   paddingRight: 8,
                   ...composerGlass(focused()),
@@ -4154,11 +4175,6 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                 <If when={attachNote()}>
                   {(note) => <Text testID="attach-note" style={{ fontSize: 13, color: colors.danger }}>{note()}</Text>}
                 </If>
-                <If when={compactComposer()}>
-                  <View testID="attach" role="button" accessibilityLabel={L("Add image", "添加图片")} onPress={() => void pickImages()} hoverStyle={hovered()} style={{ width: touch ? 44 : 36, height: touch ? 44 : 36, marginLeft: -8, borderRadius: touch ? 22 : 18, alignItems: "center", justifyContent: "center" }}>
-                    <Icon name="plus" size={touch ? 22 : 18} tint={colors.text} />
-                  </View>
-                </If>
                 <Input
                   testID="composer"
                   ref={(r) => (composer = r)}
@@ -4176,21 +4192,28 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     if (uris.length) void attachUris(uris);
                   }}
                   onFocus={() => {
-                    if (compactComposer() && !reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut"));
+                    if (compactComposer() && !reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut", "opacity"));
                     focused.set(true);
                   }}
                   onBlur={() => {
-                    if (!draft() && !attachments().length && !replyTo() && !reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut"));
+                    if (!draft() && !attachments().length && !replyTo() && !reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut", "opacity"));
                     focused.set(false);
                   }}
                   onContentSizeChange={({ size: s }) => inputHeight.set(Math.min(220, Math.max(28, s.height)))}
                   placeholder={replyTo() ? L(`Reply to ${replyTo()}…`, `回复 ${replyTo()}…`) : wide() ? L("Tell the team what to do, e.g. screenshot and check the nsh gallery on Linux", "给团队下指令，例如：把 nsh 的 gallery 在 Linux 上截图检查一遍") : L("Tell the team what to do…", "给团队下指令…")}
                   class={platform.os === "ios" ? "placeholder:text-muted-foreground" : "placeholder:text-faint"}
-                  style={{ height: compactComposer() ? 28 : inputHeight(), flex: compactComposer() ? 1 : undefined, minWidth: 0, fontSize: size.text, lineHeight: 24, color: colors.text, paddingVertical: 2 }}
+                  style={{
+                    height: compactComposer() ? (touch ? 44 : 36) : inputHeight(),
+                    marginLeft: compactComposer() ? (touch ? 44 : 36) - 2 : 0,
+                    marginRight: compactComposer() && canDictate() ? (touch ? 44 : 36) + 8 : 0,
+                    minWidth: 0, fontSize: size.text, lineHeight: 24, color: colors.text,
+                    paddingVertical: compactComposer() ? (touch ? 10 : 6) : 2,
+                  }}
                 />
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                  <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
-                    <If when={!compactComposer()}><View
+                {/* Keep the toolbar and its buttons in one place in the tree as the field expands. */}
+                <View style={{ position: "absolute", left: 18, right: 8, bottom: compactComposer() ? 4 : 8, flexDirection: "row", alignItems: "center", gap: 8, pointerEvents: "box-none" }}>
+                  <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0, pointerEvents: "box-none" }}>
+                    <View
                       testID="attach"
                       role="button"
                       accessibilityLabel={L("Add image", "添加图片")}
@@ -4200,7 +4223,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                       style={{ width: touch ? 44 : 36, height: touch ? 44 : 36, marginLeft: -8, borderRadius: touch ? 22 : 18, alignItems: "center", justifyContent: "center" }}
                     >
                       <Icon name="plus" size={touch ? 22 : 18} tint={colors.text} />
-                    </View></If>
+                    </View>
                     <If when={speech() !== "off"}>
                       <Text testID="dictating" style={{ fontSize: 13, color: colors.accent, numberOfLines: 1 }}>
                         {speech() === "on" ? L("Listening…", "正在听…") : L("Recognizing…", "正在识别…")}
