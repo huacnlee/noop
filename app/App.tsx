@@ -739,12 +739,12 @@ function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?:
 /** Selection actions belong to the floating composer, outside the scrolling messages. */
 function QuotePreview(props: { text: string; onQuote: () => void; onCancel: () => void }) {
   return <If when={props.text}>
-    <View testID="quote-preview" style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 8, paddingVertical: 4, borderRadius: radius.inset, backgroundColor: colors.surface }}>
+    <View testID="quote-preview" style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 8, paddingVertical: 4, ...composerGlass(), borderRadius: radius.inset }}>
       <Button testID="quote-selection" accessibilityLabel={L("Quote selection", "引用片段")} onPress={() => { selectionGeneration++; props.onQuote(); }}
         style={{ minHeight: touch ? 44 : 32, paddingHorizontal: 8, borderRadius: radius.control }} hoverStyle={hovered()} focusStyle={focusRing()}>
         <Text style={{ fontSize: size.small, color: colors.text }}>{L("Quote selection", "引用片段")}</Text>
       </Button>
-      <Text style={{ numberOfLines: 1, flex: 1, fontSize: size.small, color: colors.muted }}>{props.text.replace(/\s+/g, " ")}</Text>
+      <Text style={{ numberOfLines: 1, flex: 1, fontSize: size.small, color: colors.text }}>{props.text.replace(/\s+/g, " ")}</Text>
       <Button testID="cancel-quote" accessibilityLabel={L("Cancel quote", "取消引用片段")} onPress={() => { selectionGeneration++; props.onCancel(); }}
         style={{ width: touch ? 44 : 32, height: touch ? 44 : 32, alignItems: "center", justifyContent: "center", borderRadius: radius.control }} hoverStyle={hovered()} focusStyle={focusRing()}>
         <Icon name="close" size={14} tint={colors.muted} />
