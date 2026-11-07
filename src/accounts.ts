@@ -80,15 +80,23 @@ export function accountEnv(a: Account): Record<string, string> {
 // ------------------------------------------------------------------ failure classification
 const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)/i;
 const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth token (has )?expired|login required|unauthorized|codex login/i;
+/** Infrastructure/network trouble, not the account: the CLI's API endpoint (often a local gateway) was
+ *  unreachable, timed out or returned a server error. Retrying on another CLI/account or a later tick is
+ *  right; flagging the account as needing login is wrong and starts a pointless login flow. */
+const TRANSIENT = /connection (refused|failed|reset|closed|aborted)|connection_failed|econnrefused|econnreset|econnrejected|econnaborted|etimedout|enotfound|eai_again|socket hang up|fetch failed|network (error|unavailable|unreachable)|gateway (error|timeout|unavailable)|firewall or proxy|service unavailable|bad gateway|no route to host|host is unreachable/i;
 
-export type Failure = "quota" | "auth" | null;
+export type Failure = "quota" | "auth" | "transient" | null;
 
 export function classify(output: string): Failure {
   const tail = output.slice(-4000);
+  if (TRANSIENT.test(tail)) return "transient";
   if (AUTH.test(tail)) return "auth";
   if (QUOTA.test(tail)) return "quota";
   return null;
 }
+
+/** A dead endpoint is worth one quick retry, then back off so a flapping gateway doesn't spin the tick. */
+export const TRANSIENT_COOLDOWN_MS = 60_000;
 
 /** Try to read the reset time from messages like "resets at 3pm", "try again in 2h 13m". */
 function resetTime(output: string): Date {
@@ -112,7 +120,12 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
   const host = hostName(cfg);
   st.last_error = output.slice(-300);
   st.cred = credStamp(a);
-  if (kind === "quota") {
+  if (kind === "transient") {
+    // brief cooldown: the task fails over to the other CLI now (or is requeued for a later tick), and
+    // this CLI gets another chance once the endpoint may be back. Never a login or a quota notice.
+    st.cooldown_until = new Date(Date.now() + TRANSIENT_COOLDOWN_MS).toISOString();
+    journal(host, `🌐 ${key(a)} endpoint unreachable → retry in ${Math.round(TRANSIENT_COOLDOWN_MS / 60_000)}m`);
+  } else if (kind === "quota") {
     st.cooldown_until = resetTime(output).toISOString();
     journal(host, `${key(a)} hit usage limit → cooldown until ${st.cooldown_until.slice(11, 16)}Z`);
     if (st.told !== st.cooldown_until) {
@@ -144,7 +157,9 @@ async function alertIfAllExhausted(cfg: Cfg) {
   save(s);
   const lines = installed.flatMap((c) => accounts(cfg, c)).map((a) => {
     const st = load().accounts[key(a)] ?? {};
-    return `• ${key(a)}：${st.needs_login ? "需要登录" : st.cooldown_until ? `额度用尽，约 ${new Date(st.cooldown_until).toLocaleTimeString()} 恢复` : "?"}`;
+    const why = st.needs_login ? "需要登录" : st.told ? `额度用尽，约 ${new Date(st.cooldown_until!).toLocaleTimeString()} 恢复`
+      : st.cooldown_until ? `接口暂时不可用，约 ${new Date(st.cooldown_until).toLocaleTimeString()} 重试` : "?";
+    return `• ${key(a)}：${why}`;
   });
   await notify([`${hostName(cfg)} 上所有 AI 账户都不可用，fleet 暂停中：`, ...lines,
     `可以：回复登录码完成待登录账户，或在 config.local.toml 的 [[accounts]] 加一个账户。`].join("\n"), cfg);
