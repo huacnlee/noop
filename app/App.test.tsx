@@ -153,12 +153,26 @@ describe("login", () => {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
       network: { ...hub([]), ...auth(log), [`GET ${URL}/api/settings`]: { status: 500 } },
     });
+    await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-account");
     await app.press("id:logout");
     await app.waitFor("Sign in to Noop");
     expect(log.logouts).toBe(1);
     expect(app.storage()["hub.token"]).toBe(undefined);
+  });
+  test("the sidebar user menu switches appearance and language and opens settings", async () => {
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
+    await app.press("id:user-menu");
+    await app.press("id:theme-dark");
+    expect(app.storage()["hub.theme"]).toBe("dark");
+    await app.press("id:user-menu");
+    await app.press("id:menu-lang-zh");
+    expect(app.storage()["hub.lang"]).toBe("zh");
+    await app.waitFor("主会话");
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.waitFor("id:settings-tab-account");
   });
 });
 
@@ -189,19 +203,22 @@ describe("channel", () => {
     await toTop("Paged message 0");
     expect(app.shows("Paged message 0")).toBe(true);
   });
-  test("a new message leaves a timeline scrolled up where it is; at the end it follows", async () => {
-    const many = Array.from({ length: 90 }, (_, i) => ({ id: `tail-${i}`, ts: ts(10 + i / 100), from: "agent", kind: "notice", text: `Tail message ${i}` }));
+  for (const platform of ["ios", "macos", "android"] as const) test(`a new message leaves a timeline scrolled up where it is; at the end it follows (${platform})`, async () => {
+    const many = Array.from({ length: 250 }, (_, i) => ({ id: `tail-${i}`, ts: ts(10 + i / 100), from: "agent", kind: "notice", text: `Tail message ${i}` }));
     const later: unknown[] = [];
     const arrive = (text: string) => later.push({ id: text, ts: new Date().toISOString(), from: "agent", kind: "notice", text });
     const app = await open("./App.tsx", {
-      storage: STORAGE, width: 390, height: 800, platform: "ios",
+      storage: STORAGE, width: 390, height: 800, platform,
       network: { ...hub([], many), [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }) },
     });
-    await app.waitFor("Tail message 89");
+    await app.waitUntil(() => app.texts().some((text) => text.startsWith("Tail message")));
+    if (app.shows("label:Jump to latest")) await app.press("label:Jump to latest");
+    await app.waitFor("Tail message 249");
+    await app.wait(300); // Let initial list measurements and the initial scroll settle.
     expect(app.shows("label:Jump to latest")).toBe(false);
 
     // Just off the end, closer than a message: it stays put and counts what came below.
-    await app.scroll("id:timeline", -40);
+    await app.scroll("id:timeline", platform === "ios" ? -40 : -240);
     await app.waitFor("Jump to latest");
     arrive("Below the fold");
     await app.waitFor("1 new messages", { timeout: 10000 });
@@ -226,6 +243,27 @@ describe("channel", () => {
     arrive("Followed");
     await app.waitFor("Followed", { timeout: 10000 });
     expect(app.shows("label:Jump to latest")).toBe(false);
+  });
+
+  test("a new message preserves existing content", async () => {
+    const url = "http://hub.test:8787";
+    let arrival = false;
+    const old = { id: "old", ts: "2026-11-07T01:00:00Z", from: "lead", kind: "notice", text: "Existing message stays in place" };
+    const next = { id: "next", ts: "2026-11-07T02:00:00Z", from: "lead", kind: "notice", text: "New message enters smoothly" };
+    const app = await open("./App.tsx", {
+      width: 600, height: 800,
+      storage: { "hub.url": url, "hub.token": "tok" },
+      network: {
+        [`GET ${url}/api/feed`]: { body: { events: [old] } },
+        [`GET ${url}/api/feed?*`]: () => ({ body: { events: arrival ? [next] : [] } }),
+        [`GET ${url}/api/status`]: { body: { tasks: {}, active: [], decisions: [], recent: [], hosts: [] } },
+      },
+    });
+    await app.waitFor(old.text);
+    arrival = true;
+    await app.waitFor(next.text, { timeout: 10000 });
+    await app.wait(300);
+    expect(app.shows(old.text)).toBe(true);
   });
 
   test("proposal selection survives a recycled timeline cell", async () => {
@@ -412,6 +450,26 @@ describe("channel", () => {
     await app.waitUntil(() => !app.shows("id:ignore-D-0001"));
   });
 
+  test("the sidebar's right-click menu cancels a stuck task or marks it done", async () => {
+    const cancels: unknown[] = [];
+    const withTask = { ...status, decisions: [{ ...status.decisions[0], task: "T-0003" }] };
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: { ...hub([]), [`GET ${URL}/api/status`]: { body: withTask }, [`POST ${URL}/api/tasks/cancel`]: (r: { body?: string | null }) => { cancels.push(JSON.parse(r.body!)); return { body: { ok: true } }; } },
+    });
+    await app.waitFor("text:要不要升级依赖？ >> nth=0");
+    app.onDialog((d) => (d.title === "Cancel T-0003?" ? "Cancel task" : null));
+    await app.rightClick("text:要不要升级依赖？ >> nth=0");
+    await app.press("id:side-cancel-T-0003");
+    await app.waitUntil(() => cancels.length === 1);
+    expect(cancels[0]).toEqual({ id: "T-0003" });
+    app.onDialog((d) => (d.title === "Mark T-0007 as done?" ? "Mark as done" : null));
+    await app.rightClick("text:截图检查 gallery >> nth=0");
+    await app.press("id:side-done-T-0007");
+    await app.waitUntil(() => cancels.length === 2);
+    expect(cancels[1]).toEqual({ id: "T-0007", done: true });
+  });
+
   test("Other instructions replies to the item from the composer", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
@@ -521,6 +579,7 @@ describe("channel", () => {
     await app.press("label:Load 42% · Disk 120 GB free · 1 running");
     await app.waitFor("id:rev-linux-box");
     expect(app.shows("c1cc085")).toBe(true);
+    await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-version");
     await app.waitFor("id:version-linux-box");
@@ -546,6 +605,7 @@ describe("channel", () => {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
       network: { ...hub([]), [`GET ${URL}/api/settings`]: { status: 500 }, [`GET ${URL}/api/status`]: { body: { ...status, hosts, update: { at } } } },
     });
+    await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-version");
     await app.waitFor("等 1 个任务跑完后重启…");
@@ -693,6 +753,17 @@ describe("keyboard", () => {
     await app.waitUntil(() => !app.shows("id:recall-send"));
   });
 
+  test("a delivered message shows a check that goes away on its own", async () => {
+    const posts: { text: string }[] = [];
+    const app = await open("./App.tsx", { ...desk, network: hub(posts) });
+    await app.waitFor("id:composer");
+    await app.type("id:composer", "送达了吗");
+    await app.submit("id:composer");
+    expect(app.shows("id:sent-check")).toBe(false);
+    await app.waitFor("id:sent-check", { timeout: 8000 });
+    await app.waitUntil(() => !app.shows("id:sent-check"), { timeout: 4000 });
+  });
+
   test("Enter sends from the composer", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const app = await open("./App.tsx", { ...desk, network: hub(posts) });
@@ -780,6 +851,7 @@ describe("team settings", () => {
         },
       },
     });
+    await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-members");
     await app.waitFor("id:cli-reporter");
@@ -828,6 +900,7 @@ describe("team settings", () => {
         },
       },
     });
+    await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-storage");
     await app.waitFor("id:media-days-90");
@@ -1340,6 +1413,7 @@ describe("commands", () => {
   test("settings adds, edits and deletes saved commands in an editor", async () => {
     const posts: { text: string; reply_to?: string }[] = [], puts: unknown[] = [], updates = { n: 0 };
     const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: server(posts, puts, updates) });
+    await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-commands");
     await app.waitFor("id:command-row-日报");
