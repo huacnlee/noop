@@ -47,6 +47,8 @@ runs:
         repository: longbridge/nsh
         ref: ${{ inputs.ref }}
         path: .nsh-src
+        # Keep the native build's host tools when cross-compiling Intel on the same Mac runner.
+        clean: ${{ inputs.target != 'macos' || inputs.rust-target == '' }}
     - if: steps.cache.outputs.cache-hit != 'true'
       uses: dtolnay/rust-toolchain@stable
       with:
