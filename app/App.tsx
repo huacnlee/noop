@@ -3971,17 +3971,38 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
   /** What the floating composer covers at the bottom of the timeline. */
   const composerHeight = signal(0);
-  /** Last row index on screen, so a long way back to the end can skip the rows in between. */
+  // Keep every explicit timeline jump short, including off-screen decision cards.
+  // Stage the target one viewport away, let recycled rows lay out, then use the
+  // platform's smooth scroll for the final screen instead of traversing the history.
+  let firstVisibleRow = -1;
   let lastVisibleRow = -1;
+  let timelineHeight = 600;
+  let jumpVersion = 0;
+  const cancelJump = () => { jumpVersion++; };
+  cleanup(cancelJump);
+  function scrollTimeline(index: number, end = false) {
+    const list = scroller;
+    if (!list || index < 0) return;
+    const version = ++jumpVersion;
+    const animated = !reduceMotion();
+    const finish = () => {
+      if (version !== jumpVersion || scroller !== list) return;
+      if (end) list.scrollToEnd({ animated });
+      else list.scrollToIndex({ index, viewOffset: 24, animated });
+    };
+    const far = firstVisibleRow >= 0 && (index < firstVisibleRow - 1 || index > lastVisibleRow + 1);
+    if (!animated || !far) { finish(); return; }
+    const direction = index > lastVisibleRow ? 1 : -1;
+    list.scrollToIndex({
+      index, viewPosition: end ? 1 : 0,
+      viewOffset: (end ? 0 : 24) + direction * timelineHeight,
+      animated: false,
+    });
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+  }
   const jumpToEnd = () => {
     unseen.set(0);
-    atEnd.set(true);
-    const rows = untracked(timeline).length;
-    // Animating across hundreds of virtualized rows is slow and janky: jump close to the end, then glide the last screen.
-    if (scroller && rows - lastVisibleRow > 8) {
-      scroller.scrollToIndex({ index: Math.max(0, rows - 6), animated: false });
-      setTimeout(() => scroller?.scrollToEnd({ animated: true }), 16);
-    } else toEnd(true);
+    scrollTimeline(untracked(timeline).length - 1, true);
   };
 
   const reply = (ref: string, note?: string) => {
@@ -4251,7 +4272,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (at >= 0 && shown().length - at > untracked(limit)) limit.set(shown().length - at); // older than the page: show it
     const index = timeline().findIndex((row) => "event" in row && row.event.ref === ref && isAsk(row.event));
     if (index >= 0 && scroller) {
-      scroller.scrollToIndex({ index, animated: true, viewOffset: 24 });
+      scrollTimeline(index);
       if (jumping === ref) jumping = null;
     } else if (tries > 0 && !scroller) {
       setTimeout(() => toCard(ref, tries - 1), 80);
@@ -4472,14 +4493,15 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               testID="timeline"
               each={timeline()}
               viewabilityConfig={{ minimumViewTime: 300 }}
-              onViewableItemsChange={({ viewableItems }) => { lastVisibleRow = viewableItems.reduce((m, t) => Math.max(m, t.index ?? -1), -1); visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : [])); }}
+              onViewableItemsChange={({ viewableItems }) => { firstVisibleRow = viewableItems.reduce((m, t) => Math.min(m, t.index ?? Infinity), Infinity); lastVisibleRow = viewableItems.reduce((m, t) => Math.max(m, t.index ?? -1), -1); visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : [])); }}
               alignment="bottom"
               maintainVisibleContentPosition={{ autoscrollToBottomThreshold: AT_END }}
               estimatedItemSize={120}
               contentStyle={{ paddingTop: wide() ? 24 : 12, paddingBottom: composerHeight() + 16 }}
               keyExtractor={(row) => row.key}
               ref={(r) => { scroller = r; }}
-              onTouchStartCapture={() => { if (platform.os === "macos" && focused()) composer?.blur(); }}
+              onLayout={({ bounds }) => { timelineHeight = Math.max(1, bounds.size.height); }}
+              onTouchStartCapture={() => { cancelJump(); if (platform.os === "macos" && focused()) composer?.blur(); }}
               style={{ flex: 1 }}
               scrollEventThrottle={100}
               keyboardShouldPersistTaps="handled"
