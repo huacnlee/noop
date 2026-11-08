@@ -234,15 +234,11 @@ describe("channel", () => {
     await app.press("label:D-0001");
     await app.waitFor("id:opt-D-0001-B", { timeout: 2000 });
     expect(Date.now() - start).toBeLessThan(2000);
-    console.log(`decision jump: ${Date.now() - start} ms`);
     await app.waitFor("label:Back to bottom");
-    await app.screenshot("/home/jason/.noop/data/reports/T-0888/decision-and-back-to-bottom.png");
-    const bottom = Date.now();
+    await app.wait(700);
     await app.press("label:Back to bottom");
     await app.waitFor("text:/Jump message 499/", { timeout: 2000 });
     await app.waitUntil(() => !app.shows("label:Back to bottom"), { timeout: 2000 });
-    console.log(`bottom jump: ${Date.now() - bottom} ms`);
-    await app.screenshot("/home/jason/.noop/data/reports/T-0888/bottom.png");
   });
   test("the channel shows the newest 200 messages; older ones load on request", async () => {
     const many = Array.from({ length: 250 }, (_, i) => ({ id: `page-${i}`, ts: ts(i / 5), from: "agent", kind: "notice", text: `Paged message ${i}` }));

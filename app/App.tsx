@@ -4437,7 +4437,11 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               testID="timeline"
               each={timeline()}
               viewabilityConfig={{ minimumViewTime: 300 }}
-              onViewableItemsChange={({ viewableItems }) => { firstVisibleRow = viewableItems.reduce((m, t) => Math.min(m, t.index ?? Infinity), Infinity); lastVisibleRow = viewableItems.reduce((m, t) => Math.max(m, t.index ?? -1), -1); visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : [])); }}
+              onViewableItemsChange={({ viewableItems }) => {
+                firstVisibleRow = viewableItems.reduce((m, t) => Math.min(m, t.index ?? Infinity), Infinity);
+                lastVisibleRow = viewableItems.reduce((m, t) => Math.max(m, t.index ?? -1), -1);
+                visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : []));
+              }}
               alignment="bottom"
               maintainVisibleContentPosition={{ autoscrollToBottomThreshold: AT_END }}
               estimatedItemSize={120}
