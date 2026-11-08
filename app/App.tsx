@@ -73,6 +73,7 @@ import {
   choiceLabel,
   choicesOf,
   dayLabel,
+  dayKey,
   greeting,
   type HubEvent,
   initials,
@@ -1424,59 +1425,70 @@ function ChannelPage(props: { hub: Hub; channels: Channels; slug: string; wide: 
     <Scroll style={{ flex: 1 }}>
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 14, paddingHorizontal: props.wide ? 32 : 16, paddingTop: 20, paddingBottom: composerHeight() + 24 }}>
         <If when={ch()} else={<Text style={{ fontSize: 14, color: colors.faint }}>{L("Loading…", "读取中…")}</Text>}>
-          <View style={{ gap: 6 }}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Text style={{ flex: 1, fontSize: 20, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{`# ${ch()!.name}`}</Text>
+          {/* header: a channel reads like a room, name and purpose together, actions out of the way */}
+          <View testID="channel-header" style={{ flexDirection: "row", alignItems: "flex-start", gap: 14, paddingBottom: 8 }}>
+            <View style={{ width: 44, height: 44, borderRadius: radius.card, alignItems: "center", justifyContent: "center", backgroundColor: alpha(colors.accent, 0.12) }}>
+              <Text style={{ fontSize: 22, fontWeight: "700", color: colors.accent }}>#</Text>
+            </View>
+            <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Text style={{ flexShrink: 1, fontSize: 20, fontWeight: "700", color: colors.text, numberOfLines: 1 }}>{ch()!.name}</Text>
+                <If when={ch()!.status === "archived"}><View testID="channel-archived"><Badge label={L("Archived", "已归档")} tone="warn" /></View></If>
+                <If when={ch()!.status === "active" && ch()!.stale}><View testID="channel-stale"><Badge label={L("Quiet 7 days", "7 天无动静")} /></View></If>
+              </View>
+              <If when={editing()} else={
+                <Text testID="channel-goal" style={{ fontSize: 14.5, lineHeight: 21, color: ch()!.goal ? colors.muted : colors.faint, userSelect: "text" }}>{ch()!.goal || L("No goal yet", "还没有目标")}</Text>
+              }>
+                <View style={{ gap: 8, paddingTop: 4 }}>
+                  <Input
+                    testID="channel-goal-input"
+                    value={goal()}
+                    onChange={({ value }) => goal.set(value)}
+                    onSubmit={() => void saveGoal()}
+                    placeholder={L("What this channel is for: the team assigns work by it", "这个 channel 是做什么的，团队按它归类工作")}
+                    class="placeholder:text-faint"
+                    style={{ height: 38, paddingHorizontal: 12, fontSize: 15, color: colors.text, borderRadius: radius.control, borderWidth: 1, borderColor: colors.fieldBorder, backgroundColor: colors.surface }}
+                  />
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <Btn testID="channel-save-goal" kind="primary" label={L("Save", "保存")} disabled={busy()} onPress={() => void saveGoal()} />
+                    <Btn testID="channel-cancel-goal" kind="ghost" label={L("Cancel", "取消")} onPress={() => editing.set(false)} />
+                  </View>
+                </View>
+              </If>
+            </View>
+            <View style={{ flexDirection: "row", gap: 4 }}>
+              <If when={!editing()}>
+                <Btn testID="channel-edit-goal" kind="ghost" label={L("Edit goal", "编辑目标")} onPress={() => { goal.set(ch()!.goal); editing.set(true); }} />
+              </If>
               <Btn testID="channel-archive" kind="ghost" label={ch()!.status === "archived" ? L("Unarchive", "取消归档") : L("Archive", "归档")}
                 onPress={() => void props.channels.save(props.slug, { archived: ch()!.status !== "archived" })} />
             </View>
-            <If when={ch()!.status === "archived"}>
-              <Text testID="channel-archived" style={{ fontSize: 13.5, color: colors.warn }}>{L("Archived: the team no longer adds work here.", "已归档：团队不再往这里归类新的工作。")}</Text>
-            </If>
-            <If when={ch()!.status === "active" && ch()!.stale}>
-              <Text testID="channel-stale" style={{ fontSize: 13.5, color: colors.muted }}>{L("No activity in 7 days", "7 天没有动静")}</Text>
-            </If>
           </View>
-          <View style={{ gap: 8 }}>
-            <Text style={{ fontSize: 12, fontWeight: "600", color: colors.muted, letterSpacing: 0.4 }}>{L("Goal", "目标")}</Text>
-            <If when={editing()} else={
-              <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-                <Text testID="channel-goal" style={{ flex: 1, fontSize: 14.5, lineHeight: 21, color: ch()!.goal ? colors.text : colors.faint, userSelect: "text" }}>{ch()!.goal || L("No goal yet", "还没有目标")}</Text>
-                <Btn testID="channel-edit-goal" kind="secondary" label={L("Edit", "编辑")} onPress={() => { goal.set(ch()!.goal); editing.set(true); }} />
+          <View testID="channel-digest" style={{ gap: 2 }}>
+            <If when={digest().length} else={
+              <View testID="channel-empty" style={{ alignItems: "flex-start", gap: 6, paddingVertical: 24 }}>
+                <Text style={{ fontSize: 16, fontWeight: "600", color: colors.text }}>{loaded() ? L(`This is the start of #${ch()!.name}`, `这里是 #${ch()!.name} 的开始`) : L("Loading…", "读取中…")}</Text>
+                <If when={loaded()}><Text style={{ fontSize: 14, lineHeight: 21, color: colors.muted }}>{L("Results and decisions for this topic land here. What you say here stays here, out of the main chat.", "这个话题的结果和决策会出现在这里。在这里说的话只留在这里，不进主会话。")}</Text></If>
               </View>
             }>
-              <Input
-                testID="channel-goal-input"
-                value={goal()}
-                onChange={({ value }) => goal.set(value)}
-                onSubmit={() => void saveGoal()}
-                placeholder={L("What this channel is for: the team assigns work by it", "这个 channel 是做什么的，团队按它归类工作")}
-                class="placeholder:text-faint"
-                style={{ height: 38, paddingHorizontal: 12, fontSize: 15, color: colors.text, borderRadius: radius.control, borderWidth: 1, borderColor: colors.fieldBorder, backgroundColor: colors.surface }}
-              />
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <Btn testID="channel-save-goal" kind="primary" label={L("Save", "保存")} disabled={busy()} onPress={() => void saveGoal()} />
-                <Btn testID="channel-cancel-goal" kind="ghost" label={L("Cancel", "取消")} onPress={() => editing.set(false)} />
-              </View>
-            </If>
-          </View>
-          <View testID="channel-digest" style={{ gap: 16, paddingTop: 4 }}>
-            <Text style={{ fontSize: 12, fontWeight: "600", color: colors.muted, letterSpacing: 0.4 }}>{L("Updates", "进展")}</Text>
-            <If when={digest().length} else={<Text style={{ fontSize: 14, color: colors.faint }}>{loaded() ? L("No messages yet. Start the discussion below.", "还没有消息，可以在下面开始讨论。") : L("Loading…", "读取中…")}</Text>}>
               <Each of={digest()} key={(e) => e.id}>
-                {(e) => isAsk(e()) ? (
-                  <Message hub={props.hub} event={e()} answered={settled} target={() => null}
-                    onAnswer={(ref, choice) => void props.hub.send(`${ref} ${choice}`, ref, [], true)}
-                    onReply={(ref) => props.onTask(ref)} />
-                ) : (
-                  <View style={{ gap: 3 }}>
-                    <View role="button" testID={`channel-msg-${e().id}`} accessibilityLabel={e().ref} onPress={() => { const ref = e().ref; if (!ref || !/^T-/.test(ref)) return; props.channels.reads.ref(ref); props.onTask(ref); }}>
-                      <Text style={{ fontSize: 13, color: colors.faint }}>
-                        <Text style={{ fontWeight: "600", color: e().from === "owner" ? colors.accent : colors.muted }}>{e().from === "owner" ? L("You", "你") : displayName(e().from)}</Text>
-                        {`  ${timeOf(e().ts)}`}
-                      </Text>
-                    </View>
-                    <Rich text={e().text} />
+                {(e, i) => (
+                  <View testID={`channel-msg-${e().id}`} accessibilityLabel={e().ref}
+                    onPress={isAsk(e()) || e().kind === "owner" ? undefined : () => { const ref = e().ref; if (!ref || !/^T-/.test(ref)) return; props.channels.reads.ref(ref); props.onTask(ref); }}>
+                    <If when={i() === 0 || dayKey(digest()[i() - 1].ts) !== dayKey(e().ts)}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: i() === 0 ? 4 : 20, marginBottom: 4 }}>
+                        <View style={{ flex: 1, height: 1, backgroundColor: colors.line }} />
+                        <Text style={{ fontSize: 13, fontWeight: "500", color: colors.faint }}>{dayLabel(dayKey(e().ts))}</Text>
+                        <View style={{ flex: 1, height: 1, backgroundColor: colors.line }} />
+                      </View>
+                    </If>
+                    {e().kind === "owner" ? (
+                      <OwnerBubble hub={props.hub} event={e()} onRef={props.onPick} />
+                    ) : (
+                      <Message hub={props.hub} event={e()} answered={settled} target={() => null}
+                        onAnswer={(ref, choice) => void props.hub.send(`${ref} ${choice}`, ref, [], true)}
+                        onReply={(ref) => { props.channels.reads.ref(ref); props.onTask(ref); }} />
+                    )}
                   </View>
                 )}
               </Each>
