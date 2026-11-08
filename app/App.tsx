@@ -2174,7 +2174,8 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
     // Opaque on a phone: the sheet sits over the sidebar's own rows, which would show through glass.
     ? { backgroundColor: colors.surface, borderRadius: 22, borderCurve: "continuous", boxShadow: "0 10px 40px rgba(0,0,0,0.18)",
         left: 10, right: 10, bottom: Math.max(10, safeArea().bottom), padding: 8, paddingTop: 6 }
-    : { ...glass(colors.surface, 12), minWidth: 264, padding: 5 };
+    // No minWidth here: the language submenu takes this same style and should fit its rows; the menu gets its width from its header.
+    : { ...glass(colors.surface, 12), padding: 5 };
   const row = (): ViewStyle => ({ flexDirection: "row", alignItems: "center", gap: m.gap, height: m.row, paddingHorizontal: m.padX, borderRadius: touch ? 12 : 7, borderCurve: "continuous" });
   const label = (text: string) => <Text style={{ flex: 1, fontSize: m.label, color: colors.text, numberOfLines: 1 }}>{text}</Text>;
   const lead = (name: IconName) => <Icon name={name} size={m.icon} tint={colors.muted} />;
@@ -2196,7 +2197,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
     </MenuItem>
   );
   const radio = (text: string, on: () => boolean, pick: () => void, testID: string) => (
-    <MenuItem testID={testID} role="menuitemradio" checked={on()} onSelect={() => !on() && pick()} hoverStyle={hovered()} style={row()}>
+    <MenuItem testID={testID} role="menuitemradio" checked={on()} onSelect={() => !on() && pick()} hoverStyle={hovered()} style={{ ...row(), ...(touch ? {} : { minWidth: 136 }) }}>
       {label(text)}
       <View style={{ width: m.icon }}>
         <If when={on()}>
@@ -2227,7 +2228,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
         </View>
       }
     >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: touch ? 12 : 10, paddingHorizontal: m.padX, paddingTop: touch ? 10 : 6, paddingBottom: touch ? 10 : 7 }}>
+      <View style={{ ...(touch ? {} : { minWidth: 254 }), flexDirection: "row", alignItems: "center", gap: touch ? 12 : 10, paddingHorizontal: m.padX, paddingTop: touch ? 10 : 6, paddingBottom: touch ? 10 : 7 }}>
         {avatar(m.avatar)}
         <View style={{ flex: 1, gap: 1 }}>
           <Text style={{ fontSize: m.name, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
