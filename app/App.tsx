@@ -290,13 +290,13 @@ function createHub(cfg: Config) {
     return ((await r.json()) as { url: string }).url;
   }
 
-  async function send(text: string, replyTo: string | null, files: Attachment[] = [], thread = false, clientId?: string) {
+  async function send(text: string, replyTo: string | null, files: Attachment[] = [], thread = false, clientId?: string, channel?: string) {
     const attachments: string[] = [];
     for (const f of files) attachments.push(await upload(f));
     const r = await fetch(`${cfg.url}/api/messages`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ text, ...(clientId ? { client_id: clientId } : {}), ...(replyTo ? { reply_to: replyTo } : {}), ...(attachments.length ? { attachments } : {}), ...(thread ? { thread } : {}) }),
+      body: JSON.stringify({ text, ...(clientId ? { client_id: clientId } : {}), ...(replyTo ? { reply_to: replyTo } : {}), ...(attachments.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) }),
     });
     if (r.status === 401) conn.set("unauthorized");
     if (!r.ok) throw new Error(L(`Send failed (${r.status})`, `发送失败（${r.status}）`));
@@ -1332,7 +1332,9 @@ function createMessageReads(hub: Hub) {
     if (next !== old) persist(next);
   };
   const unread = computed(() => loaded() ? unreadEvents(hub.events(), state()) : []);
-  return { loaded, state, read, unread,
+  // the main chat's own: what was said inside a channel is counted on that channel only
+  const main = computed(() => unread().filter((e) => !e.channel));
+  return { loaded, state, read, unread, main,
     ref: (id: string) => read(untracked(hub.events).filter((e) => e.ref === id), true),
     toggle: (e: HubEvent) => persist(toggleMessageRead(untracked(state), e)),
     all: () => persist({ through: untracked(hub.events).reduce((ts, e) => e.ts > ts ? e.ts : ts, untracked(state).through), ids: [], marked: [] }),
@@ -1363,7 +1365,7 @@ function createChannels(hub: Hub, reads: MessageReads) {
     list, load, reads,
     unread: (c: Channel) => {
       const refs = new Set(c.refs ?? c.items.filter((i) => i.kind !== "report").map((i) => i.id));
-      return reads.unread().filter((e) => !!e.ref && refs.has(e.ref)).length;
+      return reads.unread().filter((e) => (e.channel ? e.channel === c.slug : !!e.ref && refs.has(e.ref))).length;
     },
     async save(slug: string, patch: { goal?: string; archived?: boolean }) {
       generation++;
@@ -1391,7 +1393,25 @@ function ChannelPage(props: { hub: Hub; channels: Channels; slug: string; wide: 
     loaded.set(true);
   };
   effect(() => { ch()?.last_activity; void load(); });
-  const digest = computed(() => channelDigest(merge(fetched(), props.hub.events()), ch()?.refs ?? ch()?.items.filter((i) => i.kind !== "report").map((i) => i.id) ?? []));
+  const saying = signal<HubEvent[]>([]);
+  const digest = computed(() => channelDigest(merge(merge(fetched(), props.hub.events()), saying()), ch()?.refs ?? ch()?.items.filter((i) => i.kind !== "report").map((i) => i.id) ?? [], props.slug));
+  // seen while open: the channel's messages are read
+  effect(() => { const d = digest(); if (d.length) props.channels.reads.read(d); });
+  // a Slack-like room: what is said here is handled in the channel's context and answered here, not in the main chat
+  const text = signal("");
+  const note = signal("");
+  const composerHeight = signal(0);
+  let said = 0;
+  async function say() {
+    const v = untracked(text).trim();
+    if (!v) return;
+    const id = `local:channel:${++said}`;
+    saying.update((l) => [...l, { id, ts: new Date().toISOString(), from: "owner", kind: "owner", channel: props.slug, text: v }]);
+    text.set(""); note.set("");
+    try { await props.hub.send(v, null, [], false, undefined, props.slug); }
+    catch (e) { text.update((now) => (now.trim() ? `${v}\n${now}` : v)); note.set(String((e as Error)?.message ?? e)); }
+    saying.update((l) => l.filter((x) => x.id !== id));
+  }
   const settled = computed(() => answeredIds(digest()));
 
   const saveGoal = async () => {
@@ -1401,7 +1421,8 @@ function ChannelPage(props: { hub: Hub; channels: Channels; slug: string; wide: 
   };
   return (
     <View testID="channel-page" style={{ flex: 1 }}>
-      <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", flex: 1, gap: 14, paddingHorizontal: props.wide ? 32 : 16, paddingVertical: 20 }}>
+    <Scroll style={{ flex: 1 }}>
+      <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 14, paddingHorizontal: props.wide ? 32 : 16, paddingTop: 20, paddingBottom: composerHeight() + 24 }}>
         <If when={ch()} else={<Text style={{ fontSize: 14, color: colors.faint }}>{L("Loading…", "读取中…")}</Text>}>
           <View style={{ gap: 6 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -1441,7 +1462,7 @@ function ChannelPage(props: { hub: Hub; channels: Channels; slug: string; wide: 
           </View>
           <View testID="channel-digest" style={{ gap: 16, paddingTop: 4 }}>
             <Text style={{ fontSize: 12, fontWeight: "600", color: colors.muted, letterSpacing: 0.4 }}>{L("Updates", "进展")}</Text>
-            <If when={digest().length} else={<Text style={{ fontSize: 14, color: colors.faint }}>{loaded() ? L("No results or decisions yet", "还没有结果或决策") : L("Loading…", "读取中…")}</Text>}>
+            <If when={digest().length} else={<Text style={{ fontSize: 14, color: colors.faint }}>{loaded() ? L("No messages yet. Start the discussion below.", "还没有消息，可以在下面开始讨论。") : L("Loading…", "读取中…")}</Text>}>
               <Each of={digest()} key={(e) => e.id}>
                 {(e) => isAsk(e()) ? (
                   <Message hub={props.hub} event={e()} answered={settled} target={() => null}
@@ -1449,7 +1470,7 @@ function ChannelPage(props: { hub: Hub; channels: Channels; slug: string; wide: 
                     onReply={(ref) => props.onTask(ref)} />
                 ) : (
                   <View style={{ gap: 3 }}>
-                    <View role="button" testID={`channel-msg-${e().id}`} accessibilityLabel={e().ref} onPress={() => { props.channels.reads.ref(e().ref!); props.onTask(e().ref!); }}>
+                    <View role="button" testID={`channel-msg-${e().id}`} accessibilityLabel={e().ref} onPress={() => { const ref = e().ref; if (!ref || !/^T-/.test(ref)) return; props.channels.reads.ref(ref); props.onTask(ref); }}>
                       <Text style={{ fontSize: 13, color: colors.faint }}>
                         <Text style={{ fontWeight: "600", color: e().from === "owner" ? colors.accent : colors.muted }}>{e().from === "owner" ? L("You", "你") : displayName(e().from)}</Text>
                         {`  ${timeOf(e().ts)}`}
@@ -1463,6 +1484,31 @@ function ChannelPage(props: { hub: Hub; channels: Channels; slug: string; wide: 
           </View>
         </If>
       </View>
+    </Scroll>
+    <If when={ch()?.status === "active"}>
+      <View
+        onLayout={({ bounds }) => composerHeight.set(bounds.size.height)}
+        style={{ position: "absolute", bottom: 0, width: "100%", maxWidth: size.column, alignSelf: "center", gap: 6, paddingHorizontal: props.wide ? 32 : 10, paddingTop: 4, paddingBottom: 12, pointerEvents: "box-none" }}
+      >
+        <If when={note()}>
+          <Text style={{ fontSize: 13, color: colors.danger }}>{note()}</Text>
+        </If>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8, paddingLeft: 16, paddingRight: 8, paddingVertical: 8, ...composerGlass() }}>
+          <Input
+            testID="channel-composer"
+            multiline
+            value={text()}
+            onChange={({ value }) => text.set(value)}
+            submitBehavior={touch ? "newline" : "submit"}
+            onSubmit={() => void say()}
+            placeholder={L(`Message #${ch()?.name ?? props.slug}`, `在 #${ch()?.name ?? props.slug} 里讨论…`)}
+            class="placeholder:text-faint"
+            style={{ flex: 1, minHeight: 36, maxHeight: 160, paddingVertical: 8, fontSize: 15, lineHeight: 21, color: colors.text, borderWidth: 0, backgroundColor: "transparent" }}
+          />
+          <SendButton testID="channel-send" disabled={!text().trim()} onPress={() => void say()} />
+        </View>
+      </View>
+    </If>
     </View>
   );
 }
@@ -2222,7 +2268,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
         >
           {avatar(24)}
           <Text testID="user-account" style={{ flex: 1, fontSize: 13, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
-          <If when={props.reads.unread().length}><Text testID="menu-unread-count" style={{ fontSize: 12, color: colors.accent }}>{String(props.reads.unread().length)}</Text></If>
+          <If when={props.reads.main().length}><Text testID="menu-unread-count" style={{ fontSize: 12, color: colors.accent }}>{String(props.reads.main().length)}</Text></If>
           <Icon name="chevron-up" size={12} tint={colors.faint} />
         </View>
       }
@@ -2237,7 +2283,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
         </View>
       </View>
       {sep()}
-      <MenuItem testID="mark-all-read" disabled={!props.reads.unread().length} onSelect={props.reads.all} hoverStyle={hovered()} style={row()}>
+      <MenuItem testID="mark-all-read" disabled={!props.reads.main().length} onSelect={props.reads.all} hoverStyle={hovered()} style={row()}>
         {lead("check")}{label(L("Mark all as read", "全部已读"))}
       </MenuItem>
       <MenuItem testID="settings" onSelect={props.onSettings} hoverStyle={hovered()} style={row()}>
@@ -3816,7 +3862,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   /** The timeline: the hub's events and the messages on their way. */
   const shown = computed(() =>
     merge(
-      hub.events().filter((e) => !e.thread && !(e.kind === "system" && e.text.startsWith("⚙️ 设置已更新"))),
+      hub.events().filter((e) => !e.thread && !e.channel && !(e.kind === "system" && e.text.startsWith("⚙️ 设置已更新"))),
       outbox().map((o) => ({
         id: o.id, ts: o.ts, from: "owner", kind: "owner" as const, text: o.text, ref: o.ref ?? undefined,
         attachments: o.files.length ? o.files.map((f) => f.preview) : undefined,
@@ -4362,7 +4408,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       chrome={!inDrawer}
       onCollapse={inDrawer ? undefined : () => setSidebarOpen(false)}
       home={onChannel}
-      unread={() => reads.unread().length}
+      unread={() => reads.main().length}
       onReadAll={reads.all}
       onHome={() => { drawer.set(false); nav.popToRoot(); }}
     />
