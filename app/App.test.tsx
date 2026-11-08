@@ -1687,6 +1687,7 @@ describe("decision notification", () => {
       next = [{ ...prDecision, id: "toast-1", ref: "D-0203", ts: new Date().toISOString(),
         text: "https://github.com/longbridge/gpui-kit/pull/3848 需要你点合并：按需给窗口加圆角，所有检查已通过" }];
       await app.waitFor("id:decision-notification", { timeout: 10000 });
+      expect(app.shows("text:gpui-kit#3848 需要你点合并：按需给窗口加圆角，所有检查已通过")).toBe(true);
       await app.press("id:dismiss-decision-notification");
       expect(app.shows("id:decision-notification")).toBe(false);
       next = [{ ...prDecision, id: "toast-2", ref: "D-0204", ts: new Date().toISOString() }];

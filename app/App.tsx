@@ -901,7 +901,12 @@ function optionText(e: HubEvent, c: string): string {
   if (c === "all" || c === "none") return choiceLabel(c);
   const full = (e.options ?? []).find((o) => new RegExp(`^\\s*${c}\\s*([:：.、)]|\\s)`).test(o));
   // a button can't hold a link: a GitHub PR / issue URL reads as "nsh#747"
-  return full ? full.trim().replace(/https:\/\/github\.com\/[\w.-]+\/([\w.-]+)\/(?:pull|issues)\/(\d+)\/?/g, "$1#$2") : choiceLabel(c);
+  return full ? shortGitHubRefs(full.trim()) : choiceLabel(c);
+}
+
+/** Plain text that can't hold a link (buttons, notifications): a GitHub PR / issue URL reads as "nsh#747". */
+function shortGitHubRefs(text: string): string {
+  return text.replace(/https:\/\/github\.com\/[\w.-]+\/([\w.-]+)\/(?:pull|issues)\/(\d+)\/?/g, "$1#$2");
 }
 
 type Proposal = { n: string; title: string; agent: string; note: string };
@@ -4969,7 +4974,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                       {L(`New decision ${t().ref}`, `新决策 ${t().ref}`)}
                     </Text>
                   </View>
-                  <Text style={{ fontSize: 16, color: colors.text, numberOfLines: 2 }}>{t().text}</Text>
+                  <Text style={{ fontSize: 16, color: colors.text, numberOfLines: 2 }}>{shortGitHubRefs(t().text)}</Text>
                 </Button>
                 <Button testID="dismiss-decision-notification" accessibilityLabel={L("Dismiss notification", "关闭通知")}
                   onPress={() => toast.set(null)} class="focus-visible:ring-2 focus-visible:ring-ring active:opacity-70"
