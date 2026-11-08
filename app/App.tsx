@@ -3736,7 +3736,7 @@ const SHORTCUTS = (): [string, string][] => [
   [`1 – 9  ·  ${keymap.label("alt+1")}…`, L("Pick an option on the current decision", "选择当前决策的选项")],
   [`J / K  ·  ${keymap.label("alt+j")} / ${keymap.label("alt+k")}`, L("Next / previous pending decision", "下一个 / 上一个待决策")],
   [`R  ·  ${keymap.label("alt+r")}`, L("Reply to the current decision (other instructions)", "回复当前决策（其他指示）")],
-  [`G  ·  ${keymap.label("alt+g")}`, L("Jump to the latest message", "跳到最新消息")],
+  [`G  ·  ${keymap.label("alt+g")}`, L("Back to bottom", "回到底部")],
   ["Esc", L("Cancel reply / leave the message box / close", "取消回复 / 离开输入框 / 关闭")],
   [keymap.label("mod+,"), L("Team settings", "团队设置")],
   [keymap.label("mod+b"), L("Show / hide sidebar", "显示 / 隐藏侧栏")],
@@ -3971,10 +3971,17 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
   /** What the floating composer covers at the bottom of the timeline. */
   const composerHeight = signal(0);
+  /** Last row index on screen, so a long way back to the end can skip the rows in between. */
+  let lastVisibleRow = -1;
   const jumpToEnd = () => {
     unseen.set(0);
     atEnd.set(true);
-    toEnd(true);
+    const rows = untracked(timeline).length;
+    // Animating across hundreds of virtualized rows is slow and janky: jump close to the end, then glide the last screen.
+    if (scroller && rows - lastVisibleRow > 8) {
+      scroller.scrollToIndex({ index: Math.max(0, rows - 6), animated: false });
+      setTimeout(() => scroller?.scrollToEnd({ animated: true }), 16);
+    } else toEnd(true);
   };
 
   const reply = (ref: string, note?: string) => {
@@ -4465,7 +4472,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               testID="timeline"
               each={timeline()}
               viewabilityConfig={{ minimumViewTime: 300 }}
-              onViewableItemsChange={({ viewableItems }) => visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : []))}
+              onViewableItemsChange={({ viewableItems }) => { lastVisibleRow = viewableItems.reduce((m, t) => Math.max(m, t.index ?? -1), -1); visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : [])); }}
               alignment="bottom"
               maintainVisibleContentPosition={{ autoscrollToBottomThreshold: AT_END }}
               estimatedItemSize={120}
@@ -4569,7 +4576,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               <View style={{ position: "absolute", left: 0, right: 0, bottom: composerHeight() + 4, paddingVertical: 4, alignItems: "center", pointerEvents: "box-none" }}>
                 <View
                   role="button"
-                  accessibilityLabel={L("Jump to latest", "跳到最新")}
+                  accessibilityLabel={L("Back to bottom", "回到底部")}
                   onPress={jumpToEnd}
                   hoverStyle={{ opacity: 0.92 }}
                   style={{
@@ -4588,7 +4595,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                 >
                   <Icon name="arrow-down" size={15} tint={unseen() ? colors.onAccent : colors.text} />
                   <Text style={{ fontSize: 14, fontWeight: "600", color: unseen() ? colors.onAccent : colors.text }}>
-                    {unseen() ? L(`${unseen()} new messages`, `${unseen()} 条新消息`) : L("Jump to latest", "跳到最新")}
+                    {unseen() ? L(`${unseen()} new messages`, `${unseen()} 条新消息`) : L("Back to bottom", "回到底部")}
                   </Text>
                   <If when={!touch}>
                     <Text style={{ fontSize: 12, color: unseen() ? alpha(colors.onAccent, 0.7) : colors.faint }}>G</Text>

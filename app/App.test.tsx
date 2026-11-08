@@ -243,14 +243,14 @@ describe("channel", () => {
       network: { ...hub([], many), [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }) },
     });
     await app.waitUntil(() => app.texts().some((text) => text.startsWith("Tail message")));
-    if (app.shows("label:Jump to latest")) await app.press("label:Jump to latest");
+    if (app.shows("label:Back to bottom")) await app.press("label:Back to bottom");
     await app.waitFor("Tail message 249");
     await app.wait(300); // Let initial list measurements and the initial scroll settle.
-    expect(app.shows("label:Jump to latest")).toBe(false);
+    expect(app.shows("label:Back to bottom")).toBe(false);
 
     // Just off the end, closer than a message: it stays put and counts what came below.
     await app.scroll("id:timeline", platform === "ios" ? -40 : -240);
-    await app.waitFor("Jump to latest");
+    await app.waitFor("Back to bottom");
     arrive("Below the fold");
     await app.waitFor("1 new messages", { timeout: 10000 });
     await app.wait(300); // following would reach the end, and the end clears the count
@@ -268,12 +268,12 @@ describe("channel", () => {
     expect(onScreen().filter((t) => !before.includes(t))).toEqual([]);
 
     // Back at the end, new messages show by themselves.
-    await app.press("label:Jump to latest");
+    await app.press("label:Back to bottom");
     await app.waitFor("Further below");
-    await app.waitUntil(() => !app.shows("label:Jump to latest"));
+    await app.waitUntil(() => !app.shows("label:Back to bottom"));
     arrive("Followed");
     await app.waitFor("Followed", { timeout: 10000 });
-    expect(app.shows("label:Jump to latest")).toBe(false);
+    expect(app.shows("label:Back to bottom")).toBe(false);
   });
 
   test("a new message preserves existing content", async () => {
