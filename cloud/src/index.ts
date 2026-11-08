@@ -143,6 +143,8 @@ export class Hub extends DurableObject<Env> {
     // events.ref, indexed: a task's conversation is read by ref, never by scanning every event's JSON (rows_read is billed per row)
     try { this.sql.exec("ALTER TABLE events ADD COLUMN ref TEXT"); } catch { /* exists */ }
     this.sql.exec("CREATE INDEX IF NOT EXISTS events_ref ON events (ref)");
+    // Channel feeds use indexed room/ref lookups; opening a room never scans unrelated history.
+    this.sql.exec("CREATE INDEX IF NOT EXISTS events_channel ON events (json_extract(json, '$.channel')) WHERE json_extract(json, '$.channel') IS NOT NULL");
     // Indexed receipt lookup: one row per retry, no event scan or polling.
     this.sql.exec("CREATE INDEX IF NOT EXISTS events_client_id ON events (json_extract(json, '$.client_id')) WHERE json_extract(json, '$.client_id') IS NOT NULL");
     if (this.sql.exec("SELECT v FROM kv WHERE k = 'events_ref_filled'").toArray().length === 0) {
@@ -699,7 +701,7 @@ export class Hub extends DurableObject<Env> {
     if (p === "/api/channels/feed" && m === "GET") { // the channel's digest, however far back the app's feed doesn't reach
       const c = channelsView(this.mcp.store()).channels.find((c) => c.slug === url.searchParams.get("slug"));
       if (!c) return json({ error: "not found" }, 404);
-      const rows = this.sql.exec("SELECT json FROM events WHERE ref IS NOT NULL OR json_extract(json, '$.channel') = ? ORDER BY seq DESC LIMIT 5000", c.slug).toArray().reverse();
+      const rows = this.sql.exec("SELECT json FROM events WHERE ref IN (SELECT value FROM json_each(?)) OR json_extract(json, '$.channel') = ? ORDER BY seq DESC LIMIT 5000", JSON.stringify(c.refs ?? []), c.slug).toArray().reverse();
       return json({ events: channelDigest(rows.map((r) => JSON.parse(r.json as string)), c.refs ?? [], c.slug) });
     }
     if (p === "/api/channels" && m === "POST") { // owner: edit a channel's goal / archive it; the primary writes the file
