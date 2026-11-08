@@ -2145,10 +2145,10 @@ function Sidebar(props: {
 }
 
 /** A fixed colour per initial, so the same account always gets the same avatar colour. */
-const AVATAR_COLORS = ["#e5484d", "#f76b15", "#d6a000", "#30a46c", "#12a594", "#0090ff", "#3e63dd", "#8e4ec6", "#d6409f", "#8d8d86"];
 function initialColor(ch: string): string {
   const c = ch.toUpperCase().charCodeAt(0);
-  return c >= 65 && c <= 90 ? AVATAR_COLORS[(c - 65) % AVATAR_COLORS.length] : AVATAR_COLORS[AVATAR_COLORS.length - 1];
+  const index = c >= 65 && c <= 90 ? (c - 65) % 10 + 1 : 10;
+  return token(`avatar-${index}` as "avatar-1");
 }
 
 /** The sidebar account, opening the user menu (settings, appearance, language). */
@@ -2175,7 +2175,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
   const initial = () => (account().slice(0, 1) || "?").toUpperCase();
   const avatar = (box: number) => (
     <View style={{ width: box, height: box, borderRadius: box / 2, flexShrink: 0, alignItems: "center", justifyContent: "center", backgroundColor: initialColor(initial()) }}>
-      <Text style={{ fontSize: Math.round(box * 0.44), fontWeight: "600", color: "#fff" }}>{initial()}</Text>
+      <Text style={{ fontSize: Math.round(box * 0.44), fontWeight: "600", color: token("avatar-foreground") }}>{initial()}</Text>
     </View>
   );
   /** One of the two appearances, as a segment whose raised thumb marks the current one. */
