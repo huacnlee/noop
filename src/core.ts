@@ -227,6 +227,17 @@ export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null
   return allowedClis(meta, cfg).find(which) ?? null;
 }
 
+/** CLIs the task may actually start on: what allowedClis says, except a pin to a CLI no online host can run is
+ *  dropped (a pinned-but-absent CLI would park the inbox task forever and stall its routine — seen with cli:codex
+ *  planned onto a fleet whose only host had no codex on PATH). */
+export function runnableClis(meta: Record<string, string>, cfg: Cfg): string[] {
+  const allowed = allowedClis(meta, cfg);
+  if (allowed.length !== 1 || which(allowed[0])) return allowed;
+  if (onlineHosts(cfg).some((h) => h.caps.includes(`cli:${allowed[0]}`))) return allowed; // another host can take it
+  const per = cfg.clis?.agents?.[meta.agent || "lead"] as string[] | undefined;
+  return per ?? ["claude", "codex"]; // pin dropped: same precedence as an unplanned task
+}
+
 // ------------------------------------------------------------------ fleet presence (heartbeats)
 export type HostBeat = { host: string; caps: string[]; seen: string; busy: number; version: string; stats?: any;
   /** The noop code this host runs: its commit and that commit's page. */ rev?: string; rev_url?: string;
@@ -319,7 +330,7 @@ export function pickTask(cfg: Cfg, myLoad = 0, heavyOk = true): string | null {
   const cands = list(P("tasks", "inbox"), /^T-.*\.md$/)
     .map((p) => ({ p, m: readDoc(p).meta }))
     // the planner decides where a task runs first; unplanned tasks wait for it (at most plan_wait_minutes)
-    .filter(({ m }) => (m.planned || Date.now() - Date.parse(m.created ?? "") > (cfg.fleet?.plan_wait_minutes ?? 3) * 60_000) && matches(m, caps) && chooseCli(m, cfg) && !yieldToPreferred(m, caps, cfg) && !yieldHeavy(m, cfg, myLoad, heavyOk))
+    .filter(({ m }) => (m.planned || Date.now() - Date.parse(m.created ?? "") > (cfg.fleet?.plan_wait_minutes ?? 3) * 60_000) && matches(m, caps) && runnableClis(m, cfg).some(which) && !yieldToPreferred(m, caps, cfg) && !yieldHeavy(m, cfg, myLoad, heavyOk))
     .sort((a, b) => (rank[a.m.priority] ?? 2) - (rank[b.m.priority] ?? 2) || a.p.localeCompare(b.p));
   return cands[0]?.p ?? null;
 }
