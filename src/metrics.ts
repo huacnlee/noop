@@ -26,10 +26,24 @@ export function computeMetrics(days = 7) {
     return [k, { runs: n, success: +(v.done / (n || 1)).toFixed(2), failed: v.failed, blocked: v.blocked, median_minutes: Math.round(med) }];
   }));
   const approvals = list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => m.kind === "proposals");
-  const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/).length;
+  const approvalsById = new Map(approvals.map((m) => [m.id, m]));
+  // These are retained-record totals, not windowed owner rejection rates. A cancelled
+  // task or a routine superseded by the scheduler says nothing about category preference.
+  const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/).map((p) => readDoc(p).meta);
+  const rejectedTaskReasons = { scope: "all_retained_records", owner_rejected: 0, cancelled: 0, system_superseded: 0, unclassified: 0 };
+  for (const m of rejected) {
+    if (m.cancelled) rejectedTaskReasons.cancelled++;
+    else if (m.approval?.startsWith("superseded:")) rejectedTaskReasons.system_superseded++;
+    else {
+      const decision = m.approval?.startsWith("rejected:") ? approvalsById.get(m.approval.slice("rejected:".length)) : undefined;
+      if (decision && /^owner\(/.test(decision.answered_by ?? "")) rejectedTaskReasons.owner_rejected++;
+      else rejectedTaskReasons.unclassified++;
+    }
+  }
   const out = {
     shadow_judge: judgeAccuracy(),
-    shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])), proposal_batches: approvals.length, proposals_rejected_total: rejected,
+    shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])), proposal_batches: approvals.length, proposals_rejected_total: rejected.length,
+    rejected_task_reasons: rejectedTaskReasons,
     window_days: days, generated: new Date().toISOString(), agents,
     decisions: { total: decisions.length, by_judge: byWho(/^judge/), by_owner: byWho(/^owner\(/), owner_overrides_of_judge: byWho(/override/),
       owner_accepted_recommendation: rubberStamp },
