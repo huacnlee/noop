@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { due } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
@@ -267,6 +267,34 @@ test("run logs keep screenshot events but not their base64 payloads", () => {
   expect(stripImages(broken)).toBe(broken);
   expect(stripImages("plain codex output")).toBe("plain codex output");
 });
+
+test("a run log exists and grows while the agent runs, and has the usual layout at exit", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/noop-live-log-`);
+  const go = `${dir}/go`;
+  const first = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } });
+  const last = JSON.stringify({ type: "result", result: '```json\n{"status":"done","summary":"ok"}\n```' });
+  // prints one line, then waits for the test to release it before printing the result
+  const script = `const fs = require("node:fs");`
+    + `process.stdout.write(${JSON.stringify(`${first}\n`)});`
+    + `const t = setInterval(() => { if (fs.existsSync(${JSON.stringify(go)})) { clearInterval(t);`
+    + `process.stdout.write(${JSON.stringify(`${last}\n`)}); process.stderr.write("warn"); } }, 20);`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const run = runAgent("fake", "prompt", dir, cfg, log);
+    let mid = "";
+    for (let i = 0; i < 250 && !mid.endsWith(`${first}\n`); i++) { // the header holds the script, so it contains the text too
+      await Bun.sleep(20);
+      mid = existsSync(log) ? readFileSync(log, "utf8") : "";
+    }
+    expect(mid).toBe(`$ ${process.execPath} -e ${script} stream-json\n\n${first}\n`);
+    writeFileSync(go, "");
+    expect(parseResult(await run)).toMatchObject({ status: "done", summary: "ok" });
+    expect(readFileSync(log, "utf8")).toBe(`$ ${process.execPath} -e ${script} stream-json\n(exit 0)\n\n${first}\n${last}\n\n\n[stderr]\nwarn`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
 
 test("an empty completion (no text, no tool call, exit 0) is retried once instead of failing the task", async () => {
   // The provider sometimes answers with nothing at all and the CLI still exits 0; Claude Code's own
