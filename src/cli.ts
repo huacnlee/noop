@@ -1051,7 +1051,7 @@ async function main() {
         headers: { Authorization: `Bearer ${cfg.server?.token}`, "x-noop-host": host, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (rest[0] === "status" || !rest[0]) {
         const r = await call("/api/host/2fa");
-        if (!r.ok) { process.exitCode = 1; return void console.log(L(`Query failed: HTTP ${r.status} ${await r.text()}`, `查询失败：HTTP ${r.status} ${await r.text()}`)); }
+        if (!r.ok) { process.exitCode = 1; const body = await r.text(); return void console.log(L(`Query failed: HTTP ${r.status} ${body}`, `查询失败：HTTP ${r.status} ${body}`)); }
         const d = (await r.json()) as { bound: boolean; since: number | null };
         return void console.log(d.bound ? L(`✓ 2FA is bound (${new Date(d.since ?? 0).toLocaleString()})`, `✓ 两步验证已绑定（${new Date(d.since ?? 0).toLocaleString()}）`) : L("✗ 2FA is not bound: nobody can log in. Run noop 2fa setup", "✗ 还没有绑定两步验证：任何人都无法登录。运行 noop 2fa setup"));
       }
@@ -1065,7 +1065,7 @@ async function main() {
       const st = (await (await call("/api/host/2fa")).json().catch(() => ({}))) as { bound?: boolean };
       if (st.bound) console.log(L("⚠ Already bound: confirming makes the old authenticator stop working at once.", "⚠ 已经绑定过：确认后旧的验证器立即失效。"));
       const r = await call("/api/host/2fa/setup", {});
-      if (!r.ok) { process.exitCode = 1; return void console.log(L(`Failed: HTTP ${r.status} ${await r.text()}`, `失败：HTTP ${r.status} ${await r.text()}`)); }
+      if (!r.ok) { process.exitCode = 1; const body = await r.text(); return void console.log(L(`Failed: HTTP ${r.status} ${body}`, `失败：HTTP ${r.status} ${body}`)); }
       const { secret, uri } = (await r.json()) as { secret: string; uri: string };
       console.log(L("\nScan the QR code with an authenticator app (Google Authenticator / 1Password / Authy …):\n", "\n用验证器 App（Google Authenticator / 1Password / Authy …）扫描二维码：\n"));
       const qr = Bun.which("qrencode") ? await $`qrencode -t ansiutf8 -m 2 ${uri}`.quiet().nothrow() : null;
@@ -1088,7 +1088,7 @@ async function main() {
       const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
       if (!url) return void console.log(L("[cloud] url is not configured", "没有配置 [cloud] url"));
       const r = await fetch(`${url}/api/host/revoke-sessions`, { method: "POST", headers: { Authorization: `Bearer ${cfg.server?.token}`, "x-noop-host": host } }).catch((e) => e as Error);
-      if (r instanceof Error || !r.ok) { process.exitCode = 1; return void console.log(L(`Revoke failed: ${r instanceof Error ? r.message : `HTTP ${r.status} ${await r.text()}`}`, `撤销失败：${r instanceof Error ? r.message : `HTTP ${r.status} ${await r.text()}`}`)); }
+      if (r instanceof Error || !r.ok) { process.exitCode = 1; const why = r instanceof Error ? r.message : `HTTP ${r.status} ${await r.text()}`; return void console.log(L(`Revoke failed: ${why}`, `撤销失败：${why}`)); }
       const { revoked } = (await r.json()) as { revoked: number };
       return void console.log(L(`✓ Revoked ${revoked} login(s) (phones, browsers, MCP connectors). Log in again with an email code.\n  If you suspect the mailbox is compromised, change its password first, then consider rotating the machine key.`, `✓ 已撤销 ${revoked} 个登录（手机、浏览器、MCP 连接器）。需要重新用邮箱验证码登录。\n  如果怀疑邮箱被盗，先改邮箱密码，再考虑轮换机器密钥。`));
     }

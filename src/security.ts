@@ -22,9 +22,10 @@ export async function securityReport(cfg: Cfg, host: string, primary: boolean): 
     const call = (path: string) => fetch(`${url}${path}`, { headers: { Authorization: `Bearer ${token}`, "x-noop-host": host } });
     const tf = await call("/api/host/2fa").catch((e) => e as Error);
     if (tf instanceof Error) add("bad", "Worker", L(`Cannot reach ${url}: ${tf.message}`, `连不上 ${url}：${tf.message}`));
-    else if (tf.status === 403 && (await tf.clone().json().catch(() => ({})) as { error?: string }).error === "ip_blocked")
-      add("bad", "Worker", L(`This machine's public IP is blocked by HUB_ALLOW_IPS: ${(await tf.json().catch(() => ({})) as { ip?: string }).ip}`, `本机出口 IP 被 HUB_ALLOW_IPS 挡住了：${(await tf.json().catch(() => ({})) as { ip?: string }).ip}`));
-    else if (tf.status === 404) add("bad", "Worker", L("The Worker runs old code (no 2FA): run noop cloud deploy", "Worker 运行的是旧代码（没有两步验证）：运行 noop cloud deploy"));
+    else if (tf.status === 403 && (await tf.clone().json().catch(() => ({})) as { error?: string }).error === "ip_blocked") {
+      const { ip } = await tf.json().catch(() => ({})) as { ip?: string };
+      add("bad", "Worker", L(`This machine's public IP is blocked by HUB_ALLOW_IPS: ${ip}`, `本机出口 IP 被 HUB_ALLOW_IPS 挡住了：${ip}`));
+    } else if (tf.status === 404) add("bad", "Worker", L("The Worker runs old code (no 2FA): run noop cloud deploy", "Worker 运行的是旧代码（没有两步验证）：运行 noop cloud deploy"));
     else if (tf.status === 401) add("bad", "Worker", L("The Worker rejected the machine key (401): this machine's [server] token does not match the Worker's HUB_TOKEN", "机器密钥被 Worker 拒绝（401）：本机的 [server] token 和 Worker 的 HUB_TOKEN 不一致"));
     else if (!tf.ok) add("bad", "Worker", L(`Checking 2FA failed: HTTP ${tf.status}`, `查询两步验证失败：HTTP ${tf.status}`));
     else {
