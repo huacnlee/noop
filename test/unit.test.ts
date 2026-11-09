@@ -222,6 +222,19 @@ test("pickTask: a task no machine here can run (needs another OS) never holds ba
   expect(picked).toContain("T-9002");
 });
 
+test("fleetCanMeet: the planner cannot add a requirement no machine of the fleet has", async () => {
+  const { fleetCanMeet, P } = await import("../src/core");
+  const { mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  rmSync(P("fleet", "hosts"), { recursive: true, force: true });
+  expect(fleetCanMeet("os:linux")).toEqual(["os:linux"]); // no machine known yet: nothing to check against
+  mkdirSync(P("fleet", "hosts"), { recursive: true });
+  const beat = (host: string, caps: string[], seen: string) => writeFileSync(P("fleet", "hosts", `${host}.json`), JSON.stringify({ host, caps, seen, busy: 0, version: "1" }));
+  beat("mac", ["os:macos", "host:mac", "cli:claude"], new Date().toISOString());
+  beat("win", ["os:windows", "host:win"], "2026-01-01T00:00:00Z"); // offline, but part of the fleet
+  expect(fleetCanMeet("os:linux, cli:claude, os:windows, os:linux|os:macos")).toEqual(["cli:claude", "os:windows", "os:linux|os:macos"]);
+  rmSync(P("fleet", "hosts"), { recursive: true, force: true });
+});
+
 test("a reply to an agent's message goes to the brain with that task, never as an amendment of the last decision", async () => {
   const { handleOwnerMessage, setOwnerTask, drainInbound } = await import("../src/server");
   const calls: [string, { reply?: string; answered?: string }][] = [];
