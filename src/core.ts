@@ -299,6 +299,12 @@ export function onlineHosts(cfg: Cfg): HostBeat[] {
 
 const reqList = (s?: string) => (s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
+/** The requirements in `s` that some machine of the fleet meets, online or not (all of them while no machine is known). */
+export function fleetCanMeet(s?: string): string[] {
+  const seen = list(P("fleet", "hosts"), /\.json$/).map((p) => (JSON.parse(readFileSync(p, "utf8")) as HostBeat).caps);
+  return reqList(s).filter((r) => !seen.length || seen.some((caps) => capOk(r, caps)));
+}
+
 /** Should this host leave the task for a preferred, currently-online host? */
 function yieldToPreferred(meta: Record<string, string>, caps: string[], cfg: Cfg): boolean {
   const prefer = reqList(meta.prefer);
