@@ -180,6 +180,8 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
   const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
+  // before the spawn: a throw after it would leave the agent running with no timeout, stall watch or drained pipes
+  mkdirSync(P("logs", "runs"), { recursive: true });
   const proc = Bun.spawn(cmd, {
     cwd: existsSync(dir) ? dir : ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     // Claude -p stops background subagents 10 min after the last turn; our own run limit bounds the run instead
@@ -220,7 +222,6 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   };
   // the log exists from the start and grows with stdout, so a long or killed run still leaves its transcript;
   // a failed write only loses that early copy, the full log is written again at exit
-  mkdirSync(P("logs", "runs"), { recursive: true });
   const logPart = (s: string, append = true) => {
     try { (append ? appendFileSync : writeFileSync)(logFile, s); } catch {}
   };
