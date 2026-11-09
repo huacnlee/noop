@@ -568,9 +568,9 @@ function Dot(props: { tone: "on" | "run" | "queue" | "wait" | "off" | "bad" }) {
 
 /** A tag in the gallery's Badge style: a tone's tint behind its color. */
 function Badge(props: { label: string; tone?: "accent" | "warn" | "info" | "neutral" | "danger" }) {
-  const tone = props.tone ?? "neutral";
-  const fg = () => (tone === "neutral" ? colors.muted : tone === "accent" ? colors.accent : colors[tone]);
-  const bg = () => (tone === "neutral" ? colors.raised : tints[tone]);
+  const tone = () => props.tone ?? "neutral";
+  const fg = () => (tone() === "neutral" ? colors.muted : tone() === "accent" ? colors.accent : colors[tone()]);
+  const bg = () => (tone() === "neutral" ? colors.raised : tints[tone()]);
   return (
     <View style={{ height: 22, paddingHorizontal: 8, justifyContent: "center", borderRadius: 6, backgroundColor: bg() }}>
       <Text style={{ fontSize: 12.5, fontWeight: "600", color: fg() }}>{props.label}</Text>
@@ -1108,7 +1108,7 @@ function menuItems(e: HubEvent): Proposal[] {
 }
 
 /** An approval batch as a checklist: tick what may start, then approve. */
-function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Set<string>>>; done: boolean; onAnswer: (ref: string, choice: string) => void; onReply: (ref: string) => void }) {
+function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Set<string>>>; done: boolean; picked: string | null; onAnswer: (ref: string, choice: string) => void; onReply: (ref: string) => void }) {
   const e = props.event;
   // a next-steps menu is the same checklist: several items may start at once (D-0215 was answered by typing "1,2")
   const menu = e.kind === "menu";
@@ -1118,6 +1118,11 @@ function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Se
   const selection = picked;
   const toggle = (n: string) => selection.update((s) => { const x = new Set(s); x.has(n) ? x.delete(n) : x.add(n); return x; });
   const answer = (c: string) => props.onAnswer(e.ref!, c);
+  // answered: tick what the answer approved ("1,3" / "all"), so the card reads as a record, not a checklist that ignores clicks
+  const approved = (n: string) => {
+    const a = (props.picked ?? "").trim();
+    return /^(all|全部)$/i.test(a) || a.split(/\s*[,，]\s*/).includes(n);
+  };
   return (
     <>
       <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 6 }}>
@@ -1126,7 +1131,7 @@ function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Se
       <View style={{ paddingHorizontal: 8, paddingBottom: 8 }}>
         <Each of={items}>
           {(it) => {
-            const on = () => selection().has(it().n);
+            const on = () => (props.done ? approved(it().n) : selection().has(it().n));
             return (
               <View
                 role="checkbox"
@@ -1149,6 +1154,9 @@ function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Se
           }}
         </Each>
       </View>
+      <If when={props.done && props.picked}>
+        <Text testID={`answer-${e.ref}`} style={{ fontSize: size.small, color: colors.muted, paddingHorizontal: 16, paddingBottom: 16 }}>{L(`Your reply: ${answerText(`${e.ref} ${props.picked}`)}`, `你的回复：${answerText(`${e.ref} ${props.picked}`)}`)}</Text>
+      </If>
       <If when={!props.done}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, paddingHorizontal: 16, paddingTop: 2, paddingBottom: 16 }}>
           <Btn testID={`approve-${e.ref}`} label={selection().size ? L(`Approve selected (${selection().size})`, `批准所选（${selection().size}）`) : L("Approve selected", "批准所选")} kind="primary" disabled={!selection().size}
@@ -1393,7 +1401,7 @@ function Message(props: {
               </If>
             </View>
             {(e.kind === "proposals" || e.kind === "menu") && menuItems(e).length ? (
-              <ProposalList event={e} selection={selection} done={done()} onAnswer={props.onAnswer} onReply={props.onReply} />
+              <ProposalList event={e} selection={selection} done={done()} picked={picked()} onAnswer={props.onAnswer} onReply={props.onReply} />
             ) : (
             <>
             <View style={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 14 }}>{body}</View>

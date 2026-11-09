@@ -496,6 +496,16 @@ describe("channel", () => {
     await app.waitUntil(() => !app.shows("text:要不要升级依赖？"));
   });
 
+  test("an approval card answered in the channel shows the answer instead of a dead checklist", async () => {
+    const proposal = { id: "p-answered", ts: ts(8), from: "hub", kind: "proposals", ref: "P-0901", text: "*P-0901* 想做这几件事，请确认：\n1. 修复 A（reviewer）\n2. 修复 B（dispatcher）\n3. 修复 C（ops-watcher）" };
+    const reply = { id: "p-answer", ts: ts(9), from: "owner", kind: "owner", text: "P-0901 1,3" };
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], [proposal, reply]), width: 1200, height: 800, platform: "macos" });
+    await app.waitFor("id:answer-P-0901");
+    expect(app.shows("text:Your reply: Approve 1, 3")).toBe(true);
+    expect(app.shows("id:replied-P-0901")).toBe(true);
+    expect(app.shows("id:approve-P-0901")).toBe(false);
+  });
+
   test("a next-steps menu takes several items at once", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const menu = { id: "menu-1", ts: ts(9), from: "Tudi@lb", kind: "menu", ref: "D-0900", text: "*D-0900* · Tudi：团队空闲了，下一步做哪些？\n1. [rust-maintainer] 修复快捷键串窗\n2. [rust-maintainer] 修复窗口属性丢失\n3. [rust-maintainer] 修复依赖冲突\n建议：*1*",
