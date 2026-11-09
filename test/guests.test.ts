@@ -88,3 +88,10 @@ test("guest agent never loads the cloned repo's settings, hooks or MCP servers, 
 test("untrusted guest text is stripped of terminal escapes", () => {
   expect(safe("a\u001b]52;c;ZXZpbA==\u0007b\u009b2Jc")).toBe("a]52;c;ZXZpbA==b2Jc");
 });
+test("guest invite prints install lines that join as the guest, with no login", async () => {
+  const { guestInvite } = await import("../src/guest");
+  const out = guestInvite("https://noop.example.com", "ABC123");
+  expect(out).toContain(`$env:NOOP_GUEST = "https://noop.example.com ABC123"; irm https://huacnlee.github.io/noop/install.ps1 | iex`);
+  expect(out).toContain("install.sh | bash -s -- --guest https://noop.example.com ABC123");
+  expect(out).toContain("noop guest join https://noop.example.com ABC123");
+});
