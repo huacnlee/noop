@@ -242,7 +242,7 @@ const ROUTINE_DESC: Record<string, string> = {
   "triage-inbound": "扫描 GitHub 通知、待你审的 PR、指派给你的 issue 和 CI 失败，拆成任务交给对应成员",
   "uptime-watch": "查看线上可用性告警，按升级规则处理",
   "pr-review": "审查 Core 仓库里还没审过的 PR，每次最多 3 个",
-  "own-prs-ci": "让你自己的 PR 保持可合并：解冲突、修 CI、改掉明显的评审意见",
+  "own-prs-ci": "检查你自己的 PR 能否合并：冲突、CI 失败、明显的评审意见，每个 PR 提一个修复任务",
   "nightly-health": "在最新 main 上跑 cargo check / test，发现回归就建任务",
   "macos-check": "在 macOS 上构建并测试 Core 仓库，报告平台相关的失败",
   "daily-report": "根据日志、提交和 GitHub 动态写当天的日报",

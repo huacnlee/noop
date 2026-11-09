@@ -33,12 +33,12 @@ signal = """gh api graphql -f query='query($q:String!){search(query:$q,type:ISSU
 readonly = true                       # only observes: runs without approval; changes come back as gated followups
 every = "30m"
 agent = "rust-maintainer"
-difficulty = "hard"
-prompt = """Keep the owner's own open PRs mergeable without asking him. List them with `gh search prs --author=@me --state=open --json repository,number,url` and, per PR, `gh pr view <n> -R <repo> --json mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName`.
-1. mergeable == CONFLICTING (GitHub shows "This branch has conflicts", checks stuck "awaiting conflict resolution"): in a fresh worktree of the PR branch, `git merge origin/<base>` (never rebase: force-push is forbidden), resolve every conflict preserving the PR's intent and main's newer changes (read both sides' commits), run the repo's real build + tests (cargo test / bun test etc.), then push normally to the PR branch. Comment a short signed note listing the resolved files.
-2. CI red because of main drift, or a trivial failure (fmt, clippy, snapshot, lockfile): fix on the branch the same way.
-3. Unaddressed review comments with an obvious fix: fix them.
-Only if a conflict needs a product/design choice the code can't settle → needs_decision with both versions summarized and a recommendation. Skip PRs marked draft-WIP by the owner within the last hour (he is likely still pushing)."""
+prompt = """Find which of the owner's own open PRs are not mergeable and return one follow-up per PR that needs work. List them with `gh search prs --author=@me --state=open --json repository,number,url` and, per PR, `gh pr view <n> -R <repo> --json mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName`.
+Each follow-up names the PR URL, what is wrong and the exact fix, with difficulty "hard" when the fix needs real engineering:
+1. mergeable == CONFLICTING (GitHub shows "This branch has conflicts", checks stuck "awaiting conflict resolution"): list the conflicting files. The fix: in a fresh worktree of the PR branch, `git merge origin/<base>` (never rebase: force-push is forbidden), resolve every conflict preserving the PR's intent and main's newer changes (read both sides' commits), run the repo's real build + tests (cargo test / bun test etc.), then push normally to the PR branch and comment a short signed note listing the resolved files.
+2. CI red because of main drift, or a trivial failure (fmt, clippy, snapshot, lockfile): name the failing check and its cause; the fix goes on the branch the same way.
+3. Unaddressed review comments with an obvious fix: quote them and give the fix.
+If a conflict needs a product/design choice the code can't settle, say so in its follow-up with both versions summarized and a recommendation. Skip PRs marked draft-WIP by the owner within the last hour (he is likely still pushing). Nothing needs work → done with a one-line count."""
 
 [[routine]]
 name = "nightly-health"
