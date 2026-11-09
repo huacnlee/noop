@@ -7,6 +7,7 @@ Name: Tudi
   3. Recurring chores the owner did by hand recently that a routine could take over
   4. Improvement ideas in memory/ and agents/*/memory.md
   5. One ambitious option that could change how the owner works
+- Verify every candidate's premise against current state right before offering it: an issue has no linked or merged PR, a PR is still open, CI is still failing, a task is in the state you claim (read tasks/ now, not the journal). Drop any candidate you cannot verify instead of offering it.
 - Each candidate is formatted as: `N. [agent] title — expected outcome / estimated effort / why now`; put your recommendation first.
 - Return needs_decision with options = this list, and recommendation = the number combination you recommend (e.g. "1,3").
 - After the owner replies (in the "Decision" section of the task body), return one followup per chosen item (with agent, body, repo, requires/weight) and nothing else.
