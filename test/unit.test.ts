@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { due } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
-import { cliCommand, parseResult, runAgent } from "../src/runner";
+import { cliCommand, parseResult, runAgent, stripImages } from "../src/runner";
 
 test("routine schedule", () => {
   const t = new Date("2026-11-02T19:05:00"); // Monday
@@ -245,6 +245,27 @@ test("a result block survives a later turn from a background task notification",
   const res = parseResult(await runAgent("fake", "", tmpdir(), cfg, log));
   rmSync(log, { force: true });
   expect(res).toMatchObject({ status: "done", summary: "tested" });
+});
+
+test("run logs keep screenshot events but not their base64 payloads", () => {
+  const png = "iVBORw0KGgo".repeat(400);
+  const event = {
+    type: "user",
+    message: { role: "user", content: [{ tool_use_id: "t1", type: "tool_result",
+      content: [{ type: "image", source: { type: "base64", data: png, media_type: "image/png" } }] }] },
+    parent_tool_use_id: null,
+    tool_use_result: { type: "image", file: { base64: png, type: "image/png", originalSize: 3300 } },
+  };
+  const out = stripImages(JSON.stringify(event));
+  expect(out).not.toContain(png);
+  const e = JSON.parse(out);
+  expect(e.message.content[0].content[0].source).toEqual({ type: "base64", data: "[image/png, 3300 bytes omitted]", media_type: "image/png" });
+  expect(e.tool_use_result.file).toEqual({ base64: "[image/png, 3300 bytes omitted]", type: "image/png", originalSize: 3300 });
+  const text = '{"type":"assistant","message":{"content":[{"type":"text","text":"base64","note":"caf\\u00e9"}]}}'; // parsed, no image: kept byte for byte
+  expect(stripImages(text)).toBe(text);
+  const broken = '{"type":"user","source":{"type":"base64","data":"iVBOR';
+  expect(stripImages(broken)).toBe(broken);
+  expect(stripImages("plain codex output")).toBe("plain codex output");
 });
 
 test("an empty completion (no text, no tool call, exit 0) is retried once instead of failing the task", async () => {
