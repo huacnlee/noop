@@ -36,3 +36,5 @@
 - Do not loop over REST endpoints with `gh api repos/...` (hard-gated). `gh api graphql` is fine for one batched query;
   `gh api notifications` once per triage run.
 - The quota is shared with the owner's own work — one list query beats N per-item calls.
+- Before cloning, building or creating worktrees, check that the PRs/issues the task names are still in the state it assumes
+  (open, unmerged, not already fixed) in one query; skip the ones that are not and report the stale premise in the summary.
