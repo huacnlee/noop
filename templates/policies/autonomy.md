@@ -18,8 +18,6 @@
 ## When asking
 - Give 2-4 options, put your recommendation first, explain consequences in one sentence each
 - Do all the preparation that doesn't need the decision first, so the owner can unblock it with one word
-- A choice the owner must make is returned as `needs_decision` with options, never left only as text in a PR, issue
-  or comment, and never held back behind `waiting` on CI: the owner sees decisions, not PR descriptions
 
 ## Hard limits
 - Never write secrets into the hub repo; never `rm -rf` outside your working directory; never push to main/master
