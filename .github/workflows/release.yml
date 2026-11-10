@@ -27,6 +27,8 @@ env:
   # checkForUpdate leaving the whole app alone while a package of its release runs (longbridge/nsh#1207), the Linux tray painting an SVG icon as a template (longbridge/nsh#1209), and shellInfo() for the installed app's version and NSH runtime (longbridge/nsh#1226). Also the Linux updater restarting from the pre-swap program path (longbridge/nsh#1269).
   # Includes EmojiPicker (#1323), used by the chat composer.
   NSH_REF: 36b91689c1e7c38379179a56381de7ddab16c6a5
+  # Web packaging prunes static namespace reads while preserving optional APIs on older native shells.
+  NSH_WEB_REF: 72915e2122bfb4f3fefdfb0b5017357824b68dc1
 
 defaults:
   run:
@@ -50,7 +52,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nsh
         with:
-          ref: ${{ env.NSH_REF }}
+          ref: ${{ matrix.target == 'web' && env.NSH_WEB_REF || env.NSH_REF }}
           target: ${{ matrix.target }}
 
       - name: Package
@@ -144,7 +146,7 @@ jobs:
         if: matrix.target == 'macos'
         uses: ./.github/actions/setup-nsh
         with:
-          ref: ${{ env.NSH_REF }}
+          ref: ${{ matrix.target == 'web' && env.NSH_WEB_REF || env.NSH_REF }}
           target: macos
           rust-target: x86_64-apple-darwin
 
@@ -189,7 +191,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nsh
         with:
-          ref: ${{ env.NSH_REF }}
+          ref: ${{ matrix.target == 'web' && env.NSH_WEB_REF || env.NSH_REF }}
           target: linux
       - uses: actions/download-artifact@v4
         with:
