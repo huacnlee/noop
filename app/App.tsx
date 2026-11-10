@@ -1007,7 +1007,7 @@ function MsgActions(props: { text: string; show: () => boolean; onReply?: () => 
     }, () => {});
   };
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", alignSelf: props.align ?? "flex-start", gap: 2, height: touch ? 36 : 24, marginLeft: props.align === "flex-end" ? 0 : -4, opacity: props.show() || copied() ? 1 : 0, transitionProperty: "opacity", transitionDuration: 120 }}>
+    <View style={{ flexDirection: "row", alignItems: "center", alignSelf: props.align ?? "flex-start", gap: 6, height: touch ? 36 : 24, marginLeft: props.align === "flex-end" ? 0 : -4, opacity: props.show() || copied() ? 1 : 0, transitionProperty: "opacity", transitionDuration: 120 }}>
       <IconButton testID={`copy-${props.id}`} icon={copied() ? "check" : "copy"} label={copied() ? L("Copied", "已复制") : L("Copy", "复制")} size="sm" tooltip={false} onPress={copy} />
       <If when={props.onReply}>
         <IconButton testID={`reply-${props.id}`} icon="reply" label={L("Reply", "回复")} size="sm" tooltip={false} onPress={() => props.onReply?.()} />
