@@ -72,7 +72,7 @@ case "$mode" in
   uncommitted) scope="the uncommitted changes (\`git diff HEAD\` and untracked files from \`git status --porcelain\`)";;
 esac
 
-tmp="$(mktemp -d -t second-review)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/second-review.XXXXXX")"
 out="$tmp/out"; err="$tmp/err"; log="$tmp/log"; : > "$out"; : > "$err"; : > "$log"
 trap 'rm -rf "$tmp"' EXIT
 rc=0; reason=""; detail=""; ran=""; recovery=""

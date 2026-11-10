@@ -38,6 +38,6 @@ test("DST fall-back uses the future repeated hour", () => {
 });
 
 test("unspecified timezone uses the host timezone", () => {
-  const local = new Date(now); local.setHours(23, 0, 0, 0);
-  expect(quotaRecovery("resets at 23:00", now).until).toBe(new Date(local.getTime() + 120_000).toISOString());
+  const local = new Date(now); local.setHours(local.getHours() + 1, 0, 0, 0);
+  expect(quotaRecovery(`resets at ${local.getHours()}:00`, now).until).toBe(new Date(local.getTime() + 120_000).toISOString());
 });
