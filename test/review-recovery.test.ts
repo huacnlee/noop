@@ -29,6 +29,12 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     expect(malformed.status).toBe(2);
     expect(malformed.stdout).toContain("reason=parse");
     expect(existsSync(statePath)).toBe(false);
+    writeFileSync(join(dir, "exit-code"), "1");
+    writeFileSync(join(dir, "answer"), '- [P2] Review quotes usage limit and "resets in 2h 13m" but crashed.\n');
+    const crashed = run(args);
+    expect(crashed.status).toBe(2);
+    expect(crashed.stdout).toContain("reason=error");
+    expect(existsSync(statePath)).toBe(false);
     writeFileSync(join(dir, "calls"), "");
     writeFileSync(join(dir, "answer"), "You've hit your 5-hour limit · resets in 2h 13m\n");
     writeFileSync(join(dir, "exit-code"), "1");
@@ -90,6 +96,15 @@ test("concurrent quota writers preserve complete state and other account fields"
     expect(state.accounts["claude-shared"].needs_login).toBe(true);
     expect(state.accounts["claude-shared"].token).toBe("fixture-value");
     expect(state.seq).toBe(7);
+    const killed = spawnSync("bun", ["-e", `import { Database } from "bun:sqlite";
+      const db = new Database(${JSON.stringify(join(accountDir, "state-lock.sqlite"))});
+      db.exec("BEGIN IMMEDIATE"); console.log("locked"); while (true) Bun.sleepSync(1000);`],
+      { env, encoding: "utf8", timeout: 1000, killSignal: "SIGKILL" });
+    expect(killed.stdout).toContain("locked");
+    expect(killed.signal).toBe("SIGKILL");
+    const recovered = spawnSync("bun", ["-e", source, "after-crash"], { env, encoding: "utf8", timeout: 10_000 });
+    expect(recovered.status).toBe(0);
+    expect(JSON.parse(readFileSync(statePath, "utf8")).accounts["claude-after-crash"].cooldown_until).toBeDefined();
     expect(existsSync(join(accountDir, "state.lock"))).toBe(false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }, 20_000);

@@ -2,7 +2,8 @@
 // Accounts are per machine (credentials never enter the shared data repo):
 //   ~/.noop/accounts/<cli>-<name>/   → CLAUDE_CONFIG_DIR or CODEX_HOME for that account
 //   ~/.noop/accounts/state.json      → cooldowns, auth status, pending logins
-import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmdirSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Cfg, L, hostName, journal, HOME_DIR } from "./core";
@@ -20,37 +21,22 @@ const load = (): State => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, "u
 /** Serialize local writers and publish complete JSON, so the bridge cannot clobber daemon updates. */
 function updateState<T>(change: (state: State) => T): T {
   mkdirSync(HOME, { recursive: true });
-  const lock = join(HOME, "state.lock"), owner = join(lock, "pid");
-  const deadline = Date.now() + 5000;
-  while (true) {
-    try { mkdirSync(lock); break; } catch (e: any) { if (e.code !== "EEXIST") throw e; }
-    // A process may have died in the critical section. Never remove a live writer's lock.
-    try {
-      const pid = Number(readFileSync(owner, "utf8"));
-      if (Number.isInteger(pid) && pid > 0) {
-        try { process.kill(pid, 0); } catch (e: any) {
-          if (e.code === "ESRCH") { unlinkSync(owner); rmdirSync(lock); continue; }
-        }
-      }
-    } catch {
-      // A crash between mkdir and PID publication leaves an empty directory; rmdir cannot remove a populated lock.
-      try { if (Date.now() - statSync(lock).mtimeMs > 30_000) rmdirSync(lock); } catch { /* Still publishing, or removed by another waiter. */ }
-    }
-    if (Date.now() >= deadline) throw new Error("Account state is busy");
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-  }
+  // SQLite's local OS lock is released even if a writer crashes; no PID/lease stealing race.
+  // This database stores no account data. JSON stays readable by existing tools.
+  const lock = new Database(join(HOME, "state-lock.sqlite"));
+  lock.exec("PRAGMA busy_timeout = 5000");
   const temp = join(HOME, `state.${process.pid}.tmp`);
   try {
-    writeFileSync(owner, String(process.pid), { mode: 0o600 });
+    lock.exec("BEGIN IMMEDIATE");
     const state = load();
     const result = change(state);
     writeFileSync(temp, JSON.stringify(state, null, 2), { mode: 0o600 });
     renameSync(temp, STATE);
+    lock.exec("COMMIT");
     return result;
   } finally {
     if (existsSync(temp)) unlinkSync(temp);
-    if (existsSync(owner)) unlinkSync(owner);
-    rmdirSync(lock);
+    lock.close();
   }
 }
 const key = (a: Account) => `${a.cli}-${a.name}`;

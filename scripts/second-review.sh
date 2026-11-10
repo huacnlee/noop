@@ -164,6 +164,13 @@ EOF
   after="$(state)"
   verdict="$(grep -E '^ *VERDICT: *(CLEAN|FINDINGS *[0-9]+) *$' "$out" 2>/dev/null | tail -1 | sed 's/^ *//; s/ *$//')"
   all="$(cat "$err" "$log" "$out" 2>/dev/null | tail -n 25 | tail -c 4000)"
+  # A failed reviewer can still print review prose. Only short service errors may contribute stdout to quota state.
+  quota_text="$(cat "$err" "$log" 2>/dev/null | tail -n 25 | tail -c 4000)"
+  if [ "$(wc -l < "$out")" -le 3 ] && [ "$(wc -c < "$out")" -le 1000 ] &&
+      ! grep -Eiq '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]|VERDICT:' "$out" &&
+      grep -Eiq "^[[:space:]]*(you.ve hit|you have hit|error:|api error:|rate.?limit|usage limit|quota|insufficient_quota|credit balance|overloaded|too many requests|\{.*\"error\")" "$out"; then
+    quota_text="$(printf '%s\n' "$quota_text"; cat "$out")"
+  fi
   m() { printf '%s' "$all" | grep -Eiq "$1"; }
   if [ "$before" != "$after" ]; then
     reason="repo-modified"; detail="HEAD, git status or the diff changed while $rev was reviewing — inspect \`git status\` / \`git reflog\` before trusting the tree"
@@ -175,7 +182,7 @@ EOF
     reason="parse"; detail="exit 0 but the output has no final 'VERDICT: CLEAN|FINDINGS <n>' line"
   elif [ "$rc" -ne 0 ]; then
     if m 'operation not permitted|EPERM|sandbox(-exec)? (denied|deny)|permission denied|read-only file system'; then reason="permission"
-    elif m 'rate.?limit|usage limit|quota|insufficient_quota|credit balance|out of credits|limit reached|hit your .*limit|too many requests|\b429\b|overloaded'; then reason="quota"
+    elif printf '%s' "$quota_text" | grep -Eiq 'rate.?limit|usage limit|quota|insufficient_quota|credit balance|out of credits|limit reached|hit your .*limit|too many requests|\b429\b|overloaded'; then reason="quota"
     elif m 'not logged in|please (log|sign) ?in|/login|login required|unauthori[sz]ed|invalid api key|authentication|\b401\b|token (has )?expired'; then reason="auth"
     elif m 'ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|network (error|is unreachable)|could not resolve host|stream disconnected|connection (refused|reset|error)'; then reason="network"
     elif [ "$rc" -ne 0 ]; then reason="error"; detail="exit $rc without a recognised cause"
@@ -185,7 +192,7 @@ fi
 
 # Persist quota failures through the same account store as the daemon. Preflight skips never extend cooldowns.
 if [ "$reason" = quota ] && [ -n "$ran" ]; then
-  recovery="$(printf '%s' "$all" | bun "$bridge" record "$rev" 2>"$err")" || {
+  recovery="$(printf '%s' "$quota_text" | bun "$bridge" record "$rev" 2>"$err")" || {
     reason="error"; detail="quota detected but shared recovery could not be saved";
   }
 fi
