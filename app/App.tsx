@@ -94,6 +94,8 @@ import {
   SettingsChoices,
   NumberField,
   PageHeader,
+  font,
+  leading,
 } from "./ui";
 import {
   answeredIds,
@@ -990,11 +992,11 @@ function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Se
                 hoverStyle={props.done ? undefined : { backgroundColor: alpha(colors.text, 0.04) }}
                 style={{ flexDirection: "row", alignItems: "flex-start", gap: 12, paddingHorizontal: 8, paddingVertical: 8, borderRadius: 8, cursor: props.done ? "default" : "pointer", opacity: props.done ? 0.5 : 1 }}
               >
-                <View style={{ marginTop: 1, width: 20, height: 20, borderRadius: 6, borderWidth: on() ? 0 : 1.5, borderColor: colors.fieldBorder, backgroundColor: on() ? colors.accentFill : "transparent", alignItems: "center", justifyContent: "center" }}>
-                  <If when={on()}><Icon name="check" size={14} tint={colors.onAccent} /></If>
+                <View style={{ marginTop: 1, width: 16, height: 16, borderRadius: 4, borderWidth: on() ? 0 : 1.5, borderColor: colors.fieldBorder, backgroundColor: on() ? colors.accentFill : "transparent", alignItems: "center", justifyContent: "center" }}>
+                  <If when={on()}><Icon name="check" size={12} tint={colors.onAccent} /></If>
                 </View>
                 <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-                  <Text style={{ numberOfLines: 2, fontSize: size.text, lineHeight: 22, color: colors.text, cursor: props.done ? "default" : "pointer" }}>{it().title}</Text>
+                  <Text style={{ numberOfLines: 2, fontSize: font.sm, lineHeight: leading.sm, color: colors.text, cursor: props.done ? "default" : "pointer" }}>{it().title}</Text>
                   <Text style={{ fontSize: size.tiny, color: colors.faint, cursor: props.done ? "default" : "pointer" }}>{[it().agent && displayName(it().agent), it().note].filter(Boolean).join(" · ")}</Text>
                 </View>
               </View>
