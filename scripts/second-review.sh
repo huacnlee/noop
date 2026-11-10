@@ -167,8 +167,7 @@ EOF
   # A failed reviewer can still print review prose. Only short service errors may contribute stdout to quota state.
   quota_text="$(cat "$err" "$log" 2>/dev/null | tail -n 25 | tail -c 4000)"
   if [ "$(wc -l < "$out")" -le 3 ] && [ "$(wc -c < "$out")" -le 1000 ] &&
-      ! grep -Eiq '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]|VERDICT:' "$out" &&
-      grep -Eiq "^[[:space:]]*(you.ve hit|you have hit|error:|api error:|rate.?limit|usage limit|quota|insufficient_quota|credit balance|overloaded|too many requests|\{.*\"error\")" "$out"; then
+      ! grep -Eiq '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]|VERDICT:' "$out"; then
     quota_text="$(printf '%s\n' "$quota_text"; cat "$out")"
   fi
   m() { printf '%s' "$all" | grep -Eiq "$1"; }
@@ -181,9 +180,10 @@ EOF
   elif [ "$rc" -eq 0 ] && [ -z "$verdict" ]; then
     reason="parse"; detail="exit 0 but the output has no final 'VERDICT: CLEAN|FINDINGS <n>' line"
   elif [ "$rc" -ne 0 ]; then
-    if m 'operation not permitted|EPERM|sandbox(-exec)? (denied|deny)|permission denied|read-only file system'; then reason="permission"
-    elif printf '%s' "$quota_text" | grep -Eiq 'rate.?limit|usage limit|quota|insufficient_quota|credit balance|out of credits|limit reached|hit your .*limit|too many requests|\b429\b|overloaded'; then reason="quota"
-    elif m 'not logged in|please (log|sign) ?in|/login|login required|unauthori[sz]ed|invalid api key|authentication|\b401\b|token (has )?expired'; then reason="auth"
+    failure_kind="$(printf '%s' "$quota_text" | bun "$bridge" classify "$rev" 2>/dev/null)"
+    if [ "$failure_kind" = quota ]; then reason="quota"
+    elif [ "$failure_kind" = auth ]; then reason="auth"
+    elif m 'operation not permitted|EPERM|sandbox(-exec)? (denied|deny)|permission denied|read-only file system'; then reason="permission"
     elif m 'ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|network (error|is unreachable)|could not resolve host|stream disconnected|connection (refused|reset|error)'; then reason="network"
     elif [ "$rc" -ne 0 ]; then reason="error"; detail="exit $rc without a recognised cause"
     else reason="parse"; detail="exit 0 but the output has no final 'VERDICT: CLEAN|FINDINGS <n>' line"; fi

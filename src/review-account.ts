@@ -16,17 +16,24 @@ export function reviewerAccount(cli: string): Account {
   return { cli, name: `env-${createHash("sha256").update(dir).digest("hex").slice(0, 16)}`, dir };
 }
 
+/** CLI diagnostics only: a session transcript can quote quota text before failing for another reason. */
+export function reviewerFailure(output: string): { kind: ReturnType<typeof classify>; diagnostic: string } {
+  const lines = output.slice(-4000).replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split(/\r?\n/);
+  const diagnostic = lines.filter(line => /^(?:ERROR:|API Error:|You've hit|You have hit|Rate.?limit|Usage limit|Quota|Insufficient_quota|Credit balance|Out of credits|Overloaded|Too many requests)(?!\w)/i.test(line.trim())).at(-1)?.trim() ?? "";
+  return { kind: classify(diagnostic), diagnostic };
+}
+
 if (import.meta.main) {
   const [mode, cli] = process.argv.slice(2);
-  if (!["claude", "codex"].includes(cli) || !["check", "record"].includes(mode)) process.exit(2);
+  if (!["claude", "codex"].includes(cli) || !["check", "record", "classify"].includes(mode)) process.exit(2);
   try {
-    const a = reviewerAccount(cli);
-    if (mode === "record") {
-      const output = readFileSync(0, "utf8");
-      if (classify(output) !== "quota") throw new Error("Not a quota failure");
-      console.log(JSON.stringify(recordQuota(a, output)));
-    }
-    else {
+    if (mode === "classify") console.log(reviewerFailure(readFileSync(0, "utf8")).kind ?? "none");
+    else if (mode === "record") {
+      const { kind, diagnostic } = reviewerFailure(readFileSync(0, "utf8"));
+      if (kind !== "quota") throw new Error("Not a quota failure");
+      console.log(JSON.stringify(recordQuota(reviewerAccount(cli), diagnostic)));
+    } else {
+      const a = reviewerAccount(cli);
       const recovery = accountRecovery(a);
       console.log(JSON.stringify({ account: `${a.cli}-${a.name}`, ...recovery }));
       process.exitCode = recovery.available ? 0 : 1;

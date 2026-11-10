@@ -71,6 +71,20 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     const invalidRecord = spawnSync("bun", [bridge, "record", "claude"], { cwd: repo, env, input: "ordinary failure", encoding: "utf8" });
     expect(invalidRecord.status).toBe(2);
     expect(readFileSync(statePath, "utf8")).toBe(beforeRecord);
+    // Codex stderr is a transcript; quoted code is not a quota failure when the final error is a disconnect.
+    writeFileSync(join(bin, "codex"), `#!/bin/sh\ncat '${dir}/codex-answer' >&2\nexit 1\n`, { mode: 0o755 });
+    writeFileSync(join(dir, "codex-answer"), '+ "usage limit; resets in 2h 13m"\nERROR: stream disconnected before completion\n');
+    env.CLAUDECODE = "fixture"; env.CODEX_THREAD_ID = "";
+    const codexEnv = { ...env, HOME: join(dir, "fake-home") };
+    const codexArgs = args.map(a => a === "codex" ? "claude" : a === "T-TEST" ? "T-CODEX" : a);
+    const codexFailure = spawnSync(codexArgs[0], codexArgs.slice(1), { cwd: repo, env: codexEnv, encoding: "utf8", timeout: 20_000 });
+    expect(codexFailure.status).toBe(2);
+    expect(codexFailure.stdout).toContain("reason=network");
+    expect(readFileSync(statePath, "utf8")).toBe(beforeRecord);
+    const classifyInput = (input: string) => spawnSync("bun", [bridge, "classify", "codex"], { env: codexEnv, input, encoding: "utf8" }).stdout.trim();
+    expect(classifyInput('ERROR: out of credits')).toBe("quota");
+    expect(classifyInput('ERROR: unauthorized; please run /login')).toBe("auth");
+    expect(classifyInput('ERROR: usage limit; resets in 2h 13m\nERROR: stream disconnected')).toBe("none");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }, 20_000);
 
