@@ -10,19 +10,19 @@ import { alpha, colors } from "./theme";
 export const touch = !(platform.idiom === "desktop" || platform.idiom === "mac");
 
 /**
- * Sizes: the gallery's proportions, a step larger (the owner reads this all day). A field and a `md` button share one
- * height, so a field and its button line up in a row; `sm` is the compact tier of toolbars and cards.
+ * Sizes: the gallery's compact desktop proportions. A field is a hair taller than a `md` button so a row of both
+ * still reads as one line; `sm` is the compact tier of toolbars and cards.
  */
 export const size = {
   text: 17,
   line: 26,
   small: 15,
   tiny: 13,
-  field: touch ? 44 : 34,
-  control: touch ? 44 : 34,
-  controlSm: touch ? 44 : 28,
-  icon: touch ? 44 : 32,
-  iconSm: touch ? 44 : 28,
+  field: touch ? 44 : 32,
+  control: touch ? 44 : 30,
+  controlSm: touch ? 36 : 24,
+  icon: touch ? 44 : 28,
+  iconSm: touch ? 36 : 24,
   row: touch ? 44 : 34,
   bar: touch ? 56 : 52,
   sidebar: 288,

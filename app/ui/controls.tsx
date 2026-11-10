@@ -27,8 +27,8 @@ const DISABLED = 0.45;
 /** The metrics of a button size: frame, padding, gap, icon and type move together. */
 const metrics = (sm: boolean) =>
   sm
-    ? { height: size.controlSm, padX: 10, gap: space.xs, icon: 14, font: font.sm, line: leading.sm }
-    : { height: size.control, padX: 14, gap: space.md, icon: 16, font: font.md, line: leading.md };
+    ? { height: size.controlSm, padX: 8, gap: space.xs, icon: 13, font: font.key, line: leading.key }
+    : { height: size.control, padX: 12, gap: space.sm, icon: 14, font: font.sm, line: leading.sm };
 
 /** A labelled button. `primary` is the one main action of an area; `outline` a quiet secondary choice. */
 export function Button(props: {
@@ -132,7 +132,7 @@ export function Button(props: {
         justifyContent: "center",
         gap: m().gap,
         paddingHorizontal: m().padX,
-        paddingVertical: space.xs,
+        paddingVertical: 0,
         borderRadius: corner.control,
         borderCurve: "continuous",
         borderWidth: 1,
@@ -184,7 +184,7 @@ export function IconButton(props: {
   const primary = () => props.variant === "primary";
   const sm = () => props.size === "sm";
   const box = () => (primary() ? (touch ? 44 : 36) : sm() ? size.iconSm : size.icon);
-  const glyph = () => (sm() ? 16 : 18);
+  const glyph = () => (sm() ? 14 : 16);
   const over = signal(false);
   const showTip = () => !touch && props.tooltip !== false;
   // The glyph comes up from muted to the text color under the pointer and while selected.
