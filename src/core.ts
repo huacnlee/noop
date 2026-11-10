@@ -221,9 +221,9 @@ export const which = (bin: string) => Bun.which(bin) !== null;
 /** Which CLI runs a task: the owner's per-agent config wins, else what the planner (an AI call, see planInbox) chose.
  *  Unplanned tasks may use either, Claude first. */
 export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
-  if (meta.cli && meta.cli !== "auto") return [meta.cli];
   const per = cfg.clis?.agents?.[meta.agent || "lead"] as string[] | undefined;
   if (per) return per;
+  if (meta.cli && meta.cli !== "auto") return [meta.cli];
   return ["claude", "codex"];
 }
 

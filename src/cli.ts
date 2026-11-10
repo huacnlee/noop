@@ -25,7 +25,7 @@ import { medic } from "./medic";
 import { githubStarved } from "./github";
 import { doctor, visual } from "./visual";
 import { answerFromChat, appendEvent, cancelTask, drainInbound, feed, handleOwnerMessage, mediaDays, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
-import { addFollowUp, followUpTarget, reopenTask, type BrainOut, ClaudeModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
+import { addFollowUp, followUpTarget, reopenTask, type BrainOut, chatModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
 import { runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
@@ -124,7 +124,9 @@ const pendingRoute: string[] = [];
 const cancelled = new Set<string>(); // tasks the owner cancelled while their agent ran // decisions opened by workers, routed by the next tick
 async function processTask(path: string, cfg: Cfg, host: string) {
   const { meta, body } = readDoc(path);
-  const wanted = allowedClis(meta, cfg);
+  // Keep the planner's pin as a preference when no member override exists; recovery may
+  // use the remaining allowed CLIs, but can never add one the owner disabled.
+  const wanted = [...new Set([...allowedClis(meta, cfg), ...allowedClis({ agent: meta.agent }, cfg)])];
   const installed = (c: string) => !!Bun.which(c);
   const first = pickAccount(cfg, wanted.filter(installed)) ?? failoverAccount(cfg, null, wanted, installed);
   const agent = meta.agent || "lead";
@@ -670,7 +672,8 @@ For each task decide:
 - channels: zero to three slugs from the channel goals below, or {"name":"...","goal":"..."} for a new work topic.
 - requires: host capabilities it truly needs, comma-separated, from the hosts' caps below (e.g. "os:macos" for iOS/macOS builds,
   simulators or screenshots; "os:windows"; "" when any host will do). Only require what the work cannot be done without.
-- cli: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews.
+- cli: choose only from the task agent's allowed CLIs below, in the owner's preference order.
+  Without an override: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews.
 - difficulty: "hard" or "normal".
 
 ${channelPrompt()}
@@ -679,7 +682,7 @@ Online hosts:
 ${hosts || "(unknown)"}
 
 Tasks:
-${todo.map((t) => `- ${t.meta.id} [agent ${t.meta.agent}${t.meta.requires ? `, already requires ${t.meta.requires}` : ""}]: ${t.meta.title} — ${t.body.slice(0, 500).replace(/\s+/g, " ")}`).join("\n")}
+${todo.map((t) => `- ${t.meta.id} [agent ${t.meta.agent}, allowed CLIs ${allowedClis({ agent: t.meta.agent }, cfg).join(", ")}${t.meta.requires ? `, already requires ${t.meta.requires}` : ""}]: ${t.meta.title} — ${t.body.slice(0, 500).replace(/\s+/g, " ")}`).join("\n")}
 
 Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude", "difficulty": "normal", "channels": []}, ...}`,
     cfg, P("logs", "runs", `plan-${Date.now()}.log`));
@@ -691,10 +694,11 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
       if (!v || !existsSync(t.p)) continue;
       const req = [...new Set([...(t.meta.requires ?? "").split(","), ...String(v.requires ?? "").split(",")].map((x) => x.trim()).filter(Boolean))].join(",");
       const pinned = t.meta.cli && t.meta.cli !== "auto";
+      const cli = allowedClis({ ...t.meta, cli: pinned ? t.meta.cli : v.cli === "codex" ? "codex" : "claude" }, cfg)[0] ?? "auto";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
-      writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req, ...(pinned ? {} : { cli: v.cli === "codex" ? "codex" : "claude" }),
+      writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req, ...(pinned ? {} : { cli }),
         ...(v.difficulty === "hard" ? { difficulty: "hard" } : {}), planned: now() }, t.body);
-      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${pinned ? t.meta.cli : v.cli}`);
+      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${cli}`);
     }
     await _commitPush(`[${host}] plan ${todo.length} tasks`);
   });
@@ -704,8 +708,10 @@ async function daemon(cfg: Cfg) {
   const host = hostName(cfg);
   const every = (cfg.host?.tick_seconds ?? 60) * 1000;
   console.log(`hub daemon on ${host} caps=${hostCaps(cfg).join(",")} tick=${every / 1000}s parallel≤${cfg.host?.max_parallel ?? "cores/3"}`);
+  let model: ReturnType<typeof chatModel> = null;
   onSettingsSaved((summary) => locked(async () => {
     await _pull();
+    if (!allowedClis({ agent: "lead" }, loadConfig()).includes("claude")) model?.stop();
     journal(host, `⚙️ owner changed settings: ${summary}`);
     await _commitPush(`[${host}] settings: ${summary.slice(0, 60)}`);
   }));
@@ -821,8 +827,8 @@ async function daemon(cfg: Cfg) {
     },
   });
   setApplyOp((op) => runTool(store, op?.tool, op));
-  const model = new ClaudeModel(String(cfg.router?.model ?? "claude-haiku-5-5"), String(cfg.router?.cli ?? "claude"), (cfg.router?.timeout_seconds ?? 45) * 1000);
-  if (isPrimary(cfg, host) && Bun.which(String(cfg.router?.cli ?? "claude"))) model.warm(systemPrompt());
+  model = chatModel(cfg, loadConfig);
+  if (isPrimary(cfg, host)) model?.warm(systemPrompt());
   if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered, sentAt, thread, channel }) => {
     const got = Date.now();
     const room = channel ? channels().find((c) => c.slug === channel) : undefined;
@@ -831,6 +837,8 @@ async function daemon(cfg: Cfg) {
     const post = (r: string, ref?: string) => appendEvent({ from: "hub", kind: "system", text: r.slice(0, 2000), ...(ref ? { ref } : {}), ...(thread ? { thread } : {}), ...(room ? { channel: room.slug } : {}) });
     let out: BrainOut;
     try {
+      model ??= chatModel(loadConfig(), loadConfig);
+      if (!model) throw new Error("chat CLI unavailable or disabled");
       out = await think(m, store, model, post);
       if (!out.calls.length && !out.reply && out.rounds >= 4) throw new Error("no answer");
     } catch (err) {
@@ -865,6 +873,7 @@ async function daemon(cfg: Cfg) {
   let lastUpdate = 0, failures = 0;
   for (;;) {
     const c = loadConfig();
+    if (!allowedClis({ agent: "lead" }, c).includes("claude")) model?.stop();
     if (adoptCloudUrl(c.cloud?.url)) journal(host, `☁️ hub moved: now syncing with ${c.cloud.url}`);
     if (existsSync(RESTART_FLAG())) { // `hub restart` (throttled) / `hub restart --force`
       const force = readFileSync(RESTART_FLAG(), "utf8").includes("force");

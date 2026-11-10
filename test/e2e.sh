@@ -88,4 +88,20 @@ grep -q "Results from delegated subtasks" tasks/done/$SPL.md
 NOOP_HOME="$W/w2" HUB_DATA="$W/w2/data" HUB_HOST=w2 bun "$SRC/src/cli.ts" init --worker http://unused --token x >/dev/null
 cmp tasks/done/T-0001.md "$W/w2/data/tasks/done/T-0001.md"
 test ! -e "$W/w2/data/config.local.toml.pc" && ! grep -q fake-agent "$W/w2/data/config.local.toml"
+# The planner fixture still recommends Claude, but member settings must win for both
+# newly planned tasks and old tasks already pinned to Claude. No real model is called.
+ln -s "$W/fake-agent" "$W/bin/codex"
+cat >> config.local.toml <<'F'
+[clis.agents]
+lead = ["codex"]
+reviewer = ["codex"]
+rust-maintainer = ["codex"]
+release-manager = ["codex"]
+F
+AUTO=$(hub add "Codex-only automatic task" | tail -1)
+PIN=$(hub add "Codex-only stale Claude pin" --cli claude | tail -1)
+tick_until "test -f tasks/done/$AUTO.md && test -f tasks/done/$PIN.md"
+grep -q '^cli: codex$' "tasks/done/$AUTO.md"
+grep -q '^cli_used: codex$' "tasks/done/$AUTO.md"
+grep -q '^cli_used: codex$' "tasks/done/$PIN.md"
 echo "E2E OK"; cat journal/*.md

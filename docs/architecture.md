@@ -62,6 +62,7 @@ Auth: the machine token (hosts) or an owner session from email login (clients). 
 ## Agents and safety
 
 - The lead agent owns every task and decides how much process it needs; other roles are spawned as parallel sub-agents.
+- The per-agent CLI list in Settings takes precedence over task pins and bounds account failover; when no allowed account is usable, tasks queue. Planning, judging, self-repair and the chat entry point use the lead's CLI allowance. The warm chat protocol requires Claude; when it is disabled, messages use the existing create/amend-task fallback, and the planner can run through Codex.
 - Hard gates (`src/gates.ts`) are enforced through Claude Code's `--disallowedTools`, not model judgment: merge, approve, release, publish, force-push, pushing to main, repo/secret admin, GitHub REST loops. Running one requires an owner decision, which unlocks the approvable gates (merge, approve, release, publish, push) for that task only; repo deletion, secrets, `rm -rf /` or `~` and `[gates] extra` stay blocked.
 - Anything posted outside Noop carries the agent's signature.
 - Failures are retried; tooling problems go to the medic; the owner is told only about failures of work they asked for, in one plain sentence.

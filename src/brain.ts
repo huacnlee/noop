@@ -9,8 +9,9 @@
 // reply goes back as a normal feed event.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { channelPrompt } from "./channels";
+import { routerClis } from "./runner";
 import { join, relative } from "node:path";
-import { DATA, HOME_DIR, L, P, loadConfig, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
+import { type Cfg, DATA, HOME_DIR, L, P, loadConfig, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
 import { type Ev, type FileRow, type ToolStore, type WriteOp, isWrite, listDecisions, listRoutines, listTasks, editMemoryEntry, runTool, toolsFor, writeOp } from "../cloud/src/tools";
 
 // ---------------------------------------------------------------- the local tool store (the data repo on this machine)
@@ -125,7 +126,7 @@ const BRAIN_DIR = join(HOME_DIR, "brain"); // empty cwd: no project CLAUDE.md, n
  * CLI start (~2 s). One process per conversation (no history carries over); the next one is spawned as this one is used. */
 export class ClaudeModel implements Model {
   private next: { proc: ReturnType<typeof Bun.spawn>; system: string } | null = null;
-  constructor(private model = "claude-haiku-5-5", private cli = "claude", private timeoutMs = 45_000) {}
+  constructor(private model = "claude-haiku-5-5", private cli = "claude", private timeoutMs = 45_000, private enabled = () => true) {}
   private spawn(system: string) {
     mkdirSync(BRAIN_DIR, { recursive: true });
     const proc = Bun.spawn([this.cli, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
@@ -133,11 +134,19 @@ export class ClaudeModel implements Model {
       "--no-session-persistence", "--system-prompt", system], { cwd: BRAIN_DIR, stdin: "pipe", stdout: "pipe", stderr: "ignore", env: { ...process.env, ...userSettingsEnv() } });
     return { proc, system };
   }
+  stop() { this.next?.proc.kill(); this.next = null; }
   /** Spawn the next process now (the daemon calls this at start), so the first message is fast too. */
-  warm(system: string) { if (!this.next || this.next.system !== system || this.next.proc.exitCode !== null) { this.next?.proc.kill(); this.next = this.spawn(system); } }
+  warm(system: string) {
+    if (!this.enabled()) { this.stop(); return; }
+    if (!this.next || this.next.system !== system || this.next.proc.exitCode !== null) {
+      this.stop();
+      this.next = this.spawn(system);
+    }
+  }
   async open(system: string) {
     this.warm(system);
-    const { proc } = this.next!;
+    if (!this.next) throw new Error("chat CLI disabled");
+    const { proc } = this.next;
     this.next = null;
     setTimeout(() => this.warm(system), 0); // the one after
     const stdin = proc.stdin as import("bun").FileSink;
@@ -170,6 +179,14 @@ export class ClaudeModel implements Model {
       close: () => { try { stdin.end(); } catch {} proc.kill(); },
     };
   }
+}
+
+/** The warm protocol is Claude-specific. A disabled CLI uses the daemon's existing task fallback. */
+export function chatModel(cfg: Cfg, current: () => Cfg = () => cfg): ClaudeModel | null {
+  const router = routerClis(cfg).find((r) => Bun.which(r.cli));
+  return router?.cli === "claude"
+    ? new ClaudeModel(router.model || "claude-haiku-5-5", router.cli, (cfg.router?.timeout_seconds ?? 45) * 1000,
+      () => routerClis(current()).find((r) => Bun.which(r.cli))?.cli === "claude") : null;
 }
 
 // ---------------------------------------------------------------- the brain

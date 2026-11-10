@@ -52,16 +52,13 @@ export function pickAccount(cfg: Cfg, clis: string[]): Account | null {
   return null;
 }
 
-const OTHER_CLI: Record<string, string> = { claude: "codex", codex: "claude" };
-
-/** After `failed` hit a quota/login wall (or nothing in `wanted` is usable when failed is null):
- *  another usable account of the same CLI first, else the other CLI (codex <-> claude) — for any agent. */
+/** After a quota/login wall, try another account of the same CLI first, then the remaining
+ * allowed CLIs in order. Never expand the owner's allowed list during recovery. */
 export function failoverAccount(cfg: Cfg, failed: Account | null, wanted: string[], installed: (cli: string) => boolean = (c) => !!Bun.which(c)): Account | null {
-  const same = failed ? [failed.cli] : wanted;
-  const first = same.filter(installed);
-  for (const cli of first) for (const a of accounts(cfg, cli)) if (usable(a) && !(failed && key(a) === key(failed))) return a;
-  const others = [...new Set(same.map((c) => OTHER_CLI[c]).filter((c) => c && !first.includes(c) && installed(c)))];
-  return pickAccount(cfg, others);
+  const order = failed && wanted.includes(failed.cli) ? [failed.cli, ...wanted.filter((c) => c !== failed.cli)] : wanted;
+  for (const cli of order.filter(installed)) for (const a of accounts(cfg, cli))
+    if (usable(a) && !(failed && key(a) === key(failed))) return a;
+  return null;
 }
 
 export function accountEnv(a: Account): Record<string, string> {

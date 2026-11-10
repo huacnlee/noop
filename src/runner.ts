@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realp
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  type Cfg, L, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, recentJournal, signature,
+  type Cfg, L, P, ROOT, allowedClis, agentActivity, agentName, precedents, readAll, readIf, recentJournal, signature,
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
@@ -293,10 +293,16 @@ export function parseResult(out: string): Result {
  * `[router] cli/model` in config.toml puts one first; the others are fallbacks when its CLI is missing or fails. */
 const ROUTERS = [{ cli: "claude", model: "claude-haiku-5-5" }, { cli: "codex", model: "gpt-6-luna" }];
 
+/** System calls belong to the lead; router/judge choices cannot bypass its CLI restriction. */
+export function routerClis(cfg: Cfg) {
+  const own = cfg.router?.cli ? [{ cli: String(cfg.router.cli), model: String(cfg.router.model ?? "") }] : [];
+  return [...own, ...ROUTERS.filter((x) => x.cli !== own[0]?.cli)]
+    .filter((r) => allowedClis({ agent: "lead" }, cfg).includes(r.cli));
+}
+
 /** One quick structured call for routing (the fastest model available); null when none answered. */
 export async function quickAsk(prompt: string, cfg: Cfg, logFile: string): Promise<any> {
-  const own = cfg.router?.cli ? [{ cli: String(cfg.router.cli), model: String(cfg.router.model ?? "") }] : [];
-  for (const r of [...own, ...ROUTERS.filter((x) => x.cli !== own[0]?.cli)]) {
+  for (const r of routerClis(cfg)) {
     if (!Bun.which(r.cli)) continue;
     const cmd = r.cli === "claude"
       ? ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config", ...(r.model ? ["--model", r.model] : [])]
@@ -316,7 +322,10 @@ export async function quickAsk(prompt: string, cfg: Cfg, logFile: string): Promi
 
 /** One-shot structured call (used by the judge). */
 export async function ask(prompt: string, cfg: Cfg, logFile: string): Promise<any> {
-  const cli = cfg.judge?.cli ?? "claude";
+  const allowed = allowedClis({ agent: "lead" }, cfg);
+  const preferred = cfg.judge?.cli ?? "claude";
+  const cli = [preferred, ...allowed].find((c) => allowed.includes(c) && Bun.which(c));
+  if (!cli) return null;
   const cmd = cli === "claude"
     ? ["claude", "-p", "--output-format", "text", "--model", cfg.judge?.model ?? "claude-opus-5-5", "--tools", ""]
     : ["codex", "exec", "--skip-git-repo-check", "-"];
