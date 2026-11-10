@@ -16,17 +16,26 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     run(["git", "init", "-q"]);
     writeFileSync(join(repo, "a"), "fixture\n"); run(["git", "add", "a"]);
     expect(run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]).status).toBe(0);
-    writeFileSync(join(bin, "claude"), `#!/bin/sh\necho called >> '${dir}/calls'\ncat '${dir}/answer'\n`, { mode: 0o755 });
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\necho called >> '${dir}/calls'\ncat '${dir}/answer'\nexit "$(cat '${dir}/exit-code')"\n`, { mode: 0o755 });
+    writeFileSync(join(dir, "exit-code"), "0");
     // Stock macOS has no GNU timeout. Never rely on a host-installed copy.
     writeFileSync(join(bin, "timeout"), "#!/bin/sh\necho timeout unavailable >&2\nexit 127\n", { mode: 0o755 });
     writeFileSync(join(dir, "answer"), "You've hit your 5-hour limit · resets in 2h 13m\n");
     const script = resolve(import.meta.dir, "../scripts/second-review.sh");
     const args = ["sh", script, "T-TEST", repo, "--uncommitted", "--author", "codex"];
+    const statePath = join(dir, "home/accounts/state.json");
+    writeFileSync(join(dir, "answer"), 'Review mentions quota, 429 and "resets in 2h 13m" but forgot a verdict.\n');
+    const malformed = run(args);
+    expect(malformed.status).toBe(2);
+    expect(malformed.stdout).toContain("reason=parse");
+    expect(existsSync(statePath)).toBe(false);
+    writeFileSync(join(dir, "calls"), "");
+    writeFileSync(join(dir, "answer"), "You've hit your 5-hour limit · resets in 2h 13m\n");
+    writeFileSync(join(dir, "exit-code"), "1");
     const first = run(args);
     expect(first.status).toBe(2);
     expect(first.stdout).toContain("reason=quota");
     expect(first.stdout).toContain("account_recovery=");
-    const statePath = join(dir, "home/accounts/state.json");
     const stateText = readFileSync(statePath, "utf8"), state = JSON.parse(stateText);
     expect(Date.parse(state.accounts["claude-default"].cooldown_until)).toBeGreaterThan(Date.now() + 2 * 3600_000);
     // Another task uses the same machine-local account and does not call the reviewer again.
@@ -41,8 +50,46 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     writeFileSync(statePath, JSON.stringify(state));
     expect(run(["bun", bridge, "check", "claude"]).status).toBe(0);
     writeFileSync(join(dir, "answer"), "No actionable findings.\nVERDICT: CLEAN\n");
+    writeFileSync(join(dir, "exit-code"), "0");
     expect(run(args).status).toBe(0);
     expect(readFileSync(join(data, "reports/T-TEST-second-review.md"), "utf8")).toContain("## Round 1");
     expect(existsSync(join(data, "tasks"))).toBe(false); // no duplicate waiting tasks
+    // A custom CLI config directory remains usable, with a separate stable machine-local key.
+    env.CLAUDE_CONFIG_DIR = join(dir, "custom-claude");
+    expect(run(args.map(a => a === "T-TEST" ? "T-CUSTOM" : a)).status).toBe(0);
+    writeFileSync(join(dir, "answer"), "usage limit; resets in 13m\n");
+    writeFileSync(join(dir, "exit-code"), "1");
+    expect(run(args.map(a => a === "T-TEST" ? "T-CUSTOM" : a)).stdout).toContain("reason=quota");
+    expect(Object.keys(JSON.parse(readFileSync(statePath, "utf8")).accounts).some(k => /^claude-env-[a-f0-9]{16}$/.test(k))).toBe(true);
+    const beforeRecord = readFileSync(statePath, "utf8");
+    const invalidRecord = spawnSync("bun", [bridge, "record", "claude"], { cwd: repo, env, input: "ordinary failure", encoding: "utf8" });
+    expect(invalidRecord.status).toBe(2);
+    expect(readFileSync(statePath, "utf8")).toBe(beforeRecord);
   } finally { rmSync(dir, { recursive: true, force: true }); }
-});
+}, 20_000);
+
+
+test("concurrent quota writers preserve complete state and other account fields", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "account-writers-"));
+  try {
+    const accountDir = join(dir, "accounts"); mkdirSync(accountDir);
+    const statePath = join(accountDir, "state.json");
+    writeFileSync(statePath, JSON.stringify({ accounts: { "claude-shared": { needs_login: true, token: "fixture-value" } }, seq: 7 }));
+    const source = `import {recordQuota} from ${JSON.stringify(resolve(import.meta.dir, "../src/accounts.ts"))};
+      for (let i=0; i<20; i++) recordQuota({cli:"claude", name:process.argv[1], dir:"/nonexistent"}, "usage limit resets in 13m");`;
+    const env = { ...process.env, NOOP_HOME: dir, HUB_DATA: join(dir, "data"), HUB_SYNC: "local" };
+    const children = ["shared", "one", "two", "three"].map(name => Bun.spawn(["bun", "-e", source, name], { env, stdout: "ignore", stderr: "pipe" }));
+    let running = true;
+    const reader = (async () => {
+      while (running) { JSON.parse(readFileSync(statePath, "utf8")); await Bun.sleep(1); }
+    })();
+    try { expect(await Promise.all(children.map(p => p.exited))).toEqual([0, 0, 0, 0]); }
+    finally { running = false; await reader; }
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(Object.keys(state.accounts)).toHaveLength(4);
+    expect(state.accounts["claude-shared"].needs_login).toBe(true);
+    expect(state.accounts["claude-shared"].token).toBe("fixture-value");
+    expect(state.seq).toBe(7);
+    expect(existsSync(join(accountDir, "state.lock"))).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);

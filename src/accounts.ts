@@ -2,7 +2,7 @@
 // Accounts are per machine (credentials never enter the shared data repo):
 //   ~/.noop/accounts/<cli>-<name>/   → CLAUDE_CONFIG_DIR or CODEX_HOME for that account
 //   ~/.noop/accounts/state.json      → cooldowns, auth status, pending logins
-import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Cfg, L, hostName, journal, HOME_DIR } from "./core";
@@ -17,7 +17,42 @@ type AState = { cooldown_until?: string; needs_login?: boolean; last_error?: str
 type State = { accounts: Record<string, AState>; seq: number; alerted?: Record<string, string> };
 
 const load = (): State => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : { accounts: {}, seq: 0 });
-const save = (s: State) => { mkdirSync(HOME, { recursive: true }); writeFileSync(STATE, JSON.stringify(s, null, 2), { mode: 0o600 }); };
+/** Serialize local writers and publish complete JSON, so the bridge cannot clobber daemon updates. */
+function updateState<T>(change: (state: State) => T): T {
+  mkdirSync(HOME, { recursive: true });
+  const lock = join(HOME, "state.lock"), owner = join(lock, "pid");
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try { mkdirSync(lock); break; } catch (e: any) { if (e.code !== "EEXIST") throw e; }
+    // A process may have died in the critical section. Never remove a live writer's lock.
+    try {
+      const pid = Number(readFileSync(owner, "utf8"));
+      if (Number.isInteger(pid) && pid > 0) {
+        try { process.kill(pid, 0); } catch (e: any) {
+          if (e.code === "ESRCH") { unlinkSync(owner); rmdirSync(lock); continue; }
+        }
+      }
+    } catch {
+      // A crash between mkdir and PID publication leaves an empty directory; rmdir cannot remove a populated lock.
+      try { if (Date.now() - statSync(lock).mtimeMs > 30_000) rmdirSync(lock); } catch { /* Still publishing, or removed by another waiter. */ }
+    }
+    if (Date.now() >= deadline) throw new Error("Account state is busy");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+  const temp = join(HOME, `state.${process.pid}.tmp`);
+  try {
+    writeFileSync(owner, String(process.pid), { mode: 0o600 });
+    const state = load();
+    const result = change(state);
+    writeFileSync(temp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    renameSync(temp, STATE);
+    return result;
+  } finally {
+    if (existsSync(temp)) unlinkSync(temp);
+    if (existsSync(owner)) unlinkSync(owner);
+    rmdirSync(lock);
+  }
+}
 const key = (a: Account) => `${a.cli}-${a.name}`;
 
 /** Configured accounts; a CLI with none configured uses its normal default login. */
@@ -39,8 +74,11 @@ export function usable(a: Account): boolean {
   const s = all.accounts[key(a)] ?? {};
   if ((s.needs_login || s.cooldown_until) && s.cred && credStamp(a) > s.cred) {
     // the owner logged in again (maybe another account): try it right away instead of waiting out the old limit
-    all.accounts[key(a)] = { ...s, needs_login: false, cooldown_until: undefined, cred: undefined, told: undefined };
-    save(all);
+    updateState(state => {
+      const current = state.accounts[key(a)] ?? {};
+      if (current.cred && credStamp(a) > current.cred)
+        state.accounts[key(a)] = { ...current, needs_login: false, cooldown_until: undefined, cred: undefined, told: undefined };
+    });
     return true;
   }
   if (s.needs_login) return false;
@@ -94,9 +132,7 @@ export function classify(output: string): Failure {
 /** Shared by the daemon and second-review; only this machine's account state is written. */
 export function recordQuota(a: Account, output: string, now = Date.now()): Recovery {
   const recovery = quotaRecovery(output, now);
-  const s = load();
-  s.accounts[key(a)] = { ...s.accounts[key(a)], cooldown_until: recovery.until, cred: credStamp(a) };
-  save(s);
+  updateState(s => { s.accounts[key(a)] = { ...s.accounts[key(a)], cooldown_until: recovery.until, cred: credStamp(a) }; });
   return recovery;
 }
 
@@ -113,16 +149,19 @@ export function accountRecovery(a: Account): { available: boolean; until?: strin
 export async function reportFailure(a: Account, kind: Failure, output: string, cfg: Cfg) {
   if (!kind) return;
   if (kind === "quota") recordQuota(a, output);
-  const s = load();
-  const st = (s.accounts[key(a)] ??= {});
   const host = hostName(cfg);
-  st.last_error = output.slice(-300);
-  st.cred = credStamp(a);
+  const { st, tell } = updateState(s => {
+    const st = (s.accounts[key(a)] ??= {});
+    st.last_error = output.slice(-300);
+    st.cred = credStamp(a);
+    const tell = kind === "quota" && st.told !== st.cooldown_until;
+    if (tell) st.told = st.cooldown_until;
+    if (kind === "auth") st.needs_login = true;
+    return { st: { ...st }, tell };
+  });
   if (kind === "quota") {
-    // recordQuota supplied the same structured recovery used by second-review.
     journal(host, `${key(a)} hit usage limit → cooldown until ${st.cooldown_until!.slice(11, 16)}Z`);
-    if (st.told !== st.cooldown_until) {
-      st.told = st.cooldown_until;
+    if (tell) {
       const others = (cfg.clis?.preference ?? ["claude", "codex"]).filter((c: string) => c !== a.cli && Bun.which(c) && accounts(cfg, c).some(usable));
       const at = new Date(st.cooldown_until!).toLocaleTimeString(L("en-US", "zh-CN"), { hour: "2-digit", minute: "2-digit" });
       void notify([L(`${a.cli === "claude" ? "Claude" : "Codex"} (${host}) is out of quota, back around ${at}.`, `${a.cli === "claude" ? "Claude" : "Codex"}（${host}）额度用完了，约 ${at} 恢复。`),
@@ -130,11 +169,7 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
         L(`To recover now: run ${a.cli === "claude" ? "claude /login" : "codex login"} on this machine to switch account; it is picked up automatically.`, `想马上恢复：在这台机器上运行 ${a.cli === "claude" ? "claude /login" : "codex login"} 换个账号，登录后会自动接着用，不用等。`)].join("\n"),
         cfg, { kind: "notice" });
     }
-  } else {
-    st.needs_login = true;
-    journal(host, `🔑 ${key(a)} needs login`);
-  }
-  save(s);
+  } else journal(host, `🔑 ${key(a)} needs login`);
   if (kind === "auth") await startLogin(a, cfg);
   await alertIfAllExhausted(cfg);
 }
@@ -143,11 +178,13 @@ async function alertIfAllExhausted(cfg: Cfg) {
   const clis: string[] = cfg.clis?.preference ?? ["claude", "codex"];
   const installed = clis.filter((c) => Bun.which(c));
   if (pickAccount(cfg, installed)) return;
-  const s = load();
-  const last = s.alerted?.all ? Date.parse(s.alerted.all) : 0;
-  if (Date.now() - last < 3 * 3600_000) return;
-  (s.alerted ??= {}).all = new Date().toISOString();
-  save(s);
+  const tell = updateState(s => {
+    const last = s.alerted?.all ? Date.parse(s.alerted.all) : 0;
+    if (Date.now() - last < 3 * 3600_000) return false;
+    (s.alerted ??= {}).all = new Date().toISOString();
+    return true;
+  });
+  if (!tell) return;
   const lines = installed.flatMap((c) => accounts(cfg, c)).map((a) => {
     const st = load().accounts[key(a)] ?? {};
     return L(`• ${key(a)}: ${st.needs_login ? "needs login" : st.cooldown_until ? `out of quota, back around ${new Date(st.cooldown_until).toLocaleTimeString()}` : "?"}`, `• ${key(a)}：${st.needs_login ? "需要登录" : st.cooldown_until ? `额度用尽，约 ${new Date(st.cooldown_until).toLocaleTimeString()} 恢复` : "?"}`);
@@ -177,10 +214,11 @@ function withPty(cmd: string[]): string[] {
 export async function startLogin(a: Account, cfg: Cfg) {
   const k = key(a);
   if ([...pending.values()].some((p) => p.account === k)) return;
-  const s = load();
-  const id = `L-${String(++s.seq).padStart(4, "0")}`;
-  s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id };
-  save(s);
+  const id = updateState(s => {
+    const id = `L-${String(++s.seq).padStart(4, "0")}`;
+    s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id };
+    return id;
+  });
   const { cmd, needsCode } = loginCommand(a);
   const proc = Bun.spawn(withPty(cmd), {
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
@@ -205,7 +243,7 @@ export async function startLogin(a: Account, cfg: Cfg) {
       journal(host, `🔑 ${id} login link sent for ${k}`);
     }
     const token = buf.match(/\b(sk-ant-oat[\w-]+)/)?.[1];
-    if (token) { const st = load(); st.accounts[k] = { ...st.accounts[k], token }; save(st); }
+    if (token) updateState(st => { st.accounts[k] = { ...st.accounts[k], token }; });
   };
   const pump = async (stream: ReadableStream<Uint8Array>) => {
     const dec = new TextDecoder();
@@ -214,10 +252,8 @@ export async function startLogin(a: Account, cfg: Cfg) {
   void Promise.all([pump(proc.stdout as ReadableStream), pump(proc.stderr as ReadableStream)]);
   proc.exited.then(async (code) => {
     pending.delete(id);
-    const st = load();
     const ok = code === 0;
-    st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined };
-    save(st);
+    updateState(st => { st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined }; });
     journal(host, ok ? `${k} logged in (${id})` : `${k} login ${id} failed (exit ${code})`);
     await notify(ok ? L(`${k} logged in, the fleet continues`, `${k} 登录成功，fleet 继续运转`) : L(`${id} login did not finish (exit ${code}), a new link will follow`, `${id} 登录未完成（exit ${code}），稍后会再发新链接`), cfg);
   });

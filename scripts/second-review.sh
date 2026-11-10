@@ -163,7 +163,7 @@ EOF
   fi
   after="$(state)"
   verdict="$(grep -E '^ *VERDICT: *(CLEAN|FINDINGS *[0-9]+) *$' "$out" 2>/dev/null | tail -1 | sed 's/^ *//; s/ *$//')"
-  all="$(cat "$err" "$log" "$out" 2>/dev/null | tail -c 20000)"
+  all="$(cat "$err" "$log" "$out" 2>/dev/null | tail -n 25 | tail -c 4000)"
   m() { printf '%s' "$all" | grep -Eiq "$1"; }
   if [ "$before" != "$after" ]; then
     reason="repo-modified"; detail="HEAD, git status or the diff changed while $rev was reviewing — inspect \`git status\` / \`git reflog\` before trusting the tree"
@@ -171,7 +171,9 @@ EOF
     reason="timeout"; detail="no answer within ${tmo} min ([review] timeout_minutes)"
   elif [ "$rc" -eq 127 ]; then
     reason="missing"; detail="$rev could not be executed"
-  elif [ "$rc" -ne 0 ] || [ -z "$verdict" ]; then
+  elif [ "$rc" -eq 0 ] && [ -z "$verdict" ]; then
+    reason="parse"; detail="exit 0 but the output has no final 'VERDICT: CLEAN|FINDINGS <n>' line"
+  elif [ "$rc" -ne 0 ]; then
     if m 'operation not permitted|EPERM|sandbox(-exec)? (denied|deny)|permission denied|read-only file system'; then reason="permission"
     elif m 'rate.?limit|usage limit|quota|insufficient_quota|credit balance|out of credits|limit reached|hit your .*limit|too many requests|\b429\b|overloaded'; then reason="quota"
     elif m 'not logged in|please (log|sign) ?in|/login|login required|unauthori[sz]ed|invalid api key|authentication|\b401\b|token (has )?expired'; then reason="auth"
