@@ -820,6 +820,23 @@ describe("images", () => {
     };
   }
 
+  test("JSON and patch attachments are file cards that open the authenticated file, not expired images", async () => {
+    const files = { id: "files", ts: ts(8), from: "lead@mac", kind: "notice", text: "Review files",
+      attachments: ["/media/1794210870393-settings.json", "/media/1794210870393-fix.patch"] };
+    const secureUrl = URL.replace("http:", "https:");
+    const network = Object.fromEntries(Object.entries(hub([], [files])).map(([key, value]) => [key.replace(URL, secureUrl), value]));
+    const app = await open("./App.tsx", { ...desk, storage: { ...STORAGE, "hub.url": secureUrl }, network });
+    await app.waitFor("id:file-attachment");
+    expect(app.count("id:file-attachment")).toBe(2);
+    expect(app.shows("text:settings.json")).toBe(true);
+    expect(app.shows("text:fix.patch")).toBe(true);
+    expect(app.shows("id:media-gone")).toBe(false);
+    await app.press("id:file-attachment >> nth=0");
+    await app.press("id:file-attachment >> nth=1");
+    await app.waitUntil(() => app.openedUrls().length === 2);
+    expect(app.openedUrls()).toEqual(files.attachments.map((path) => `${secureUrl}${path}?token=tok`));
+  });
+
   test("the newest Markdown report opens in the reader pane, which zooms, closes and reopens", async () => {
     const report = { id: "r1", ts: ts(8), from: "lead@mac", kind: "notice", text: "推送通知梳理完成", attachments: ["/media/1762650000000-push-notifications.md"] };
     const app = await open("./App.tsx", {

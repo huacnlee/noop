@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { attachmentName, isDoc } from "../app/files";
+import { attachmentName, isDoc, isImage } from "../app/files";
+
+test("documents and patches are not images; image formats and extensionless uploads remain images", () => {
+  for (const file of ["report.md", "settings.json", "fix.patch", "changes.diff", "log.txt", "bundle.zip", "manual.pdf"])
+    expect(isImage(`/media/1794210870393-${file}?token=x`)).toBe(false);
+  for (const file of ["shot.png", "photo.JPG", "anim.gif", "pic.webp", "pic.avif", "pic.heic", "image", "pic.svg"])
+    expect(isImage(`/media/1794210870393-${file}?token=x`)).toBe(true);
+  expect(isImage("blob:https://hub.example/preview-id")).toBe(true);
+  expect(isImage("data:image/png;base64,AAAA")).toBe(true);
+});
 
 test("markdown attachments are documents, images are not", () => {
   expect(isDoc("/media/1731-report.md")).toBe(true);

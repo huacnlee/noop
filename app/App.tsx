@@ -48,7 +48,7 @@ import { ComposerEmoji, hasEmojiPicker } from "./composer-emoji";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
 import { CheckMark } from "./ui/icons";
-import { attachmentName, isDoc } from "./files";
+import { attachmentName, isDoc, isImage } from "./files";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
 import { setupTray, type TrayChat } from "./tray";
@@ -806,6 +806,7 @@ function Media(props: { hub: Hub; path: string }) {
   const frame: ViewStyle = { borderRadius: radius.inset, backgroundColor: colors.inset };
   if (isDoc(props.path)) return <DocAttachment src={src} name={attachmentName(props.path)} />;
   if (isVideo(props.path)) return <Video src={src} controls paused style={{ ...frame, borderWidth: 1, borderColor: colors.border, width: "100%", maxWidth: 480, aspectRatio: 16 / 9 }} />;
+  if (!isImage(props.path)) return <FileAttachment src={src} name={attachmentName(props.path)} />;
   // a thumbnail that keeps the timeline readable; press it to see the full image
   const THUMB = 240;
   const size = () => (ratio() >= 1 ? { width: THUMB, height: THUMB / ratio() } : { width: THUMB * ratio(), height: THUMB });
@@ -815,7 +816,7 @@ function Media(props: { hub: Hub; path: string }) {
       when={!gone()}
       else={
         <View testID="media-gone" style={{ ...frame, width: THUMB, height: 72, alignItems: "center", justifyContent: "center" }}>
-          <Text style={{ fontSize: 13.5, color: colors.faint }}>{L("Image expired", "图片已过期")}</Text>
+          <Text style={{ fontSize: 13.5, color: colors.faint }}>{L("Image unavailable", "图片无法加载")}</Text>
         </View>
       }
     >
@@ -855,6 +856,20 @@ function Media(props: { hub: Hub; path: string }) {
         </View>
       </Dialog>
     </If>
+  );
+}
+
+/** Non-image attachments open as files, rather than being sent to the image decoder. */
+function FileAttachment(props: { src: string; name: string }) {
+  return (
+    <View testID="file-attachment" role="button" accessibilityLabel={L(`Open ${props.name}`, `打开 ${props.name}`)}
+      onPress={() => void openUrl(props.src).catch(() => {})} hoverStyle={hovered()}
+      style={{ flexDirection: "row", alignItems: "center", gap: 12, width: 344, maxWidth: "100%", padding: 14,
+        borderRadius: radius.inset, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background, cursor: "pointer" }}>
+      <Icon name="document" size={20} tint={colors.muted} />
+      <Text style={{ flex: 1, minWidth: 0, fontSize: 14, color: colors.text, numberOfLines: 2 }}>{props.name}</Text>
+      <Icon name="download" size={16} tint={colors.faint} />
+    </View>
   );
 }
 
