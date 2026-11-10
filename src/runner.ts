@@ -155,10 +155,46 @@ function toolStep(name: string, input: any): string {
 /** Marker runAgent appends when it stopped a run that went quiet (see stall_minutes). */
 export const STALLED = "\n[stalled]";
 
+/** The API endpoint a claude run will actually use: extraEnv, then the daemon's env, then the env block of the
+ *  account's settings.json (CLAUDE_CONFIG_DIR, else ~/.claude) — the same lookup the CLI itself does. */
+function anthropicBaseUrl(extraEnv: Record<string, string>): string | undefined {
+  const env = { ...process.env, ...extraEnv };
+  if (env.ANTHROPIC_BASE_URL) return env.ANTHROPIC_BASE_URL;
+  const dir = env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  try {
+    const v = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))?.env?.ANTHROPIC_BASE_URL;
+    return typeof v === "string" && v ? v : undefined;
+  } catch { return undefined; }
+}
+
+/** When a run depends on a local gateway (magpie et al.) and it is down, the CLI burns its whole retry budget on
+ *  ECONNREFUSED — minutes per task plus a medic dispatch — while the failure is certain from the first refused
+ *  connection. Preflight the endpoint once; only a refused connection is conclusive, anything else (a gateway that
+ *  404s the probe, a TLS handshake, a slow box) is left for the CLI to sort out. */
+async function apiEndpointDown(url: string): Promise<string | undefined> {
+  try {
+    await fetch(url, { signal: AbortSignal.timeout(3000) });
+    return undefined; // any HTTP status means something is listening
+  } catch (e) {
+    const msg = String((e as Error)?.cause ?? e);
+    if (/ECONNREFUSED|Connection refused/i.test(msg)) return `API endpoint ${url} refused the connection — the local gateway is down (start it, then retry the task)`;
+    return undefined;
+  }
+}
+
 /** `retryEmpty` is internal: an empty completion gets exactly one rerun (see the end of the function). */
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
   extraEnv: Record<string, string> = {}, retryEmpty = true): Promise<string> {
   const cmd = cliCommand(cli, cfg, gateOverride);
+  if (cli === "claude") {
+    const base = anthropicBaseUrl(extraEnv);
+    const down = base && (await apiEndpointDown(base));
+    if (down) {
+      mkdirSync(P("logs", "runs"), { recursive: true });
+      writeFileSync(logFile, `$ ${cmd.join(" ")}\n[preflight] ${down}\n`);
+      return `[exit 1] ${down}`;
+    }
+  }
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
   const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
