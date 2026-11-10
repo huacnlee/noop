@@ -11,7 +11,7 @@ import { createMotion, signal, Text, View } from "nsh";
 import { Input as BaseInput, NumberInput as BaseNumberInput, Switch as BaseSwitch } from "nsh/base";
 import { Icon, type IconName } from "./icons";
 import { alpha, colors, focusRing, motion, tints } from "./theme";
-import { corner, duration, fill, font, leading, press as give, size, space, touch } from "./tokens";
+import { controlMetrics, corner, duration, fill, font, leading, press as give, size, space, touch } from "./tokens";
 import { follow, Spinner } from "./index";
 import { Tooltip } from "./tooltip";
 
@@ -24,11 +24,8 @@ const wash = (a: number): ViewStyle => ({ backgroundColor: alpha(colors.text, a)
 /** How strong a disabled control is drawn. */
 const DISABLED = 0.45;
 
-/** The metrics of a button size: frame, padding, gap, icon and type move together. */
-const metrics = (sm: boolean) =>
-  sm
-    ? { height: size.controlSm, padX: 8, gap: space.xs, icon: 13, font: font.key, line: leading.key }
-    : { height: size.control, padX: 12, gap: space.sm, icon: 14, font: font.sm, line: leading.sm };
+/** The metrics of a button size: frame, padding, gap, icon and type move together (`controlMetrics`). */
+const metrics = controlMetrics;
 
 /** A labelled button. `primary` is the one main action of an area; `outline` a quiet secondary choice. */
 export function Button(props: {
@@ -187,8 +184,10 @@ export function IconButton(props: {
 }) {
   const primary = () => props.variant === "primary";
   const sm = () => props.size === "sm";
-  const box = () => (primary() ? (touch ? 44 : 36) : sm() ? size.iconSm : size.icon);
-  const glyph = () => (sm() ? 14 : 16);
+  // the same scale, fills, corner and press as `Button` (gpui-kit's icon-only button): a square of the size's height
+  const m = () => metrics(sm());
+  const box = () => (primary() ? (touch ? 44 : 36) : m().height);
+  const glyph = () => m().icon;
   const over = signal(false);
   const showTip = () => !touch && props.tooltip !== false;
   // The glyph comes up from muted to the text color under the pointer and while selected.
@@ -204,7 +203,7 @@ export function IconButton(props: {
       onMouseLeave={() => over.set(false)}
       tooltip={showTip() ? <Tooltip label={props.label} shortcut={props.shortcut} /> : undefined}
       hoverStyle={props.disabled ? undefined : primary() ? { opacity: 0.88 } : wash(fill.ghostHover)}
-      activeStyle={props.disabled ? undefined : { ...(primary() ? { opacity: 0.78 } : wash(fill.ghostPress)), transform: [{ scale: give.icon }] }}
+      activeStyle={props.disabled ? undefined : { ...(primary() ? { opacity: 0.78 } : wash(fill.ghostPress)), transform: [{ scale: give.control }] }}
       focusStyle={focusRing()}
       style={{
         width: box(),
@@ -212,7 +211,7 @@ export function IconButton(props: {
         flexShrink: 0,
         alignItems: "center",
         justifyContent: "center",
-        borderRadius: primary() ? box() / 2 : corner.icon,
+        borderRadius: primary() ? box() / 2 : corner.control,
         borderCurve: "continuous",
         borderWidth: 1,
         borderColor: "transparent",

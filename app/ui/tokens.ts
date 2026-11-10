@@ -10,8 +10,9 @@ import { alpha, colors } from "./theme";
 export const touch = !(platform.idiom === "desktop" || platform.idiom === "mac");
 
 /**
- * Sizes: the gallery's compact desktop proportions. A field is a hair taller than a `md` button so a row of both
- * still reads as one line; `sm` is the compact tier of toolbars and cards.
+ * Sizes: one scale for every control, as gpui-kit's `Size`: a `md` control (a button, an icon button, a field, a
+ * number input) is `control` high, a `sm` one `controlSm`, so any of them line up in a row. An icon button is a
+ * square of its size's height.
  */
 export const size = {
   text: 17,
@@ -19,15 +20,19 @@ export const size = {
   small: 15,
   tiny: 13,
   field: touch ? 44 : 32,
-  control: touch ? 44 : 30,
+  control: touch ? 44 : 32,
   controlSm: touch ? 36 : 24,
-  icon: touch ? 44 : 28,
-  iconSm: touch ? 36 : 24,
   row: touch ? 44 : 34,
   bar: touch ? 56 : 52,
   sidebar: 288,
   column: 880,
 };
+
+/** What moves with a control's size: its height, side padding, gaps, glyph and type. Shared by every control. */
+export const controlMetrics = (sm: boolean) =>
+  sm
+    ? { height: size.controlSm, padX: 8, gap: 4, icon: 14, font: 12, line: 16 }
+    : { height: size.control, padX: 12, gap: 6, icon: 16, font: 13, line: 18 };
 
 /**
  * The corner-radius ladder, largest first: the composer, then fields, then buttons and rows, then icon buttons, then
@@ -62,9 +67,9 @@ export const duration = { quick: 120, settle: 180, enter: 420 } as const;
 
 /**
  * Press feedback, kept small: a control gives a little under the finger and settles back (`duration.settle`). Rows
- * barely move; icon buttons, being small, a touch more.
+ * barely move.
  */
-export const press = { control: 0.97, icon: 0.9, row: 0.985 } as const;
+export const press = { control: 0.96, row: 0.985 } as const;
 
 /**
  * A floating surface, for the composer and the sidebar: Apple's Liquid Glass where it is drawn (iOS 26, macOS 26), a
