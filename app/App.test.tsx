@@ -804,6 +804,18 @@ describe("images", () => {
     };
   }
 
+  test("a zoomed image pages through its message's images in a loop", async () => {
+    const shots = { id: "i1", ts: ts(8), from: "lead@mac", kind: "notice", text: "截图", attachments: ["/media/1-a.png", "/media/2-b.png"] };
+    const app = await open("./App.tsx", { ...desk, network: { ...hub([], [shots]) } });
+    await app.waitFor("label:View full size");
+    await app.press("label:View full size >> nth=0");
+    await app.waitFor("text:1 / 2");
+    await app.press("id:image-next");
+    await app.waitFor("text:2 / 2");
+    await app.press("id:image-next");
+    await app.waitFor("text:1 / 2");
+  });
+
   test("the newest Markdown report opens in the reader pane, which zooms, closes and reopens", async () => {
     const report = { id: "r1", ts: ts(8), from: "lead@mac", kind: "notice", text: "推送通知梳理完成", attachments: ["/media/1762650000000-push-notifications.md"] };
     const app = await open("./App.tsx", {

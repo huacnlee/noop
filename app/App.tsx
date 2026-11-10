@@ -38,7 +38,7 @@ import {
   windowSize, token, openUrl, keyboardFrame, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
-import { AlertDialog, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
+import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
 import { isAvailable as hasWindow, titleBar, currentWindow } from "nsh/desktop";
 import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, installAndRestart, restartToPackage, runningPackage } from "nsh/updater";
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
@@ -618,7 +618,7 @@ async function copyImage(src: string): Promise<void> {
   }
 }
 
-function Media(props: { hub: Hub; path: string }) {
+function Media(props: { hub: Hub; path: string; /** Every attachment of its message, to page through when zoomed. */ siblings?: string[] }) {
   const src = mediaUrl(props.hub.cfg.url, props.hub.cfg.token, props.path);
   const ratio = signal(16 / 10);
   const zoomed = signal(false);
@@ -629,6 +629,8 @@ function Media(props: { hub: Hub; path: string }) {
   const THUMB = 240;
   const size = () => (ratio() >= 1 ? { width: THUMB, height: THUMB / ratio() } : { width: THUMB * ratio(), height: THUMB });
   const gone = signal(false); // past the media retention (or otherwise unavailable)
+  // the message's images, which the zoomed view pages through in a loop
+  const images = () => (props.siblings ?? [props.path]).filter((p) => !isDoc(p) && !isVideo(p));
   return (
     <If
       when={!gone()}
@@ -662,11 +664,44 @@ function Media(props: { hub: Hub; path: string }) {
         backdropClass="bg-scrim"
         style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
       >
-        <View accessibilityLabel={L("Close image", "关闭大图")} onPress={() => zoomed.set(false)} style={{ flex: 1, alignItems: "center", justifyContent: "center", cursor: "zoom-out" }}>
-          <Image src={src} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-        </View>
+        <ImagePager hub={props.hub} paths={images()} start={Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
       </Dialog>
     </If>
+  );
+}
+
+/**
+ * A message's images full size, paged in a loop (NSH's `Carousel`): swipe, the arrow keys or the side buttons move
+ * on, past the last back to the first; a press on the image closes it.
+ */
+function ImagePager(props: { hub: Hub; paths: string[]; start: number; onClose: () => void }) {
+  const index = signal(props.start);
+  const many = props.paths.length > 1;
+  const side = (left: boolean): ViewStyle => ({
+    position: "absolute", top: "50%", marginTop: -20, [left ? "left" : "right"]: 8, width: 40, height: 40, borderRadius: 20,
+    alignItems: "center", justifyContent: "center", backgroundColor: alpha("#000000", 0.45), cursor: "pointer",
+  });
+  return (
+    <Carousel index={index()} looping onChange={({ index: i }) => index.set(i)} accessibilityLabel={L("Images", "图片")} style={{ flex: 1 }}>
+      <CarouselContent style={{ flex: 1 }}>
+        <Each of={props.paths}>
+          {(p, i) => (
+            <CarouselItem accessibilityLabel={`${i() + 1} / ${props.paths.length}`} style={{ width: "100%", height: "100%" }}>
+              <View accessibilityLabel={L("Close image", "关闭大图")} onPress={props.onClose} style={{ flex: 1, alignItems: "center", justifyContent: "center", cursor: "zoom-out" }}>
+                <Image src={mediaUrl(props.hub.cfg.url, props.hub.cfg.token, p())} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+              </View>
+            </CarouselItem>
+          )}
+        </Each>
+      </CarouselContent>
+      <If when={many}>
+        <CarouselPrevious testID="image-prev" accessibilityLabel={L("Previous image", "上一张")} style={side(true)}><Icon name="back" size={18} tint="#ffffff" /></CarouselPrevious>
+        <CarouselNext testID="image-next" accessibilityLabel={L("Next image", "下一张")} style={side(false)}><Icon name="chevron" size={18} tint="#ffffff" /></CarouselNext>
+        <View style={{ position: "absolute", bottom: 8, alignSelf: "center", paddingHorizontal: 10, height: 24, borderRadius: 12, justifyContent: "center", backgroundColor: alpha("#000000", 0.45) }}>
+          <Text style={{ fontSize: 12, color: "#ffffff", fontVariant: ["tabular-nums"] }}>{`${index() + 1} / ${props.paths.length}`}</Text>
+        </View>
+      </If>
+    </Carousel>
   );
 }
 
@@ -1093,7 +1128,7 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
         </If>
         <If when={e.attachments?.length}>
           <View testID="owner-images" style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "flex-end", gap: 6, opacity: props.out ? 0.65 : 1 }}>
-            <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} />}</Each>
+            <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
           </View>
         </If>
         <If when={e.text.trim() || e.ref}>
@@ -1154,7 +1189,7 @@ function Message(props: {
       <Rich text={ask ? e.text.replace(/\n*^建议：.*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
       <If when={e.attachments?.length}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 10 }}>
-          <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} />}</Each>
+          <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
         </View>
       </If>
     </View>
