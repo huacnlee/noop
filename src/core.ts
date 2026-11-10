@@ -189,10 +189,12 @@ export function repoRequires(repo?: string): string[] {
 }
 
 /** A task matches if every comma-separated requirement is in the host's caps (plus what its local repo needs). */
-export function matches(meta: Record<string, string>, caps: string[]): boolean {
-  const reqs = [meta.requires, meta.host && meta.host !== "any" ? `host:${meta.host}` : "", ...repoRequires(meta.repo)]
+const taskReqs = (meta: Record<string, string>) =>
+  [meta.requires, meta.host && meta.host !== "any" ? `host:${meta.host}` : "", ...repoRequires(meta.repo)]
     .join(",").split(",").map((s) => s.trim()).filter(Boolean);
-  return reqs.every((r) => capOk(r, caps));
+
+export function matches(meta: Record<string, string>, caps: string[]): boolean {
+  return taskReqs(meta).every((r) => capOk(r, caps));
 }
 
 /** Hook set by the CLI so core stays free of policy imports. */
@@ -295,10 +297,14 @@ export function onlineHosts(cfg: Cfg): HostBeat[] {
 
 const reqList = (s?: string) => (s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
-/** The requirements in `s` that some machine of the fleet meets, online or not (all of them while no machine is known). */
-export function fleetCanMeet(s?: string): string[] {
+/** The requirements in `added` that can join the task's own: each is kept only while one machine of the fleet, online
+ *  or not, still meets the whole set (all of them while no machine is known). The task's own are never weakened. */
+export function fleetCanMeet(meta: Record<string, string>, added?: string): string[] {
   const seen = list(P("fleet", "hosts"), /\.json$/).map((p) => (JSON.parse(readFileSync(p, "utf8")) as HostBeat).caps);
-  return reqList(s).filter((r) => !seen.length || seen.some((caps) => capOk(r, caps)));
+  const kept: string[] = [];
+  for (const r of reqList(added))
+    if (!seen.length || seen.some((caps) => [...taskReqs(meta), ...kept, r].every((q) => capOk(q, caps)))) kept.push(r);
+  return kept;
 }
 
 /** Should this host leave the task for a preferred, currently-online host? */
