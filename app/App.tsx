@@ -1048,6 +1048,32 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
   return (
     <View style={{ flexDirection: "row", justifyContent: "flex-end", paddingVertical: 8 }} onMouseEnter={() => over.set(true)} onMouseLeave={() => over.set(false)}>
       <View style={{ maxWidth: "82%", alignItems: "flex-end", gap: 4 }}>
+        <If
+          when={props.out?.state === "failed"}
+          else={
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+              <If when={e.text.trim()}>
+                <MsgActions id={e.id} text={/^[DLP]-[A-Z]?\d{4} \S/.test(e.text) && !e.text.includes("\n") ? answerText(e.text) : e.text} show={() => touch || over()} align="flex-end" />
+              </If>
+              {/* only while it can still be taken back; the row keeps its height when this goes */}
+              <If when={props.out?.state === "held"}>
+                <View role="button" testID="recall-send" accessibilityLabel={L("Undo", "撤回")} onPress={() => props.onRecall?.()} hoverStyle={hovered()} style={{ height: 28, paddingHorizontal: 6, borderRadius: 6, justifyContent: "center", cursor: "pointer" }}>
+                  <Text style={{ fontSize: size.tiny, fontWeight: "600", color: colors.muted }}>{L("Undo", "撤回")}</Text>
+                </View>
+              </If>
+              {/* The delivery mark floats left of the time, so it takes no room and never moves the header row. */}
+              <View style={{ position: "relative", justifyContent: "center" }}>
+                <If when={justSent().has(e.id)}><View style={{ position: "absolute", left: -18, top: 0, bottom: 0, justifyContent: "center" }}><SentCheck /></View></If>
+                <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
+              </View>
+            </View>
+          }
+        >
+          <View role="button" onPress={props.onRetry} accessibilityLabel={L("Retry sending", "重试发送")} style={{ flexDirection: "row", gap: 6 }}>
+            <Text style={{ fontSize: size.tiny, color: colors.danger }}>{L("Couldn’t send", "发送失败")}</Text>
+            <Text style={{ fontSize: size.tiny, fontWeight: "600", color: colors.danger }}>{L("Retry", "重试")}</Text>
+          </View>
+        </If>
         {/* what this answers, quoted above the bubble (press: back to the card) */}
         <If when={ref}>
           <View
@@ -1089,32 +1115,6 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
               </>
             : <Rich text={e.text} />}
         </View>
-        </If>
-        <If
-          when={props.out?.state === "failed"}
-          else={
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-              <If when={e.text.trim()}>
-                <MsgActions id={e.id} text={/^[DLP]-[A-Z]?\d{4} \S/.test(e.text) && !e.text.includes("\n") ? answerText(e.text) : e.text} show={() => touch || over()} align="flex-end" />
-              </If>
-              {/* only while it can still be taken back; the row keeps its height when this goes */}
-              <If when={props.out?.state === "held"}>
-                <View role="button" testID="recall-send" accessibilityLabel={L("Undo", "撤回")} onPress={() => props.onRecall?.()} hoverStyle={hovered()} style={{ height: 28, paddingHorizontal: 6, borderRadius: 6, justifyContent: "center", cursor: "pointer" }}>
-                  <Text style={{ fontSize: size.tiny, fontWeight: "600", color: colors.muted }}>{L("Undo", "撤回")}</Text>
-                </View>
-              </If>
-              {/* The delivery mark floats left of the time, so it takes no room and never moves the footer. */}
-              <View style={{ position: "relative", justifyContent: "center" }}>
-                <If when={justSent().has(e.id)}><View style={{ position: "absolute", left: -18, top: 0, bottom: 0, justifyContent: "center" }}><SentCheck /></View></If>
-                <Text style={{ fontSize: size.tiny, color: colors.faint }}>{timeOf(e.ts)}</Text>
-              </View>
-            </View>
-          }
-        >
-          <View role="button" onPress={props.onRetry} accessibilityLabel={L("Retry sending", "重试发送")} style={{ flexDirection: "row", gap: 6 }}>
-            <Text style={{ fontSize: size.tiny, color: colors.danger }}>{L("Couldn’t send", "发送失败")}</Text>
-            <Text style={{ fontSize: size.tiny, fontWeight: "600", color: colors.danger }}>{L("Retry", "重试")}</Text>
-          </View>
         </If>
       </View>
     </View>
@@ -1179,11 +1179,15 @@ function Message(props: {
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 22 }}>
           <If when={!wide()}><View style={{ position: "relative" }}><Avatar testID={`avatar-inline-${e.id}`} from={e.from} small /></View></If>
           <Text style={{ fontSize: 15, fontWeight: "600", color: colors.text }}>{displayName(e.from)}</Text>
-          <Text style={{ fontSize: size.tiny, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
+          <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
           <If when={props.unread?.()}>
             <View testID={`unread-dot-${e.id}`} accessibilityLabel={L("Unread", "未读")} style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: colors.info }} />
           </If>
           {tag && !ask ? <Badge label={tag} /> : null}
+          <View style={{ flex: 1 }} />
+          <If when={e.text.trim()}>
+            <MsgActions id={e.id} text={e.text} show={() => touch || over()} unread={props.unread} onToggleRead={props.onToggleRead} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? firstLine(e.text) : undefined) : undefined} align="flex-end" />
+          </If>
         </View>
         {ask ? (
           <View
@@ -1245,9 +1249,6 @@ function Message(props: {
         ) : (
           body
         )}
-        <If when={e.text.trim()}>
-          <MsgActions id={e.id} text={e.text} show={() => touch || over()} unread={props.unread} onToggleRead={props.onToggleRead} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? firstLine(e.text) : undefined) : undefined} />
-        </If>
       </View>
     </View>
   );
