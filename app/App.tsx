@@ -579,8 +579,8 @@ function Custom(props: { node: TextViewCustomNode; small: boolean }) {
 function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?: string; scale?: number }) {
   const small = !!(props.muted || props.quiet);
   const k = () => props.scale ?? 1;
-  const fontSize = () => (props.quiet ? 14 : props.muted ? size.small : size.text) * k();
-  const lineHeight = () => (small ? 21 : size.line) * k();
+  const fontSize = () => (props.quiet ? 13 : props.muted ? size.small : size.text) * k();
+  const lineHeight = () => (props.quiet ? 19 : small ? 21 : size.line) * k();
   const doc = () => {
     const d = TextView.parse(hubMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, EXTENSIONS);
     return { ...d, blocks: ghBlocks(d.blocks) };
@@ -1168,7 +1168,7 @@ function Message(props: {
     // top-aligned on one shared line height: baseline alignment drifts once the text carries an inline chip
     return (
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 4, paddingLeft: wide() ? 50 : 0 }}>
-        <Text style={{ fontSize: size.tiny, lineHeight: 21, paddingTop: 1, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
+        <Text style={{ fontSize: 12, lineHeight: 19, paddingTop: 1, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
         <View selectable style={{ flex: 1, minWidth: 0 }}><Rich text={e.text} quiet /></View>
       </View>
     );
