@@ -90,6 +90,8 @@ import {
   menuBox,
   menuRowHover,
   SidebarRow,
+  SettingsGroup,
+  SettingsItem,
 } from "./ui";
 import {
   answeredIds,
@@ -485,7 +487,7 @@ const LABEL = /(?:^|[\n。；;，,])[\s*+\-\d.)]*([A-Za-z][\w.-]*)\**\s*[:：](?
 /**
  * A "#746" is a GitHub PR or issue: "nsh #747" / "NSH#747" links to that repository when the channel has linked it
  * before; a bare "#747" to the one repository the message, or what it is about (`context`: a card's options, the
- * thread it belongs to), names. Code spans are left alone.
+ * thread it belongs to), names. Code spans and existing Markdown links are left alone.
  */
 function linkRepoRefs(text: string, context = ""): string {
   const known = reposIn(`${text}\n${context}`, new Map(knownRepos()));
@@ -517,7 +519,7 @@ function linkRepoRefs(text: string, context = ""): string {
   const near = (at: number) => { let s: string | null = null; for (const [i, slug] of marks) { if (i >= at) break; s = slug; } return s; };
   const url = (slug: string, n: string) => `https://github.com/${slug}/issues/${n}`;
   let base = 0;
-  return text.split(/(`[^`\n]*`)/).map((part, i) => { const off = base; base += part.length; return i % 2 ? part : part.replace(
+  return text.split(/(`[^`\n]*`|\[[^\]\n]*\]\([^)\n]*\))/).map((part, i) => { const off = base; base += part.length; return i % 2 ? part : part.replace(
     REF,
     (all, pre: string, name: string | undefined, sp: string, n: string, at: number) => {
       const slug = name && slugOf(name);
@@ -1091,7 +1093,7 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
         <If
           when={props.out?.state === "failed"}
           else={
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
               <If when={e.text.trim()}>
                 <MsgActions id={e.id} text={/^[DLP]-[A-Z]?\d{4} \S/.test(e.text) && !e.text.includes("\n") ? answerText(e.text) : e.text} show={() => touch || over()} align="flex-end" />
               </If>
@@ -1101,11 +1103,11 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
                   <Text style={{ fontSize: size.tiny, fontWeight: "600", color: colors.muted }}>{L("Undo", "撤回")}</Text>
                 </View>
               </If>
-              {/* Reserve the mark’s space so delivery feedback never moves the footer. */}
-              <View style={{ width: 14, height: 16 }}>
-                <If when={justSent().has(e.id)}><SentCheck /></If>
+              {/* The delivery mark floats left of the time, so it takes no room and never moves the footer. */}
+              <View style={{ position: "relative", justifyContent: "center" }}>
+                <If when={justSent().has(e.id)}><View style={{ position: "absolute", left: -18, top: 0, bottom: 0, justifyContent: "center" }}><SentCheck /></View></If>
+                <Text style={{ fontSize: size.tiny, color: colors.faint }}>{timeOf(e.ts)}</Text>
               </View>
-              <Text style={{ fontSize: size.tiny, color: colors.faint }}>{timeOf(e.ts)}</Text>
             </View>
           }
         >
@@ -1166,7 +1168,7 @@ function Message(props: {
     // top-aligned on one shared line height: baseline alignment drifts once the text carries an inline chip
     return (
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 4, paddingLeft: wide() ? 50 : 0 }}>
-        <Text style={{ fontSize: size.tiny, lineHeight: 21, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
+        <Text style={{ fontSize: size.tiny, lineHeight: 21, paddingTop: 1, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
         <View selectable style={{ flex: 1, minWidth: 0 }}><Rich text={e.text} quiet /></View>
       </View>
     );
@@ -2364,17 +2366,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
   );
 }
 
-function Group(props: { title: string; hint?: string; children: JSX.Element }) {
-  return (
-    <View style={{ gap: 8 }}>
-      <View style={{ gap: 3, paddingHorizontal: 2 }}>
-        <Text style={{ fontSize: 15, fontWeight: "600", color: colors.text }}>{props.title}</Text>
-        {props.hint ? <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted }}>{props.hint}</Text> : null}
-      </View>
-      <View style={{ borderRadius: radius.card, borderCurve: "continuous", borderWidth: 1, borderColor: surfaceEdge(), overflow: "hidden" }}>{props.children}</View>
-    </View>
-  );
-}
+const Group = SettingsGroup;
 
 // ---------------------------------------------------------------- notifications (Web Push through host.js; the system's in an installed app)
 
@@ -2702,7 +2694,7 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               <Group title={L("Members", "成员")} hint={L("Each role on the team. The model decides who does the work; autonomy decides how big a decision needs your input first.", "团队里的每个角色。模型决定由谁来干活，自主程度决定多大的事要先问你。")}>
                 <Each of={e().agents} key={(a) => a.id}>
                   {(a, i) => (
-                    <View testID={`member-${a().id}`} style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch", gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: i() === 0 ? 0 : 0.5, borderTopColor: surfaceEdge() }}>
+                    <SettingsItem testID={`member-${a().id}`} first={i() === 0} style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch" }}>
                       <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12 }}>
                         <Avatar from={a().id} />
                         <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
@@ -2735,7 +2727,7 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
                           onPick={(l) => save(patches.autonomy(a().id, l))}
                         />
                       </View>
-                    </View>
+                    </SettingsItem>
                   )}
                 </Each>
               </Group>
@@ -2745,7 +2737,7 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               <Group title={L("Routines", "例行任务")} hint={L("Rules that create tasks on a schedule: on/off and when they run", "定时生成任务的规则：开关和运行时间")}>
                 <Each of={e().routines} key={(r) => r.name}>
                   {(r, i) => (
-                    <View style={{ ...row(), flexDirection: "row", alignItems: "center", gap: 12, borderTopWidth: i() === 0 ? 0 : 0.5 }}>
+                    <SettingsItem first={i() === 0} style={{ flexDirection: "row", alignItems: "center" }}>
                       <View style={{ flex: 1, gap: 3 }}>
                         <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
                           <Text style={{ fontSize: 15.5, fontWeight: "500", color: r().enabled ? colors.text : colors.faint }}>{r().name}</Text>
@@ -2771,7 +2763,7 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
                         checked={r().enabled}
                         onChange={(on) => save(patches.routine(r().name, { enabled: on }))}
                       />
-                    </View>
+                    </SettingsItem>
                   )}
                 </Each>
               </Group>
@@ -3503,7 +3495,7 @@ function RuleDoc(props: { hub: Hub; path: string; wide: boolean }) {
         <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{props.path}</Text>
         <If when={text() !== null} else={<Text style={{ fontSize: 14, color: error() ? colors.danger : colors.faint }}>{error() || L("Loading…", "读取中…")}</Text>}>
           <If when={(text() ?? "").trim()} else={<Text style={{ fontSize: 14, color: colors.faint }}>{L("(Empty file)", "（空文件）")}</Text>}>
-            <View selectable><Rich text={text() ?? ""} /></View>
+            <Rich text={text() ?? ""} />
           </If>
         </If>
       </View>
@@ -4495,9 +4487,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     if ("unread" in row) {
                       return (
                         <View testID="unread" style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 16, marginBottom: 4 }}>
-                          <View style={{ flex: 1, height: 1, backgroundColor: alpha(colors.danger, 0.4) }} />
-                          <Text style={{ fontSize: 13, fontWeight: "600", color: colors.danger }}>{L("New messages", "以下为新消息")}</Text>
-                          <View style={{ flex: 1, height: 1, backgroundColor: alpha(colors.danger, 0.4) }} />
+                          <View style={{ flex: 1, height: 1, backgroundColor: alpha(colors.danger, 0.14) }} />
+                          <Text style={{ fontSize: 12, fontWeight: "500", color: alpha(colors.danger, 0.8) }}>{L("New messages", "以下为新消息")}</Text>
+                          <View style={{ flex: 1, height: 1, backgroundColor: alpha(colors.danger, 0.14) }} />
                         </View>
                       );
                     }

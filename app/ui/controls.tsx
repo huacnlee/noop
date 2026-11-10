@@ -261,7 +261,7 @@ export function Badge(props: { label: string; variant?: BadgeVariant }) {
 }
 
 /**
- * A count (unread messages, decisions waiting): `accent` is the filled one that asks to be seen, `neutral` a quiet
+ * A count (unread messages, decisions waiting), a small round pill: `accent` is the filled one that asks to be seen, `neutral` a quiet
  * number. Over 99 it reads `99+`.
  */
 export function Count(props: { value: number | string; variant?: "accent" | "neutral"; testID?: string; accessibilityLabel?: string }) {
@@ -271,17 +271,17 @@ export function Count(props: { value: number | string; variant?: "accent" | "neu
       testID={props.testID}
       accessibilityLabel={props.accessibilityLabel}
       style={{
-        minWidth: 20,
-        height: 20,
-        paddingHorizontal: 5,
+        minWidth: 16,
+        height: 16,
+        paddingHorizontal: 4,
         alignItems: "center",
         justifyContent: "center",
-        borderRadius: corner.badge,
+        borderRadius: 8,
         borderCurve: "continuous",
         backgroundColor: accent() ? colors.accentFill : alpha(colors.text, fill.rest),
       }}
     >
-      <Text style={{ fontSize: font.badge, lineHeight: leading.badge, fontWeight: "600", color: accent() ? colors.onAccent : colors.muted, fontVariant: ["tabular-nums"] }}>
+      <Text style={{ fontSize: 10.5, lineHeight: 14, fontWeight: "600", color: accent() ? colors.onAccent : colors.muted, fontVariant: ["tabular-nums"] }}>
         {typeof props.value === "number" && props.value > 99 ? "99+" : String(props.value)}
       </Text>
     </View>

@@ -19,6 +19,7 @@ export * from "./scrollbar-theme";
 export * from "./avatar";
 export * from "./menu";
 export * from "./sidebar";
+export * from "./settings";
 
 /**
  * The thumb of a resize handle (`handleThumbClass`), as gpui-component
