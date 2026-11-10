@@ -17,16 +17,16 @@ export type Card = { repo: string; key: string; prs: (PR & { review: string })[]
 const slug = /^[\w.-]+\/[\w.-]+$/;
 const gh = (args: string[]) => {
   const r = spawnSync("gh", args, { encoding: "utf8", timeout: 5_000, maxBuffer: 16 << 20 });
-  if (r.error || r.status !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed (${r.status ?? r.error?.message})`);
+  if (r.error || r.status !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed (${(r.error as NodeJS.ErrnoException)?.code === "ETIMEDOUT" ? "timeout after 5 seconds" : r.status ?? r.error?.message})`);
   return JSON.parse(r.stdout);
 };
 
 export function discover(owner: string, run = gh): PR[] {
   if (!/^[\w-]+$/.test(owner)) throw new Error("configure owner.github before enabling pr-closeout");
   // One listing for the whole owner, then ONE batched GraphQL query. No per-PR REST loop.
-  const found = run(["search", "prs", "--owner", owner, "--state", "open", "--limit", "1000",
+  const found = run(["search", "prs", "--owner", owner, "--state", "open", "--limit", "100",
     "--json", "number,repository,url,isDraft"]);
-  if (!Array.isArray(found) || found.length >= 1000) throw new Error("PR search truncated or invalid; refusing partial cards");
+  if (!Array.isArray(found) || found.length >= 100) throw new Error("PR search invalid or reached the 100-result safety cap; refusing partial cards");
   const repos = new Set(found.filter((p: any) => p.isDraft).map((p: any) => p.repository.nameWithOwner));
   const candidates = found.filter((p: any) => repos.has(p.repository.nameWithOwner));
   if (!candidates.length) return [];
@@ -101,7 +101,7 @@ export function plan(prs: PR[], evidence: { [url: string]: Evidence[] }, records
       }
     }
     const ordered = order(group);
-    const key = createHash("sha256").update(JSON.stringify(group.map((p) => [p.url, p.headRefOid, p.baseRefName, p.baseRefOid]).sort())).digest("hex");
+    const key = createHash("sha256").update(JSON.stringify(group.map((p) => [p.url, p.headRefOid, p.baseRefName]).sort())).digest("hex");
     let reason = !ordered ? L("Missing or cyclic dependencies", "依赖缺失或循环") : group.some((p) => !green(p)) ? L("CI is missing, incomplete or not all successful", "CI 缺失、未完成或未全部成功") : "";
     const reviews = new Map(group.map((p) => [p.url, cleanReview(p, evidence[p.url] ?? [])]));
     if (!reason && group.some((p) => !reviews.get(p.url))) reason = L("Missing a clean full-PR cross-model review at the current HEAD", "缺少当前 HEAD 的完整 clean 二次 review");

@@ -69,6 +69,8 @@ test("missing/cyclic dependencies or one bad PR block the whole repository", () 
 test("dedupe pending releases by repo, exact prior snapshot by key; changed head is a new card", () => {
   const p = make(); const c = plan([p], ev([p]), []).cards[0];
   expect(plan([p], ev([p]), [{ meta: { closeout_key: c.key }, body: "" }]).cards).toHaveLength(0);
+  const advancedBase = make(1, { baseRefOid: "2222222222222222222222222222222222222222" });
+  expect(plan([advancedBase], ev([advancedBase]), [{ meta: { closeout_key: c.key }, body: "" }]).cards).toHaveLength(0);
   expect(plan([p], ev([p]), [{ meta: { closeout_active: "yes", title: "app：合并并发版" }, body: "" }]).cards).toHaveLength(0);
   expect(plan([p], ev([p]), [{ meta: { closeout_active: "yes", title: "merge", closeout_repo: p.repo }, body: "" }]).cards).toHaveLength(0);
   const changed = make(1, { headRefOid: "1234567890abcdef1234567890abcdef12345678" });
@@ -89,6 +91,7 @@ test("discovery uses exactly one search and one GraphQL query, rejects partial r
   expect(discover("owner", run)).toHaveLength(1);
   expect(calls.map((a) => a.slice(0, 2))).toEqual([["search", "prs"], ["api", "graphql"]]);
   expect(() => discover("bad/owner", run)).toThrow();
+  expect(() => discover("owner", () => Array.from({ length: 100 }, () => ({ number: 1, isDraft: true, repository: { nameWithOwner: "owner/app" } })))).toThrow("100-result safety cap");
   let count = 0;
   expect(() => discover("owner", (a) => ++count === 1 ? [{ number: 1, isDraft: true, repository: { nameWithOwner: "owner/app" } }] : { errors: ["failed"] })).toThrow();
 });

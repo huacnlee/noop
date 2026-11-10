@@ -99,8 +99,8 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
       state[r.name] = new Date().toISOString();
       try {
         const result = enqueueCloseout(cfg);
-        journal(host, `PR closeout: ${result.ids.length} decision tasks; ${result.skipped.length} repos skipped`);
-      } catch (e) { journal(host, `PR closeout failed: ${(e as Error).message}`); }
+        journal(host, L(`PR closeout: ${result.ids.length} decision tasks; ${result.skipped.length} repos skipped`, `PR 收尾：${result.ids.length} 个决策任务；跳过 ${result.skipped.length} 个仓库`));
+      } catch (e) { journal(host, L(`PR closeout failed: ${(e as Error).message}`, `PR 收尾失败：${(e as Error).message}`)); }
       continue;
     }
     // scheduler "each": every machine runs its own copy, pinned to it (e.g. the weekly security check of this computer)
