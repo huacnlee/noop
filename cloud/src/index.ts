@@ -111,11 +111,18 @@ const IMMUTABLE = "public, max-age=31536000, immutable";
 
 async function hashedAsset(req: Request, env: Env, url: URL): Promise<Response> {
   const accept = req.headers.get("accept-encoding") ?? "";
+  const accepted = new Map(accept.toLowerCase().split(",").map((part) => {
+    const [name, ...params] = part.trim().split(";");
+    const q = params.map((p) => p.trim()).find((p) => p.startsWith("q="));
+    return [name.trim(), q === undefined ? 1 : Number(q.slice(2))] as const;
+  }));
+  const quality = (name: string) => accepted.get(name) ?? accepted.get("*") ?? 0;
   const type = TYPES[url.pathname.slice(url.pathname.lastIndexOf(".") + 1)];
-  for (const [ext, enc] of [["br", "br"], ["gz", "gzip"]] as const) {
-    if (!new RegExp(`(^|[,\\s])${enc}([;,\\s]|$)`).test(accept)) continue;
+  const variants = ([["br", "br"], ["gz", "gzip"]] as const).toSorted((a, b) => quality(b[1]) - quality(a[1]));
+  for (const [ext, enc] of variants) {
+    if (!(quality(enc) > 0)) continue;
     const res = await env.ASSETS.fetch(new Request(new URL(url.pathname + "." + ext, url), { headers: { "accept-encoding": "identity" } }));
-    if (!res.ok) continue;
+    if (!res.ok || res.headers.get("content-type")?.toLowerCase().startsWith("text/html")) continue;
     const headers = new Headers({ "content-type": type, "content-encoding": enc, "cache-control": IMMUTABLE, vary: "accept-encoding" });
     const etag = res.headers.get("etag");
     if (etag) headers.set("etag", etag);
@@ -126,6 +133,7 @@ async function hashedAsset(req: Request, env: Env, url: URL): Promise<Response> 
   if (!res.ok) return res;
   const out = new Response(res.body, res);
   out.headers.set("cache-control", IMMUTABLE);
+  out.headers.append("vary", "accept-encoding");
   return out;
 }
 
