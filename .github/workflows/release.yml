@@ -10,6 +10,8 @@ on:
       - .github/workflows/release.yml
       - .github/actions/setup-nsh/**
       - scripts/check-ios-sdk.sh
+      - scripts/macos-icon.swift
+      - app/icon.png
       - install-client.sh
       - install-client.ps1
       - app/build-web.sh
@@ -53,6 +55,10 @@ jobs:
           ref: ${{ env.NSH_REF }}
           target: ${{ matrix.target }}
 
+      - name: Prepare the macOS icon
+        if: matrix.target == 'macos'
+        run: swift scripts/macos-icon.swift app/icon.png "$RUNNER_TEMP/noop-macos-icon.png"
+
       - name: Package
         env:
           TARGET: ${{ matrix.target }}
@@ -83,6 +89,9 @@ jobs:
             tar -czf "assets/$ASSET" -C app/dist/web/noop .
             ls -l assets
             exit 0
+          fi
+          if [ "$TARGET" = macos ]; then
+            args+=(--icon "$RUNNER_TEMP/noop-macos-icon.png")
           fi
           (cd app && nsh package --target "$TARGET" -o "$out" "${args[@]}")
           case "$TARGET" in
@@ -156,6 +165,7 @@ jobs:
           out="$RUNNER_TEMP/out-x86_64"
           mkdir -p assets-intel
           # The Intel CLI runs through Rosetta and also names OTA archives macos-x86_64.
+          args+=(--icon "$RUNNER_TEMP/noop-macos-icon.png")
           (cd app && nsh package --target macos -o "$out" "${args[@]}")
           ditto -c -k --keepParent "$out/Noop.app" assets-intel/noop-macos-x86_64.zip
           mv "$out"/Noop-*-macos-x86_64.tar.gz assets-intel/

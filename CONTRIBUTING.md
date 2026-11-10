@@ -54,3 +54,16 @@ The release also carries `latest.json` and versioned archives (`Noop-<version>-<
 The workflow builds nsh from the commit in `NSH_REF` and caches it; a commit not yet cached takes a while on each runner. Android signing uses the secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and `ANDROID_KEYSTORE_PASSWORD`. Keep that key: Android refuses an update signed with another one. The iOS package is unsigned.
 
 Do not run tests against a production Worker or a live `DATA` directory.
+
+### macOS icon
+
+The shared `app/icon.png` is full-bleed artwork. macOS ICNS packaging only resizes it, so the release workflow first renders a rounded tile with transparent margins using `scripts/macos-icon.swift`. Both Apple silicon and Intel packages use this PNG before signing and creating their ZIP and updater archives. Other platforms keep the original artwork.
+
+For a local macOS package, run from the repository root:
+
+```bash
+swift scripts/macos-icon.swift app/icon.png /tmp/noop-macos-icon.png
+(cd app && nsh package --target macos --icon /tmp/noop-macos-icon.png)
+```
+
+The visible tile occupies 824 pixels of a 1024-pixel canvas. Keep this proportion when changing the artwork so extra padding does not make the Dock icon appear undersized. The script uses macOS system frameworks and does not redraw the logo.
