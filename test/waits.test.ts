@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { autoResumable, backoffMinutes, isMergeCard, isNoChangeRoutine, mergeHeadline, tooManyWakes, waitCause, waitKind, waitMeta, waitOver } from "../src/waits";
+import { autoResumable, backoffMinutes, isAccountCheck, isMergeCard, isNoChangeRoutine, mergeHeadline, tooManyWakes, waitCause, waitKind, waitMeta, waitOver } from "../src/waits";
 
 test("CI wait_check backs off 5 → 10 → 20 → 40 minutes", () => {
   expect([0, 1, 2, 3, 4, 9].map(backoffMinutes)).toEqual([5, 10, 20, 40, 40, 40]);
@@ -41,11 +41,15 @@ test("waitCause: quota waits are told apart from CI and people (T-0064 / D-0013)
   expect(waitCause({ waiting_on: "rate limit resets at 3pm" })).toBe("quota");
   expect(waitCause({ waiting_on: "CI run 123", wait_check: "gh run view 123" })).toBe("ci");
   expect(waitCause({ waiting_on: "owner 合并 PR" })).toBe("human");
-  expect([waitOver("quota", 0, 0), waitOver("quota", 1, 0), waitOver("ci", 0, 0), waitOver("ci", 0, 1), waitOver("ci", 0, undefined)]).toEqual([true, false, false, true, false]);
+  const acct = "bun /Users/k/w/noop/src/review-account.ts check claude";
+  expect([waitOver(acct, 0, 0), waitOver(acct, 1, undefined), waitOver("gh run view 1", 0, 0), waitOver("gh run view 1", 0, 1), waitOver("true", 0, undefined)]).toEqual([true, false, false, true, false]);
+  // an inverted or wrapped account check keeps the exit-code-change rule: 0 there means still cooling down
+  expect([isAccountCheck(acct), isAccountCheck(`! ${acct}`), isAccountCheck(`${acct} || true`), isAccountCheck(`${acct} | grep ok`)]).toEqual([true, false, false, false]);
+  expect(waitOver(`! ${acct}`, 0, 0)).toBe(false);
   const q = { wait_check: "bun review-account.ts check claude" };
   expect(autoResumable(q)).toBe(true);
   expect(autoResumable({ ...q, decision: "D-1" }, { open: true, supervisor_cause: "platform:os:macos" })).toBe(true);
   expect(autoResumable({ ...q, decision: "D-1" }, { open: true })).toBe(false);
-  expect(autoResumable({ ...q, decision: "D-1" }, { open: false })).toBe(true);
+  expect(autoResumable({ ...q, decision: "D-1" }, { open: false, supervisor_cause: "platform:os:macos" })).toBe(false); // supervisor resume delivers the answer
   expect(autoResumable({ wait_check: "gh run view 1" })).toBe(false);
 });

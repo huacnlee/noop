@@ -21,17 +21,22 @@ export function waitCause(m: { wait_kind?: string; waiting_on?: string; wait_che
   return waitKind(m);
 }
 
-/** Is the wait over? A quota check exits 0 once the account is usable again, whatever it returned before; other checks
- * are over when their exit code differs from the first one seen. */
-export const waitOver = (cause: WaitCause, code: number, base: number | undefined) =>
-  cause === "quota" ? code === 0 : base !== undefined && code !== base;
+/** The whole command is the account check itself (`review-account.ts check <cli>`), which exits 0 once the account is
+ * usable. Anything wrapped around it (`!`, `||`, pipes) keeps the generic exit-code-change rule. */
+export const isAccountCheck = (cmd: string) => /^\s*(?:(?:bun|node|bunx|tsx)\s+)?[\w./~-]*review-account\.ts\s+check\s+[\w-]+\s*$/.test(cmd);
+
+/** Is the wait over? An account check is over once it exits 0, whatever it returned before (a baseline taken after the
+ * quota came back would otherwise never change); other checks are over when their exit code differs from the first one. */
+export const waitOver = (cmd: string, code: number, base: number | undefined) =>
+  isAccountCheck(cmd) ? code === 0 : base !== undefined && code !== base;
 
 /** A blocked task the daemon may put back in the queue by itself once its quota check passes: parked after too many
- * wakes (no card) or under a supervisor card. A card the agent raised for the owner still needs the owner's answer. */
+ * wakes (no card) or under a still-open supervisor card. A card the agent raised for the owner needs the owner's answer,
+ * and a closed card's answer is delivered by the supervisor's resume path, not dropped here. */
 export function autoResumable(m: Record<string, string | undefined>, card?: { open: boolean; supervisor_cause?: string }): boolean {
   if (!m.wait_check || waitCause(m) !== "quota") return false;
   if (!m.decision) return true;
-  return !!card && (!card.open || !!card.supervisor_cause);
+  return !!card?.open && !!card.supervisor_cause;
 }
 
 /** Poll interval for a CI wait_check after `checks` earlier polls: 5 → 10 → 20 → 40 minutes, then stays at 40. */

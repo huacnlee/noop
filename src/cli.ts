@@ -12,7 +12,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { writeRules } from "./rules";
-import { autoResumable, backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitCause, waitMeta, waitOver } from "./waits";
+import { autoResumable, backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta, waitOver } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -581,8 +581,7 @@ export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Se
       else if (doc) writeDoc(path, { ...doc.meta, wait_check_base: `${code} ${cmd}` }, doc.body);
     }
     waitChecks.set(id, { cmd, base: base ?? code, next: now + (everyMs ?? backoffMinutes(n) * 60_000), n });
-    // Exit 0 means "over" only for a check that is itself an account check; a quota mentioned in waiting_on alone keeps the diff rule.
-    if (waitOver(waitCause({ wait_check: cmd }), code, base)) { ready.add(id); waitChecks.delete(id); }
+    if (waitOver(cmd, code, base)) { ready.add(id); waitChecks.delete(id); }
   }));
   for (const id of waitChecks.keys()) if (!waiting.has(id)) waitChecks.delete(id);
   return ready;
