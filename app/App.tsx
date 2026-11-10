@@ -1632,8 +1632,8 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
               <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.muted }}>{t()!.id}</Text>
               <View style={{ flex: 1 }} />
               <If when={cancellable() && !cancelling()}>
-                <Button testID="finish-task" label={L("Done", "完成")} variant="outline" tone="accent" size="sm" icon="check" onPress={() => void finish()} />
-                <Button testID="cancel-task" label={L("Cancel task", "取消任务")} variant="outline" tone="danger" size="sm" icon="close" onPress={() => void cancel()} />
+                <Button testID="finish-task" label={L("Done", "完成")} variant="ghost" icon="check" onPress={() => void finish()} />
+                <Button testID="cancel-task" label={L("Cancel task", "取消任务")} variant="ghost" icon="close" onPress={() => void cancel()} />
               </If>
               <If when={cancelling()}>
                 <Text style={{ fontSize: 13, color: colors.muted }}>{L("Working…", "处理中…")}</Text>
