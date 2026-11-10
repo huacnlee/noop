@@ -6,7 +6,7 @@ import { openDecision } from "./decisions";
 import { type Cfg, L, P, list, newTask, readDoc, writeDoc, hostName } from "./core";
 
 export type PR = {
-  number: number; title: string; url: string; repo: string; isDraft: boolean; state: string;
+  number: number; title: string; url: string; repo: string; isDraft: boolean; isCrossRepository: boolean; state: string;
   headRefName: string; headRefOid: string; baseRefName: string; baseRefOid: string; defaultBranch: string;
   checks: { state: string; contexts: { nodes: any[]; pageInfo: { hasNextPage: boolean } } } | null;
   commitCount: number;
@@ -35,7 +35,7 @@ export function discover(owner: string, run = gh): PR[] {
     if (!slug.test(repo) || repo.split("/")[0].toLowerCase() !== owner.toLowerCase() || !Number.isInteger(p.number)) throw new Error("invalid PR identity");
     const [o, n] = repo.split("/");
     return `p${i}:repository(owner:${JSON.stringify(o)},name:${JSON.stringify(n)}){defaultBranchRef{name} pullRequest(number:${p.number}){
-      number title url isDraft state headRefName headRefOid baseRefName baseRefOid commits(last:1){totalCount nodes{commit{statusCheckRollup{
+      number title url isDraft isCrossRepository state headRefName headRefOid baseRefName baseRefOid commits(last:1){totalCount nodes{commit{statusCheckRollup{
         state contexts(first:100){pageInfo{hasNextPage} nodes{__typename ... on CheckRun{status conclusion} ... on StatusContext{state}}}
       }}}}}}`;
   });
@@ -80,7 +80,7 @@ export function order(prs: PR[]): PR[] | undefined {
     if (visiting.has(p)) return false;
     visiting.add(p);
     if (p.baseRefName !== p.defaultBranch) {
-      const parents = prs.filter((q) => q.headRefName === p.baseRefName);
+      const parents = prs.filter((q) => q.repo === p.repo && !q.isCrossRepository && q.headRefName === p.baseRefName);
       if (parents.length !== 1 || !visit(parents[0])) return false;
     }
     visiting.delete(p); result.push(p); return true;
@@ -96,7 +96,7 @@ export function plan(prs: PR[], evidence: { [url: string]: Evidence[] }, records
     for (let i = 0; i < group.length; i++) {
       const p = group[i];
       if (p.baseRefName !== p.defaultBranch) {
-        const parent = prs.find((q) => q.repo === repo && q.state === "OPEN" && q.headRefName === p.baseRefName);
+        const parent = prs.find((q) => q.repo === repo && q.state === "OPEN" && !q.isCrossRepository && q.headRefName === p.baseRefName);
         if (parent && !group.includes(parent)) group.push(parent);
       }
     }

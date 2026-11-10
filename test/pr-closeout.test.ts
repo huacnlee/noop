@@ -3,7 +3,7 @@ import { type PR, type Evidence, discover, plan, green, cleanReview, order, enqu
 const sha = "abcdef0123456789abcdef0123456789abcdef01";
 const make = (number = 1, overrides: Partial<PR> = {}): PR => ({
   number, repo: "owner/app", title: `change ${number}`, url: `https://github.com/owner/app/pull/${number}`,
-  state: "OPEN", isDraft: true, headRefName: `agent/pr-${number}`, headRefOid: sha,
+  state: "OPEN", isDraft: true, isCrossRepository: false, headRefName: `agent/pr-${number}`, headRefOid: sha,
   baseRefName: "main", baseRefOid: "1111111111111111111111111111111111111111", defaultBranch: "main", commitCount: 2,
   checks: { state: "SUCCESS", contexts: { pageInfo: { hasNextPage: false }, nodes: [
     { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
@@ -144,4 +144,12 @@ test("English closeout cards and skip reasons follow the fleet language and keep
   } finally {
     if (before) writeFileSync(config, before); else rmSync(config, { force: true });
   }
+});
+
+
+test("a same-name fork head cannot satisfy a stacked PR dependency", () => {
+  const fork = make(1, { isCrossRepository: true, isDraft: false });
+  const child = make(2, { baseRefName: fork.headRefName });
+  expect(order([child, fork])).toBeUndefined();
+  expect(plan([child, fork], ev([child, fork]), []).cards).toHaveLength(0);
 });
