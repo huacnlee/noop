@@ -6,6 +6,7 @@ import type { JSX, ViewStyle } from "nsh";
 import { Text } from "nsh";
 import { MenuItem, MenuSeparator } from "nsh/base";
 import { Icon, type IconName } from "./icons";
+import { PopIn, type PopupSide } from "./popup";
 import { alpha, colors } from "./theme";
 import { corner, duration, fill, font, leading, space, touch } from "./tokens";
 
@@ -18,8 +19,19 @@ export const menuPopup = (): ViewStyle => ({
   borderWidth: 1,
   borderColor: colors.line,
   backgroundColor: colors.surface,
-  boxShadow: "0 10px 30px rgba(0,0,0,0.16), 0 2px 6px rgba(0,0,0,0.06)",
+  boxShadow: "0 4px 14px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.05)",
 });
+
+/**
+ * The popup box a `Menu` / `ContextMenu` gets (`popupStyle`): bare, so the look rides on `MenuPanel` inside it, which
+ * the menu makes on every opening and which so comes in with `popIn` each time.
+ */
+export const menuBox = (): ViewStyle => ({ padding: 0, borderWidth: 0, backgroundColor: "transparent", boxShadow: "none" });
+
+/** A menu's contents on the popup surface, popping in as the menu opens. */
+export function MenuPanel(props: { side?: PopupSide; style?: ViewStyle; children: JSX.Element }) {
+  return <PopIn side={props.side} style={{ ...menuPopup(), ...props.style }}>{props.children}</PopIn>;
+}
 
 /** A row's hover and press: the ghost control's fills. */
 export const menuRowHover = (): ViewStyle => ({ backgroundColor: alpha(colors.text, fill.ghostHover) });

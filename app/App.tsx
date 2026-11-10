@@ -85,7 +85,9 @@ import {
   touch,
   MenuRow,
   MenuSep,
-  menuPopup,
+  MenuPanel,
+  PopIn,
+  menuBox,
   menuRowHover,
   SidebarRow,
 } from "./ui";
@@ -637,7 +639,7 @@ function Media(props: { hub: Hub; path: string }) {
       {/* right-click (long press on touch) copies the image itself */}
       <ContextMenu
         margin={8}
-        popupStyle={menuPopup()}
+        popupStyle={menuBox()}
         trigger={
           <View accessibilityLabel={L("View full size", "查看大图")} onPress={() => zoomed.set(true)} style={{ cursor: "pointer" }}>
             <Image
@@ -649,7 +651,7 @@ function Media(props: { hub: Hub; path: string }) {
           </View>
         }
       >
-        <MenuRow testID="copy-image" icon="copy" label={L("Copy image", "复制图片")} onSelect={() => void copyImage(src)} />
+        <MenuPanel><MenuRow testID="copy-image" icon="copy" label={L("Copy image", "复制图片")} onSelect={() => void copyImage(src)} /></MenuPanel>
       </ContextMenu>
       <Dialog
         open={zoomed()}
@@ -2127,7 +2129,8 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
       align="start"
       offset={6}
       margin={8}
-      popupStyle={surface()}
+      // On a desktop the surface rides on a `PopIn` inside the bare popup, so it comes in with a short pop each opening.
+      popupStyle={touch ? surface() : menuBox()}
       backdropClass="bg-scrim"
       trigger={
         <View
@@ -2143,6 +2146,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
         </View>
       }
     >
+      <PopIn side="top" style={touch ? {} : surface()}>
       <View style={{ ...(touch ? {} : { minWidth: 254 }), flexDirection: "row", alignItems: "center", gap: touch ? 12 : 10, paddingHorizontal: m.padX, paddingTop: touch ? 12 : 6, paddingBottom: touch ? 24 : 7 }}>
         {avatar(m.avatar)}
         <View style={{ flex: 1, minWidth: 0, gap: touch ? 4 : 1 }}>
@@ -2170,7 +2174,9 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
             <Icon name="chevron" size={touch ? 14 : 12} tint={colors.faint} />
           </View>}
           back={<View testID="menu-language-back" activeStyle={hovered()} style={row()}><Icon name="back" size={m.icon} tint={colors.muted} />{label(L("Back", "返回"))}</View>}>
-          <Each of={LANGS}>{(l) => radio(l().label, () => lang() === l().id, () => pickLang(l().id), `menu-lang-${l().id}`)}</Each>
+          <PopIn side="right" style={touch ? {} : surface()}>
+            <Each of={LANGS}>{(l) => radio(l().label, () => lang() === l().id, () => pickLang(l().id), `menu-lang-${l().id}`)}</Each>
+          </PopIn>
         </Submenu>
       </View>
       <View style={touch ? { gap: 8, paddingTop: 16, paddingHorizontal: 4 } : { ...row(), height: 34 }}>
@@ -2181,6 +2187,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
           {appearance(true, L("Dark", "深色"), "moon")}
         </View>
       </View>
+      </PopIn>
     </Menu>
   );
 }
@@ -2312,7 +2319,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
       align="end"
       offset={6}
       margin={8}
-      popupStyle={{ ...menuPopup(), minWidth: 260, maxWidth: 340 }}
+      popupStyle={menuBox()}
       trigger={
         <View
           role="button"
@@ -2327,6 +2334,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
         </View>
       }
     >
+      <MenuPanel style={{ minWidth: 260, maxWidth: 340 }}>
       <Each of={props.options}>
         {(o) => (
           <MenuItem
@@ -2351,6 +2359,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
           </MenuItem>
         )}
       </Each>
+      </MenuPanel>
     </Menu>
   );
 }
