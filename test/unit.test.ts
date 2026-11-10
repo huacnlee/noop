@@ -222,16 +222,22 @@ test("pickTask: a task no machine here can run (needs another OS) never holds ba
   expect(picked).toContain("T-9002");
 });
 
-test("fleetCanMeet: the planner cannot add a requirement no machine of the fleet has", async () => {
+test("fleetCanMeet: the planner cannot add a requirement no single machine meets together with the task's own", async () => {
   const { fleetCanMeet, P } = await import("../src/core");
   const { mkdirSync, rmSync, writeFileSync } = await import("node:fs");
   rmSync(P("fleet", "hosts"), { recursive: true, force: true });
-  expect(fleetCanMeet("os:linux")).toEqual(["os:linux"]); // no machine known yet: nothing to check against
+  expect(fleetCanMeet({}, "os:linux")).toEqual(["os:linux"]); // no machine known yet: nothing to check against
   mkdirSync(P("fleet", "hosts"), { recursive: true });
   const beat = (host: string, caps: string[], seen: string) => writeFileSync(P("fleet", "hosts", `${host}.json`), JSON.stringify({ host, caps, seen, busy: 0, version: "1" }));
   beat("mac", ["os:macos", "host:mac", "cli:claude"], new Date().toISOString());
   beat("win", ["os:windows", "host:win"], "2026-01-01T00:00:00Z"); // offline, but part of the fleet
-  expect(fleetCanMeet("os:linux, cli:claude, os:windows, os:linux|os:macos")).toEqual(["cli:claude", "os:windows", "os:linux|os:macos"]);
+  expect(fleetCanMeet({}, "os:linux, cli:claude, os:linux|os:macos")).toEqual(["cli:claude", "os:linux|os:macos"]);
+  // each exists somewhere, but no one machine has both: the first stays, the one that conflicts with it is dropped
+  expect(fleetCanMeet({}, "os:macos, os:windows")).toEqual(["os:macos"]);
+  // the task's own requirements and pinned host count, and are never weakened
+  expect(fleetCanMeet({ requires: "os:windows" }, "cli:claude, host:win")).toEqual(["host:win"]);
+  expect(fleetCanMeet({ host: "mac" }, "os:windows, cli:claude")).toEqual(["cli:claude"]);
+  expect(fleetCanMeet({ requires: "os:linux" }, "cli:claude")).toEqual([]); // nothing can run it as asked: add nothing
   rmSync(P("fleet", "hosts"), { recursive: true, force: true });
 });
 
