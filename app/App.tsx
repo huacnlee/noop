@@ -2312,14 +2312,14 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
       align="end"
       offset={6}
       margin={8}
-      popupStyle={{ minWidth: 260, maxWidth: 340, padding: 4, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
+      popupStyle={{ ...menuPopup(), minWidth: 260, maxWidth: 340 }}
       trigger={
         <View
           role="button"
           testID={props.testID}
           accessibilityLabel={`${props.label}${L(": ", "：")}${props.value}`}
           hoverStyle={hovered()}
-          style={{ flexDirection: "row", alignItems: "center", gap: 6, height: 34, paddingLeft: 11, paddingRight: 9, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
+          style={{ flexDirection: "row", alignItems: "center", gap: 6, height: 34, paddingLeft: 11, paddingRight: 9, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 1, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
         >
           <Text style={{ fontSize: 13, color: colors.faint }}>{props.label}</Text>
           <Text style={{ fontSize: 14, fontWeight: "500", color: colors.text }}>{props.value}</Text>
@@ -2362,7 +2362,7 @@ function Group(props: { title: string; hint?: string; children: JSX.Element }) {
         <Text style={{ fontSize: 15, fontWeight: "600", color: colors.text }}>{props.title}</Text>
         {props.hint ? <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted }}>{props.hint}</Text> : null}
       </View>
-      <View style={{ borderRadius: radius.card, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), overflow: "hidden" }}>{props.children}</View>
+      <View style={{ borderRadius: radius.card, borderCurve: "continuous", borderWidth: 1, borderColor: surfaceEdge(), overflow: "hidden" }}>{props.children}</View>
     </View>
   );
 }
@@ -2854,7 +2854,7 @@ function Section(props: { title?: string; hint?: string; testID?: string; childr
       <If when={props.title}>
         <Text style={{ paddingHorizontal: 32, fontSize: 13, color: colors.muted }}>{props.title}</Text>
       </If>
-      <View style={{ marginHorizontal: 16, borderRadius: radius.card, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), overflow: "hidden", backgroundColor: colors.surface }}>{props.children}</View>
+      <View style={{ marginHorizontal: 16, borderRadius: radius.card, borderCurve: "continuous", borderWidth: 1, borderColor: surfaceEdge(), overflow: "hidden", backgroundColor: colors.surface }}>{props.children}</View>
       <If when={props.hint}>
         <Text style={{ paddingHorizontal: 32, fontSize: 13, lineHeight: 18, color: colors.faint }}>{props.hint}</Text>
       </If>
@@ -3526,7 +3526,7 @@ function CommandList(props: {
       testID="commands"
       role="menu"
       accessibilityLabel={L("Commands", "指令")}
-      style={{ width: "100%", maxWidth: 380, borderRadius: radius.card, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface, padding: 4, overflow: "hidden" }}
+      style={{ width: "100%", maxWidth: 380, borderRadius: radius.card, borderCurve: "continuous", borderWidth: 1, borderColor: surfaceEdge(), backgroundColor: colors.surface, padding: 4, overflow: "hidden" }}
     >
       <Each of={props.items} key={(c) => c.id}>
         {(c, i) => (

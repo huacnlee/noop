@@ -18,7 +18,7 @@ export const menuPopup = (): ViewStyle => ({
   borderWidth: 1,
   borderColor: colors.line,
   backgroundColor: colors.surface,
-  boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+  boxShadow: "0 10px 30px rgba(0,0,0,0.16), 0 2px 6px rgba(0,0,0,0.06)",
 });
 
 /** A row's hover and press: the ghost control's fills. */
