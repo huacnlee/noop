@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { openDecision } from "./decisions";
-import { type Cfg, P, list, newTask, readDoc, writeDoc, hostName } from "./core";
+import { type Cfg, L, P, list, newTask, readDoc, writeDoc, hostName } from "./core";
 
 export type PR = {
   number: number; title: string; url: string; repo: string; isDraft: boolean; state: string;
@@ -100,21 +100,27 @@ export function plan(prs: PR[], evidence: { [url: string]: Evidence[] }, records
     }
     const ordered = order(group);
     const key = createHash("sha256").update(JSON.stringify(group.map((p) => [p.url, p.headRefOid, p.baseRefName, p.baseRefOid]).sort())).digest("hex");
-    let reason = !ordered ? "依赖缺失或循环" : group.some((p) => !green(p)) ? "CI 缺失、未完成或未全部成功" : "";
+    let reason = !ordered ? L("Missing or cyclic dependencies", "依赖缺失或循环") : group.some((p) => !green(p)) ? L("CI is missing, incomplete or not all successful", "CI 缺失、未完成或未全部成功") : "";
     const reviews = new Map(group.map((p) => [p.url, cleanReview(p, evidence[p.url] ?? [])]));
-    if (!reason && group.some((p) => !reviews.get(p.url))) reason = "缺少当前 HEAD 的完整 clean 二次 review";
+    if (!reason && group.some((p) => !reviews.get(p.url))) reason = L("Missing a clean full-PR cross-model review at the current HEAD", "缺少当前 HEAD 的完整 clean 二次 review");
     const busy = records.some((r) => r.meta.closeout_key === key ||
       (r.meta.closeout_active === "yes" && (r.meta.closeout_repo === repo ||
         (/(合并|merge|发版|发布|release|收尾)/i.test(r.meta.title ?? "") && (group.some((p) => hasURL(r.body, p.url)) || (r.meta.title ?? "").includes(repo.split("/")[1]))))));
-    if (!reason && busy) reason = "已有同仓库收尾任务或本批次已处理/暂缓";
+    if (!reason && busy) reason = L("This repository has pending closeout work or this snapshot was already handled/deferred", "已有同仓库收尾任务或本批次已处理/暂缓");
     if (reason) { skipped.push({ repo, reason }); continue; }
     const approved = ordered!.map((p) => ({ ...p, review: reviews.get(p.url)! }));
-    const summary = `${repo}：按顺序合并 ${approved.map((p) => `${p.url}（${p.title}；HEAD ${p.headRefOid.slice(0, 12)}）`).join(" → ")}，连同必要的纯版本 PR 发布一个 GPG 签名的 patch 版本，等待 Actions 并验收产物。CI 均成功，当前 HEAD 的二次 review 无剩余问题；基础分支调整后会重新验证。`;
-    const result = { status: "needs_decision", summary, question: `${repo.split("/")[1].slice(0, 20)} 合并并发 patch？`,
-      options: ["A: 合并并发 patch — 批准上述 PR、必要的纯版本 PR 和一次 patch 发布，完成 CI 与产物验收", "B: 暂缓 — 本批次不合并、不发版；HEAD 或依赖变更后可重新提议"], recommendation: "A",
+    const sequence = approved.map((p) => `${p.url} (${p.title}; HEAD ${p.headRefOid.slice(0, 12)})`).join(" → ");
+    const summary = L(
+      `${repo}: merge in order ${sequence}, including any necessary version-only PR, and publish one GPG-signed patch release; wait for Actions and verify artifacts. CI passed and cross-model reviews are clean at the current heads; revalidate after base changes.`,
+      `${repo}：按顺序合并 ${sequence}，连同必要的纯版本 PR 发布一个 GPG 签名的 patch 版本，等待 Actions 并验收产物。CI 均成功，当前 HEAD 的二次 review 无剩余问题；基础分支调整后会重新验证。`);
+    const name = repo.split("/")[1].slice(0, 20);
+    const result = { status: "needs_decision", summary, question: L(`${name}: merge and patch?`, `${name} 合并并发 patch？`),
+      options: [L("A: Merge and patch — approve the listed PRs, necessary version-only PR and one patch release, then verify CI and artifacts", "A: 合并并发 patch — 批准上述 PR、必要的纯版本 PR 和一次 patch 发布，完成 CI 与产物验收"),
+        L("B: Defer — no merge or release for this snapshot; propose again only after heads or dependencies change", "B: 暂缓 — 本批次不合并、不发版；HEAD 或依赖变更后可重新提议")], recommendation: "A",
       attachments: [...new Set(approved.map((p) => p.review))] };
     const body = `PR closeout decision task. Read policies/pr-closeout.md and memory/release-cadence.md.\n\n` +
-      `Before an explicit OWNER answer approving option A for this exact snapshot: return the following result unchanged. Do not mark ready, retarget, merge, tag, push or release. Judge/precedent/ignore is not approval.\n\n` +
+      `If a resumed task records owner option B or an ignored/skipped decision: return done with no action (not approved); never return needs_decision or repeat this snapshot. This takes priority over the initial result below.\n\n` +
+      `Otherwise, before an explicit OWNER answer approving option A for this exact snapshot: return the following result unchanged. Do not mark ready, retarget, merge, tag, push or release. Judge/precedent/ignore is not approval.\n\n` +
       '```json\n' + JSON.stringify(result, null, 2) + '\n```\n\n' +
       `After approval: revalidate every head SHA, CI, review, base and dependency against the snapshot below. New heads or changed scope require a fresh owner card, never extend this approval. Follow policies/pr-closeout.md end to end; B/ignore means no mutations.\n\n` +
       '```json\n' + JSON.stringify({ repo, key, prs: approved }, null, 2) + '\n```\n';
@@ -151,7 +157,7 @@ export function enqueueCards(cards: Card[], cfg: Cfg) {
   if (!routine || routine.enabled === false || routine.readonly !== true) throw new Error("enable the readonly pr-closeout routine before enqueueing");
   if (!existsSync(P("policies", "pr-closeout.md"))) throw new Error("install policies/pr-closeout.md before enqueueing");
   return cards.map((c) => {
-    const id = newTask(`${c.repo}：合并并发 patch`, c.body, {
+    const id = newTask(L(`${c.repo}: merge and patch`, `${c.repo}：合并并发 patch`), c.body, {
       agent: "lead", source: "pr-closeout-card", requires: routine.requires,
       extra: { closeout_repo: c.repo, closeout_key: c.key },
     });

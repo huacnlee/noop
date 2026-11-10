@@ -22,6 +22,7 @@ test("one card per repo, parents first, ready parent included, owner approval re
   expect(cards[0].result.status).toBe("needs_decision");
   expect(cards[0].result.question).toContain("合并");
   expect(cards[0].body).toContain("explicit OWNER");
+  expect(cards[0].body).toContain("owner option B or an ignored/skipped decision: return done");
 });
 
 test("CI fails closed for absent, pending, failed, skipped, neutral, cancelled and truncated checks", () => {
@@ -100,9 +101,36 @@ test("enqueue creates native owner cards and blocked tasks; rejecting/ignoring c
   expect(existsSync(P("tasks", "blocked", `${pair.task}.md`))).toBe(true);
   expect(readDoc(P("tasks", "blocked", `${pair.task}.md`)).meta.gate_override).toBeUndefined();
   ignoreDecision(pair.decision, "owner(chat)");
-  expect(readDoc(P("tasks", "inbox", `${pair.task}.md`)).meta.gate_override).toBeUndefined();
+  expect(existsSync(P("tasks", "inbox", `${pair.task}.md`))).toBe(false);
+  const finished = readDoc(P("tasks", "done", `${pair.task}.md`));
+  expect(finished.meta.gate_override).toBeUndefined();
+  expect(finished.meta.finished).toBeDefined();
+  expect(finished.meta.closeout_key).toBe(c.key);
+  expect(plan([p], ev([p]), [{ ...finished, meta: { ...finished.meta, closeout_active: "no" } }]).cards).toHaveLength(0);
   // Cleanup only this test's own artifacts; core's test data is shared across files.
-  unlinkSync(P("tasks", "inbox", `${pair.task}.md`));
+  unlinkSync(P("tasks", "done", `${pair.task}.md`));
   unlinkSync(P("decisions", "closed", `${pair.decision}.md`));
   unlinkSync(P("policies", "pr-closeout.md"));
+});
+
+
+test("English closeout cards and skip reasons follow the fleet language and keep the merge guard", () => {
+  const { P } = require("../src/core");
+  const { existsSync, readFileSync, writeFileSync, rmSync } = require("node:fs");
+  const config = P("config.local.toml");
+  const before = existsSync(config) ? readFileSync(config) : undefined;
+  try {
+    writeFileSync(config, '[owner]\nlanguage = "en"\n');
+    const p = make();
+    const card = plan([p], ev([p]), []).cards[0];
+    expect(card.result.summary).toContain("merge in order");
+    expect(card.result.question).toContain("merge");
+    expect(card.result.options[0]).toContain("Merge and patch");
+    expect(card.result.options[1]).toContain("Defer");
+    expect(plan([make(1, { checks: null })], {}, []).skipped[0].reason).toContain("CI is missing");
+    const { isMergeCard } = require("../src/waits");
+    expect(isMergeCard({ question: card.result.question })).toBe(true);
+  } finally {
+    if (before) writeFileSync(config, before); else rmSync(config, { force: true });
+  }
 });

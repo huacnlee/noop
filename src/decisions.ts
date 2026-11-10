@@ -130,6 +130,14 @@ export function ignoreDecision(id: string, by: string): boolean {
   const t = P("tasks", "blocked", `${task}.md`);
   if (existsSync(t)) {
     const { meta: tm, body: tb } = readDoc(t);
+    // Closeout discovery already finished its read-only work. Skipping ends this snapshot without another model call.
+    if (tm.source === "pr-closeout-card") {
+      writeDoc(P("tasks", "done", `${task}.md`),
+        { ...tm, claimed_by: undefined, status: undefined, gate_override: undefined, resumes: id, finished: now() },
+        `${tb}\n\n## Decision ${id} (${by})\nOwner skipped this closeout snapshot. No merge or release approved; do not ask again.\n`);
+      unlinkSync(t);
+      continue;
+    }
     // no gate_override: skipping a card never authorises a gated action (merge, release, external message)
     writeDoc(P("tasks", "inbox", `${task}.md`), { ...tm, claimed_by: undefined, status: undefined, resumes: id },
       `${tb}\n\n## Decision ${id} (${by})\nQ: ${meta.question}\nA: **${IGNORE}** — the owner skipped this card without choosing; it is NOT a rejection and NOT a reason to stop. ` +
