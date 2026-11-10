@@ -2,10 +2,8 @@
 // Design: the NSH gallery's (~/work/nsh/examples/gallery): its theme tokens (theme.json is the
 // gallery's), its shared UI layer (nsh-gallery-ui: palette, icons, tooltips, scroll bars), its
 // sidebar + toolbar layout; sized up for reading a chat all day (16 pt text, 40 pt controls).
-import { L, lang, LANG_KEY, LANGS } from "./i18n";
+import { L, lang, LANGS } from "./i18n";
 
-/** A sender's name in the current language (agents localized, others without the @host). */
-const displayName = (from: string): string => agentDisplayName(from, lang() === "zh");
 import {
   cleanup,
   createAnimatedValue,
@@ -38,27 +36,28 @@ import {
   windowSize, token, openUrl, keyboardFrame, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
-import { AlertDialog, Toast, ToastStack, Button, ContextMenu, Dialog, Menu, MenuItem, MenuSeparator, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
+import { Toast, ToastStack, Button, ContextMenu, Menu, MenuItem, MenuSeparator, Submenu, Input, NavPage, NavStack, Scrollbar, createNavStack } from "nsh/base";
 import { isAvailable as hasWindow, titleBar, currentWindow } from "nsh/desktop";
 import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, installAndRestart, restartToPackage, runningPackage } from "nsh/updater";
-// shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
-import * as nshUpdater from "nsh/updater";
-import { CLIENT_VERSION } from "./version";
 import { ComposerEmoji, hasEmojiPicker } from "./composer-emoji";
-import { createSettingsToast, SettingsToast } from "./settings-toast";
-import { agentDisplayName, avatarOf } from "./avatars";
+import { SettingsToast } from "./settings-toast";
+import { Avatar, Btn, displayName, Dot, Field, Kbd, linkColor, MONO, pickLang, size, STATE_OF, surfaceEdge, systemHeader, ToolButton, touch } from "./kit";
+import { createHub, type Hub, hostCall, ipBlocked, KEYS, loadConfig, type Boot, type Config } from "./connection";
+import { bindMarkdown, chipText, firstLine, reposIn, Rich } from "./markdown";
+import { clearDocCache, type DocRef, reading, readerAt } from "./docs";
+import { clearNotification, closeNotification, createPush, setBadge, showing, systemNotifications } from "./push";
+import { createSettings } from "./settings-state";
+import { latch, lazyComponent, lazyModule, lazyOverlay, PageLoading } from "./lazy";
 import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc } from "./files";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
 import { setupTray, type TrayChat } from "./tray";
 import { createTimelineWindow } from "./timeline";
-import { CHECK_EVERY_MS, createUpdates, shellLine, type ShellInfo, type UpdateState } from "./update";
+import { CHECK_EVERY_MS, createUpdates, type UpdateState } from "./update";
 import {
   alpha,
   colors,
-  Toggle,
-  focusRing,
   hovered,
   Icon,
   type IconName,
@@ -75,10 +74,8 @@ import {
   choiceLabel,
   choicesOf,
   dayLabel,
-  dayKey,
   greeting,
   type HubEvent,
-  initials,
   isAsk,
   isHub,
   isVideo,
@@ -93,284 +90,43 @@ import {
   filePath,
   imageType,
   rows,
-  type Status,
   TAGS,
   timeOf,
   waiting,
-  wsUrl,
-  autonomyLabel,
-  cliKey,
-  cliLabel,
-  intervalsWith,
   activityLine,
-  everyLabel,
-  patches,
-  MEDIA_DAYS,
-  mediaDaysOf,
-  type SettingsView,
-  NOTIFY_KINDS,
-  type NotifyKind,
-  type NotifyPrefs,
-  notifyPrefsOf,
-  notifyPatch,
-  QUIET_PRESETS,
-  quietKey,
   type Row,
-  type DataFile,
-  type RuleGroup,
-  RULE_PREFIXES,
-  groupRules,
-  stripFrontMatter,
   type HostInfo,
-  type Command,
   type CommandItem,
   commandItems,
-  savedCommands,
-  BUILTIN_COMMANDS,
   slashQuery,
   needsLabel,
-  updateLine,
-  updateSummary,
-  type UpdateLine,
   isQueued,
   taskConversation,
   type TaskInfo,
 } from "./hub";
 import { notificationFor, type NotifyRules } from "./notify";
+// Interfaces opened now and then, loaded the first time they show (lazy.tsx): chunks of their own on the web.
+const settingsPages = lazyModule(() => import("./settings-pages"));
+const TeamSettings = lazyComponent(settingsPages, (m) => m.TeamSettings, PageLoading);
+const PhoneSettings = lazyComponent(settingsPages, (m) => m.PhoneSettings, PageLoading);
+const PhoneNotify = lazyComponent(settingsPages, (m) => m.PhoneNotify, PageLoading);
+const PhoneMember = lazyComponent(settingsPages, (m) => m.PhoneMember, PageLoading);
+const PhoneRoutine = lazyComponent(settingsPages, (m) => m.PhoneRoutine, PageLoading);
+const RulesList = lazyComponent(settingsPages, (m) => m.RulesList, PageLoading);
+const RuleDoc = lazyComponent(settingsPages, (m) => m.RuleDoc, PageLoading);
+const DocPane = lazyComponent(lazyModule(() => import("./doc-reader")), (m) => m.DocPane, (s) => (
+  <View style={{ flex: 1, backgroundColor: colors.background }}>
+    <PageLoading failed={s.failed} retry={s.retry} onClose={s.props.onClose} />
+  </View>
+));
+const LazyImagePreview = lazyOverlay(lazyModule(() => import("./image-preview")), (m) => m.ImagePreview, () => L("Couldn’t open the image", "大图打开失败"));
+const HelpSheet = lazyOverlay(lazyModule(() => import("./help-sheet")), (m) => m.HelpSheet, () => L("Couldn’t open the keyboard shortcuts", "快捷键一览打开失败"));
+const confirms = lazyModule(() => import("./confirms"));
+const confirmEndTask = async (id: string, done: boolean, running: boolean) => (await confirms.load()).confirmEndTask(id, done, running);
+const updateAllMachines = async (hub: Hub) => (await confirms.load()).updateAllMachines(hub);
+
 // Email sign-in code length (cloud/src/index.ts CODE_LEN): letters and digits, case-insensitive.
 const CODE_LEN = 8;
-
-type Config = { url: string; token: string };
-/** `token` holds the login session (sent as `Bearer`, and `?token=` on the WebSocket and media URLs). */
-const KEYS = { url: "hub.url", token: "hub.token", email: "hub.email", theme: "hub.theme", seen: "hub.lastSeen", notifyOff: "hub.notifyOff", draft: "hub.draft" };
-const touch = !(platform.idiom === "desktop" || platform.idiom === "mac");
-/** iOS and Android draw the pages' headers (title, back, swipe back); the desktops and the web show the app's. */
-const systemHeader = platform.os === "ios" || platform.os === "android";
-const MONO = "monospace";
-
-/** Sizes: the gallery's proportions, a step larger (the owner reads this all day). */
-const size = {
-  text: 17,
-  line: 26,
-  small: 15,
-  tiny: 13,
-  control: touch ? 44 : 38,
-  row: touch ? 44 : 34,
-  bar: touch ? 56 : 52,
-  sidebar: 288,
-  column: 880,
-};
-
-// ---------------------------------------------------------------- settings & connection
-
-type Page = { origin?: string; theme?: string | null; ref?: string | null };
-
-/** A function of the page's host (host.js on the web: push, badge, ...); null where there is none or it failed. */
-async function hostCall<T>(name: string, args?: Record<string, unknown>): Promise<T | null> {
-  try {
-    if (!host.available()) return null;
-    return ((await host.call(name, args ?? {})) ?? null) as T | null;
-  } catch {
-    return null;
-  }
-}
-
-/** Where the app was served from on the web (nsh.json `web.host`); nothing elsewhere. */
-async function pageInfo(): Promise<Page> {
-  try {
-    if (!host.available()) return {};
-    return ((await host.call("page")) ?? {}) as Page;
-  } catch {
-    return {};
-  }
-}
-
-type Boot = { config: Config | null; suggested: string; served: boolean; email: string; ref: string | null };
-
-async function loadConfig(): Promise<Boot> {
-  const page = await pageInfo();
-  if (page.theme === "light" || page.theme === "dark") setColorScheme(page.theme);
-  else {
-    const saved = await Storage.getItem(KEYS.theme);
-    if (saved === "light" || saved === "dark") setColorScheme(saved);
-  }
-  const saved = await Storage.getItem(LANG_KEY);
-  if (saved === "en" || saved === "zh") lang.set(saved);
-  let url = (await Storage.getItem(KEYS.url)) ?? "";
-  const token = (await Storage.getItem(KEYS.token)) ?? "";
-  if (!url && page.origin) url = page.origin;
-  const suggested = url || page.origin || "";
-  const email = (await Storage.getItem(KEYS.email)) ?? "";
-  return { config: url && token ? { url: normalizeUrl(url), token } : null, suggested, served: !!page.origin, email, ref: page.ref ?? null };
-}
-
-type Conn = "connecting" | "live" | "offline" | "unauthorized" | "blocked";
-/** The Worker's IP allow-list (HUB_ALLOW_IPS) turned this device away; `ip` is its address as the Worker saw it. */
-const ipBlocked = (status: number, data: unknown): string | null =>
-  status === 403 && (data as { error?: unknown })?.error === "ip_blocked" ? String((data as { ip?: unknown }).ip ?? "?") : null;
-
-/** Failed reconnects in a row before the owner hears about it; anything shorter recovers silently. */
-const OFFLINE_AFTER = 5;
-
-function createHub(cfg: Config) {
-  const events = signal<HubEvent[]>([]);
-  const status = signal<Status | null>(null);
-  const conn = signal<Conn>("connecting");
-  const blockedIp = signal("");
-  const loaded = signal(false);
-  const headers = { Authorization: `Bearer ${cfg.token}`, "Content-Type": "application/json" };
-  let disposed = false;
-  let socket: WebSocket | null = null;
-  let retry: ReturnType<typeof setTimeout> | undefined;
-  let failures = 0;
-
-  const last = () => {
-    const evs = untracked(events);
-    return evs.length ? evs[evs.length - 1].ts : "";
-  };
-
-  async function loadFeed() {
-    const since = last();
-    try {
-      const r = await fetch(`${cfg.url}/api/feed${since ? `?since=${encodeURIComponent(since)}` : ""}`, { headers });
-      if (r.status === 401) return conn.set("unauthorized");
-      const body = (await r.json()) as { events: HubEvent[] };
-      const ip = ipBlocked(r.status, body);
-      if (ip) { blockedIp.set(ip); return conn.set("blocked"); } // retried with the socket: the device may change networks
-      if (untracked(conn) === "blocked") conn.set("connecting");
-      events.update((evs) => merge(evs, body.events));
-    } catch {
-      /* the socket's retries decide when this counts as offline */
-    } finally {
-      loaded.set(true);
-    }
-  }
-
-  async function loadStatus() {
-    try {
-      const r = await fetch(`${cfg.url}/api/status`, { headers });
-      if (r.ok) status.set((await r.json()) as Status);
-    } catch {
-      /* the feed reports the connection */
-    }
-  }
-
-  function stream() {
-    if (disposed || untracked(conn) === "unauthorized") return;
-    const ws = new WebSocket(wsUrl(cfg.url, cfg.token));
-    socket = ws;
-    ws.onopen = () => {
-      failures = 0;
-      conn.set("live");
-      loadStatus(); // whatever changed while disconnected; from here on the hub pushes it
-    };
-    ws.onmessage = (m: { data: unknown }) => {
-      try {
-        const d = JSON.parse(String(m.data)) as HubEvent & { $status?: Status };
-        if (d.$status) status.set(d.$status);
-        else events.update((evs) => merge(evs, [d]));
-      } catch {
-        /* not JSON */
-      }
-    };
-    ws.onclose = () => {
-      if (disposed) return;
-      if (++failures >= OFFLINE_AFTER && untracked(conn) !== "unauthorized" && untracked(conn) !== "blocked") conn.set("offline");
-      retry = setTimeout(async () => {
-        await loadFeed();
-        stream();
-      }, 3000);
-    };
-  }
-
-  /** Uploads one image the owner attaches; resolves with its media path ("/media/…"). */
-  async function upload(a: Attachment): Promise<string> {
-    const fd = new FormData();
-    fd.append("file", a.file, a.name);
-    const r = await fetch(`${cfg.url}/api/uploads`, { method: "POST", headers: { Authorization: headers.Authorization }, body: fd });
-    if (r.status === 401) conn.set("unauthorized");
-    if (!r.ok) throw new Error(L(`Image upload failed (${r.status})`, `图片上传失败（${r.status}）`));
-    return ((await r.json()) as { url: string }).url;
-  }
-
-  async function send(text: string, replyTo: string | null, files: Attachment[] = [], thread = false, clientId?: string, channel?: string) {
-    const attachments: string[] = [];
-    for (const f of files) attachments.push(await upload(f));
-    const r = await fetch(`${cfg.url}/api/messages`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ text, ...(clientId ? { client_id: clientId } : {}), ...(replyTo ? { reply_to: replyTo } : {}), ...(attachments.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) }),
-    });
-    if (r.status === 401) conn.set("unauthorized");
-    if (!r.ok) throw new Error(L(`Send failed (${r.status})`, `发送失败（${r.status}）`));
-    const ev = (await r.json()) as HubEvent;
-    if (ev?.id) events.update((evs) => merge(evs, [ev]));
-    return ev?.id;
-  }
-
-  async function settings(patch?: Record<string, unknown>): Promise<SettingsView> {
-    const r = await fetch(`${cfg.url}/api/settings`, patch ? { method: "PUT", headers, body: JSON.stringify(patch) } : { headers });
-    if (r.status === 401) conn.set("unauthorized");
-    if (!r.ok) throw new Error(L(`Couldn’t ${patch ? "save" : "load"} settings (${r.status})`, `设置${patch ? "保存" : "读取"}失败（${r.status}）`));
-    return (await r.json()) as SettingsView;
-  }
-
-  /** A JSON call of the hub's API: never throws (status 0 when unreachable); a 401 ends the session. */
-  async function api(method: string, path: string, body?: unknown): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
-    try {
-      const r = await fetch(`${cfg.url}${path}`, method === "GET" ? { headers } : { method, headers, body: JSON.stringify(body ?? {}) });
-      if (r.status === 401) conn.set("unauthorized");
-      let data: Record<string, unknown> = {};
-      try {
-        data = ((await r.json()) ?? {}) as Record<string, unknown>;
-      } catch {
-        /* no body */
-      }
-      return { ok: r.ok, status: r.status, data };
-    } catch {
-      return { ok: false, status: 0, data: {} };
-    }
-  }
-
-  async function logout() {
-    try {
-      await fetch(`${cfg.url}/api/auth/logout`, { method: "POST", headers });
-    } catch {
-      /* forgotten locally either way */
-    }
-  }
-
-  loadFeed().then(stream);
-  loadStatus();
-  // the socket pushes the dashboard; only without it does the app poll, and slowly (Cloudflare free plan)
-  const timer = setInterval(() => untracked(conn) !== "live" && loadStatus(), 120_000);
-  const dispose = () => {
-    disposed = true;
-    clearInterval(timer);
-    clearTimeout(retry);
-    socket?.close();
-  };
-  return { events, status, conn, blockedIp, loaded, send, settings, api, logout, dispose, cfg };
-}
-type Hub = ReturnType<typeof createHub>;
-
-function pickLang(id: string) {
-  if (id !== "en" && id !== "zh") return;
-  lang.set(id);
-  Storage.setItem(LANG_KEY, id);
-}
-
-/** English or Chinese; the app speaks English until the owner picks. */
-function LangChoices() {
-  return (
-    <Choices
-      label={L("Language", "语言")}
-      choices={LANGS.map((l) => ({ id: l.id, label: l.label, testID: `lang-${l.id}` }))}
-      selected={lang()}
-      onPick={pickLang}
-    />
-  );
-}
 
 function toggleTheme() {
   const next = colorScheme() === "dark" ? "light" : "dark";
@@ -378,132 +134,7 @@ function toggleTheme() {
   Storage.setItem(KEYS.theme, next);
 }
 
-// ---------------------------------------------------------------- small pieces (the gallery's idioms)
-
-/** A key as a small badge: `1`, `Enter`, `⌘K`. */
-function Kbd(props: { k: string; on?: string }) {
-  return (
-    <View
-      style={{
-        minWidth: 22,
-        height: 22,
-        paddingHorizontal: 6,
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: 5,
-        borderWidth: 1,
-        borderColor: props.on ? alpha(props.on, 0.35) : colors.border,
-        backgroundColor: props.on ? "transparent" : colors.raised,
-      }}
-    >
-      <Text style={{ fontSize: 12.5, fontWeight: "500", color: props.on ?? colors.muted, fontVariant: ["tabular-nums"] }}>{props.k}</Text>
-    </View>
-  );
-}
-
-/** A quiet icon button of the toolbars and the sidebar (the gallery's ToolButton, at 36 pt). */
-function ToolButton(props: { icon: IconName; label: string; shortcut?: string; on?: boolean; onPress: () => void; testID?: string; noTooltip?: boolean; compact?: boolean }) {
-  return (
-    <View
-      onPress={props.onPress}
-      role="button"
-      testID={props.testID}
-      accessibilityLabel={props.label}
-      accessibilityState={props.on === undefined ? undefined : { selected: props.on }}
-      tooltip={props.noTooltip ? undefined : <Tip label={props.label} shortcut={props.shortcut} />}
-      hoverStyle={hovered()}
-      activeStyle={{ backgroundColor: alpha(colors.text, 0.09) }}
-      focusStyle={focusRing()}
-      style={{ width: touch ? 44 : 32, height: touch ? 44 : 32, alignItems: "center", justifyContent: "center", borderRadius: radius.control, borderCurve: "continuous", borderWidth: 1, borderColor: "transparent" }}
-    >
-      <Icon name={props.icon} size={18} tint={props.on ? colors.accent : colors.muted} />
-    </View>
-  );
-}
-
-type BtnKind = "primary" | "secondary" | "ghost" | "dashed" | "danger";
-
-/** Shared edge for controls and grouped settings surfaces. */
-const surfaceEdge = () => colors.line;
-
-/** A labelled button: the gallery's raised / accent-filled look, 38 pt (44 on touch). */
-function Btn(props: {
-  label: string;
-  kind?: BtnKind;
-  icon?: IconName;
-  kbd?: string;
-  note?: string;
-  busy?: boolean;
-  disabled?: boolean;
-  /** the option the owner picked: a check and an accent edge, not dimmed */
-  checked?: boolean;
-  onPress: () => void;
-  testID?: string;
-  accessibilityLabel?: string;
-  grow?: boolean;
-}) {
-  const kind = () => props.kind ?? "secondary";
-  const fg = () => (kind() === "primary" ? colors.onAccent : kind() === "danger" ? colors.danger : kind() === "dashed" || kind() === "ghost" ? colors.muted : colors.text);
-  const look = (): ViewStyle =>
-    kind() === "primary"
-      ? { backgroundColor: colors.accentFill, borderColor: "transparent" }
-      : kind() === "danger"
-        ? { backgroundColor: tints.danger, borderColor: alpha(colors.danger, 0.3) }
-        : kind() === "ghost"
-          ? { backgroundColor: "transparent", borderColor: "transparent" }
-          : kind() === "dashed"
-            ? { backgroundColor: "transparent", borderColor: colors.fieldBorder, borderStyle: "dashed" }
-            : { backgroundColor: colors.surface, borderColor: surfaceEdge() };
-  return (
-    <View
-      role="button"
-      testID={props.testID}
-      accessibilityLabel={props.accessibilityLabel}
-      accessibilityState={{ disabled: !!props.disabled, ...(props.checked ? { checked: true } : {}) }}
-      onPress={() => !props.disabled && !props.busy && props.onPress()}
-      hoverStyle={props.disabled ? undefined : kind() === "primary" ? { opacity: 0.92 } : hovered()}
-      activeStyle={props.disabled ? undefined : kind() === "primary" ? { opacity: 0.85 } : { backgroundColor: alpha(colors.text, 0.09) }}
-      focusStyle={focusRing()}
-      style={{
-        minHeight: size.control,
-        maxWidth: "100%",
-        flexShrink: 1,
-        flexGrow: props.grow ? 1 : 0,
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 8,
-        paddingHorizontal: 14,
-        paddingVertical: 6,
-        borderRadius: radius.control,
-        borderCurve: "continuous",
-        borderWidth: props.checked ? 1.5 : 0.5,
-        opacity: props.disabled && !props.checked ? 0.45 : 1,
-        transitionProperty: "background-color, border-color, opacity",
-        transitionDuration: 120,
-        ...look(),
-        ...(props.checked ? { backgroundColor: tints.accent, borderColor: colors.accentFill, cursor: "default" } : props.disabled ? { cursor: "default" } : {}),
-      }}
-    >
-      <If when={props.checked}>
-        <Icon name="check" size={16} tint={colors.accentFill} />
-      </If>
-      <If when={props.kbd}>
-        <Kbd k={props.kbd!} on={kind() === "primary" ? colors.onAccent : undefined} />
-      </If>
-      <If when={props.busy}>
-        <Spinner size={14} tint={fg()} />
-      </If>
-      <If when={!props.busy && props.icon}>
-        <Icon name={props.icon!} size={16} tint={fg()} />
-      </If>
-      <Text style={{ flexShrink: 1, textAlign: "center", fontSize: 15, lineHeight: 21, fontWeight: kind() === "primary" ? "600" : "500", color: fg() }}>{props.label}</Text>
-      <If when={props.note}>
-        <Text style={{ fontSize: size.tiny, color: kind() === "primary" ? alpha(colors.onAccent, 0.7) : colors.faint }}>{props.note}</Text>
-      </If>
-    </View>
-  );
-}
+// ---------------------------------------------------------------- small pieces (the gallery's idioms; shared ones in kit.tsx)
 
 /**
  * A floating surface, for the composer and the sidebar: Apple's Liquid Glass where it is drawn (iOS 26, macOS 26), a
@@ -532,8 +163,6 @@ const composerGlass = (active = false): ViewStyle => ({
   transitionDuration: 120,
 });
 
-/** Links use a quiet, underlined accent shared by the app's themes. */
-const linkColor = () => token("link");
 
 /** The icon-only send button of a message composer: a circle, the same size and icon scale as the voice button beside it. */
 function SendButton(props: { disabled: boolean; onPress: () => void; testID: string }) {
@@ -561,10 +190,6 @@ function SendButton(props: { disabled: boolean; onPress: () => void; testID: str
   );
 }
 
-function Dot(props: { tone: "on" | "run" | "queue" | "wait" | "off" | "bad" }) {
-  const color = () => ({ on: colors.up, run: colors.up, queue: colors.info, wait: colors.warn, off: colors.faint, bad: colors.danger })[props.tone];
-  return <View style={{ width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: color() }} />;
-}
 
 /** A tag in the gallery's Badge style: a tone's tint behind its color. */
 function Badge(props: { label: string; tone?: "accent" | "warn" | "info" | "neutral" | "danger" }) {
@@ -588,201 +213,6 @@ function Mark(props: { size?: number }) {
   );
 }
 
-/** Opens a task's page from a T-0000 in any text (set by the channel). */
-let taskLink: (id: string) => void = () => {};
-
-/** A task's state from the hub's status (set by the channel), for the chips' dots. */
-let taskState: (id: string) => string | undefined = () => undefined;
-
-/** The app's syntax in messages (`extensions`, `pattern`): task ids and decision / proposal ids, shown by `renderCustom`. */
-const EXTENSIONS: MarkdownExtension[] = [
-  // ids minted on a non-primary host carry its letter (T-M0001, D-H0002)
-  { name: "task", pattern: "\\bT-[A-Z]?\\d{4}\\b" },
-  { name: "item", pattern: "\\b[DP]-[A-Z]?\\d{4}\\b" },
-];
-const GH = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)\/?$/;
-
-/** A bare GitHub PR or issue link reads as "nsh#747": still a plain link, not a chip (GFM autolinks bare URLs). */
-function ghInlines(inlines: TextViewInline[]): TextViewInline[] {
-  return inlines.map((i): TextViewInline => {
-    if (i.type === "link") {
-      const m = i.url.match(GH);
-      const bare = i.content.length === 1 && i.content[0].type === "text" && i.content[0].text.replace(/\/$/, "") === i.url.replace(/\/$/, "");
-      return m && bare ? { ...i, content: [{ type: "text", text: `${m[2]}#${m[4]}` }] } : i;
-    }
-    return "content" in i && Array.isArray(i.content) ? ({ ...i, content: ghInlines(i.content) } as TextViewInline) : i;
-  });
-}
-/** A link's target, so ".../pull/12" and ".../issues/12" (what "nsh #12" links to) count as the same one. */
-const linkKey = (url: string) => { const m = url.match(GH); return m ? `${m[1]}/${m[2]}#${m[4]}`.toLowerCase() : url.replace(/\/$/, ""); };
-const inlineText = (i: TextViewInline): string => ("text" in i && typeof i.text === "string" ? i.text : "content" in i && Array.isArray(i.content) ? i.content.map(inlineText).join("") : "");
-/**
- * A paragraph gives each link once: a later link to the same target is dropped when it is only the bare URL
- * ("NSH #1394 https://github.com/longbridge/nsh/pull/1394"), and otherwise keeps its words as plain text.
- */
-function onceInlines(inlines: TextViewInline[], seen = new Set<string>()): TextViewInline[] {
-  const out: TextViewInline[] = [];
-  for (const i of inlines) {
-    if (i.type === "link") {
-      const key = linkKey(i.url);
-      if (!seen.has(key)) { seen.add(key); out.push(i); continue; }
-      const words = inlineText(i);
-      if (words.replace(/\/$/, "") === i.url.replace(/\/$/, "")) {
-        // drop the repeat with the space that joined it
-        const prev = out[out.length - 1];
-        if (prev?.type === "text") out[out.length - 1] = { ...prev, text: prev.text.replace(/[ \t]+$/, "") };
-        continue;
-      }
-      out.push(...i.content);
-      continue;
-    }
-    out.push("content" in i && Array.isArray(i.content) ? ({ ...i, content: onceInlines(i.content, seen) } as TextViewInline) : i);
-  }
-  return out;
-}
-function ghBlocks(blocks: TextViewBlock[]): TextViewBlock[] {
-  return blocks.map((b): TextViewBlock => {
-    const x = { ...b } as Record<string, unknown>;
-    if (Array.isArray(x.content)) x.content = ghInlines(onceInlines(x.content as TextViewInline[]));
-    if (Array.isArray(x.children)) x.children = ghBlocks(x.children as TextViewBlock[]);
-    if (Array.isArray(x.items)) x.items = (x.items as { children: TextViewBlock[] }[]).map((it) => ({ ...it, children: ghBlocks(it.children) }));
-    return x as TextViewBlock;
-  });
-}
-
-/** Repositories the channel has linked so far, by name ("nsh" → "longbridge/nsh"; set by the channel). */
-let knownRepos: () => Map<string, string> = () => new Map();
-
-/** Every repository a GitHub link in `text` names, by lower-cased name. */
-function reposIn(text: string, into = new Map<string, string>()): Map<string, string> {
-  for (const m of text.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/\d+/g)) into.set(m[2].toLowerCase(), `${m[1]}/${m[2]}`);
-  return into;
-}
-
-const REF = /(^|[^\w\/\[#&])(?:([A-Za-z][\w.-]*)( ?))?#(\d+)\b/g;
-/** A word before "#N" naming a repository, not what the ref is: "docs#3", "video-tool #2" (not "PR #3", "and #4"). */
-const repoWord = (name: string, sp: string) => !/^(pr|issue)s?$/i.test(name) && (!sp || /[-_.\d]/.test(name));
-/** A line's or clause's label ("docs：#12", "- web-app: ..."), not a URL's scheme. */
-const LABEL = /(?:^|[\n。；;，,])[\s*+\-\d.)]*([A-Za-z][\w.-]*)\**\s*[:：](?!\/\/)/g;
-
-/**
- * A "#746" is a GitHub PR or issue: "nsh #747" / "NSH#747" links to that repository when the channel has linked it
- * before; a bare "#747" to the one repository the message, or what it is about (`context`: a card's options, the
- * thread it belongs to), names. Code spans are left alone.
- */
-function linkRepoRefs(text: string, context = ""): string {
-  const known = reposIn(`${text}\n${context}`, new Map(knownRepos()));
-  if (!known.size) return text;
-  // the repositories in play: linked ones, and "name#N" naming a known one
-  const named = new Set<string>([...reposIn(`${text}\n${context}`).values()]);
-  for (const m of `${text}\n${context}`.matchAll(REF)) {
-    const slug = m[2] && known.get(m[2].toLowerCase());
-    if (slug) named.add(slug);
-  }
-  const only = named.size === 1 ? [...named][0] : null;
-  // where each known repository is named in the text ("NSH：", "GPUI Kit", "nsh#1", a link): a bare "#N" belongs to the
-  // closest one before it, so a per-project summary links each line's refs to its own project
-  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const names = [...known.keys()].sort((a, b) => b.length - a.length);
-  const mention = new RegExp(`(?<![\\w-])(${names.map((k) => esc(k).replace(/[-_]/g, "[-_ ]?")).join("|")})(?![\\w-])`, "gi");
-  const flat = (k: string) => k.toLowerCase().replace(/[-_ ]/g, "");
-  const slugOf = (name: string) => [...known].find(([k]) => flat(k) === flat(name))?.[1];
-  const marks: [number, string][] = [];
-  for (const m of text.matchAll(mention)) {
-    const slug = slugOf(m[1]);
-    if (slug) marks.push([m.index!, slug]);
-  }
-  // a repository it doesn't know, named before a ref or as a label ("video-tool #2", "docs：#12"), ends the one
-  // before it: the refs after it aren't that one's
-  for (const m of text.matchAll(REF)) if (m[2] && repoWord(m[2], m[3]) && !slugOf(m[2])) marks.push([m.index! + m[1].length, ""]);
-  for (const m of text.matchAll(LABEL)) if (repoWord(m[1], "") && !slugOf(m[1])) marks.push([m.index! + m[0].lastIndexOf(m[1]), ""]);
-  marks.sort((a, b) => a[0] - b[0]);
-  const near = (at: number) => { let s: string | null = null; for (const [i, slug] of marks) { if (i >= at) break; s = slug; } return s; };
-  const url = (slug: string, n: string) => `https://github.com/${slug}/issues/${n}`;
-  let base = 0;
-  return text.split(/(`[^`\n]*`)/).map((part, i) => { const off = base; base += part.length; return i % 2 ? part : part.replace(
-    REF,
-    (all, pre: string, name: string | undefined, sp: string, n: string, at: number) => {
-      const slug = name && slugOf(name);
-      if (slug) return `${pre}[${name}${sp}#${n}](${url(slug, n)})`;
-      const repo = near(off + at + pre.length) ?? only;
-      if (!repo || (name && repoWord(name, sp))) return all;
-      return `${pre}${name ? name + sp : ""}[#${n}](${url(repo, n)})`;
-    },
-  ); }).join("");
-}
-
-/** Hub text keeps its line breaks: single newlines become hard breaks, outside code fences. */
-function hubMarkdown(text: string): string {
-  return text
-    .split(/(^```[\s\S]*?^```)/m)
-    .map((part, i) => (i % 2 ? part : part
-      // single newlines are hard breaks, except around list items (a "\\" there shows up literally)
-      .replace(/([^\n])\n(?!\n|\s*(?:[-*+]|\d+[.)])\s)/g, (m0, c, off, all) => /^\s*(?:[-*+]|\d+[.)])\s/.test(all.slice(all.lastIndexOf("\n", off) + 1, off + 1)) ? `${c}\n` : `${c}\\\n`)
-      // Bare URLs stop at CJK / full-width punctuation and spaces ("pull/1：让" links pull/1 only).
-      .replace(/(?<![(<\[`])\bhttps?:\/\/[^\s<>()\[\]`\u3000-\u303f\uff00-\uffef\u2018-\u201f\u4e00-\u9fff]+[^\s<>()\[\]`.,;:!?'"\u3000-\u303f\uff00-\uffef\u2018-\u201f\u4e00-\u9fff]/g, "<$&>")))
-    .join("");
-}
-
-/** Texts inside a pressable chip: a pointer, not the I-beam selectable texts force (per view on Linux). */
-const chipText = { cursor: "pointer", userSelect: "none" } as const;
-/** A message's first line, without markdown marks, for a one-line quote. */
-const firstLine = (t: string) => (t.split("\n").find((l) => l.trim()) ?? "").replace(/^\s*(#+|>)\s*/, "").replace(/[*_`]/g, "").trim().slice(0, 80);
-const chipFrame: ViewStyle = {
-  cursor: "pointer", verticalAlign: "middle", flexDirection: "row", alignItems: "center", gap: 5, marginHorizontal: 2, height: 20,
-  borderWidth: 1, borderColor: colors.border, backgroundColor: alpha(colors.text, 0.05),
-};
-const chipHover: ViewStyle = { borderColor: colors.fieldBorder, backgroundColor: alpha(colors.text, 0.09) };
-
-function Custom(props: { node: TextViewCustomNode; small: boolean }) {
-  const n = props.node;
-  const fs = props.small ? 12 : 13;
-  if (n.name === "task") {
-    const st = () => STATE_OF()[taskState(n.text!) ?? ""];
-    return (
-      <View role="link" testID={`task-chip-${n.text}`} accessibilityLabel={L(`Task ${n.text}`, `任务 ${n.text}`)} onPress={() => taskLink(n.text!)}
-        hoverStyle={chipHover} style={{ ...chipFrame, paddingHorizontal: 7, borderRadius: 999 }}>
-        <If when={st()}>
-          <View style={{ cursor: "pointer", width: 6, height: 6, borderRadius: 3, backgroundColor: st()?.[1] ?? colors.muted }} />
-        </If>
-        <Text style={{ ...chipText, fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.text }}>{n.text}</Text>
-      </View>
-    );
-  }
-  return (
-    <View style={{ verticalAlign: "middle", height: 20, justifyContent: "center", marginHorizontal: 2, paddingHorizontal: 6, borderRadius: 5, backgroundColor: alpha(colors.text, 0.06) }}>
-      <Text style={{ fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.muted }}>{n.text}</Text>
-    </View>
-  );
-}
-
-/** Selectable message Markdown. */
-function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?: string; scale?: number }) {
-  const small = !!(props.muted || props.quiet);
-  const k = () => props.scale ?? 1;
-  const fontSize = () => (props.quiet ? 14 : props.muted ? size.small : size.text) * k();
-  const lineHeight = () => (small ? 21 : size.line) * k();
-  const doc = () => {
-    const d = TextView.parse(hubMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, EXTENSIONS);
-    return { ...d, blocks: ghBlocks(d.blocks) };
-  };
-  return (
-    <View style={{ gap: 6 }}>
-      <TextView
-        document={doc()}
-        selectable
-        onLinkPress={({ url }) => { if (/^(https?|mailto):/i.test(url)) void openUrl(url).catch(() => {}); }}
-        renderCustom={(node) => <Custom node={node} small={small} />}
-        styles={{
-          root: { gap: 8 * k(), fontSize: fontSize(), lineHeight: lineHeight(), color: small ? colors.muted : colors.text },
-          code: { fontFamily: MONO, fontSize: (small ? 13 : 14.5) * k(), color: colors.text, backgroundColor: alpha(colors.text, 0.07) },
-          emphasis: { fontStyle: "normal", fontWeight: "600" },
-          link: { color: linkColor(), textDecorationColor: token("link-underline") },
-        }}
-      />
-    </View>
-  );
-}
 
 /** Puts an image (by URL) on the system clipboard as an image, not as its link. */
 async function copyImage(src: string): Promise<void> {
@@ -803,6 +233,7 @@ function Media(props: { hub: Hub; path: string }) {
   const src = mediaUrl(props.hub.cfg.url, props.hub.cfg.token, props.path);
   const ratio = signal(16 / 10);
   const zoomed = signal(false);
+  const previewed = latch(zoomed);
   const frame: ViewStyle = { borderRadius: radius.inset, backgroundColor: colors.inset };
   if (isDoc(props.path)) return <DocAttachment src={src} name={attachmentName(props.path)} />;
   if (isVideo(props.path)) return <Video src={src} controls paused style={{ ...frame, borderWidth: 1, borderColor: colors.border, width: "100%", maxWidth: 480, aspectRatio: 16 / 9 }} />;
@@ -843,66 +274,14 @@ function Media(props: { hub: Hub; path: string }) {
           <Text style={{ fontSize: 14, color: colors.text }}>{L("Copy image", "复制图片")}</Text>
         </MenuItem>
       </ContextMenu>
-      <Dialog
-        open={zoomed()}
-        animation="fade"
-        onOpenChange={({ open }) => !open && zoomed.set(false)}
-        backdropClass="bg-scrim"
-        style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
-      >
-        <View accessibilityLabel={L("Close image", "关闭大图")} onPress={() => zoomed.set(false)} style={{ flex: 1, alignItems: "center", justifyContent: "center", cursor: "zoom-out" }}>
-          <Image src={src} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-        </View>
-      </Dialog>
+      {/* mounted at the first opening, then kept so it animates closed */}
+      <If when={previewed()}>
+        <LazyImagePreview src={src} open={zoomed()} onClose={() => zoomed.set(false)} />
+      </If>
     </If>
   );
 }
 
-/** The report open in the chat's reader pane: one at a time, shared by every file card in the timeline. */
-type DocRef = { src: string; name: string; at?: string };
-const reading = signal<DocRef | null>(null);
-/** The page the reader belongs to (a channel or a task); a report opened on one page never shows on another. */
-const readerAt = signal("");
-/** Report bodies already fetched, so reopening or switching back is instant. Bounded, newest kept; a failed one loads again when reopened or retried. */
-type DocBody = { text: string | null; error: string };
-const DOC_CACHE_MAX = 16;
-const docCache = new Map<string, Signal<DocBody>>();
-function clearDocCache() {
-  docCache.clear();
-  reading.set(null);
-}
-function loadDoc(src: string, body: Signal<DocBody>) {
-  body.set({ text: null, error: "" });
-  void fetch(src)
-    .then(async (r) => {
-      if (r.ok) return body.set({ text: stripFrontMatter(await r.text()), error: "" });
-      body.set({ text: null, error: r.status === 404 ? L("This file has expired.", "这个文件已过期。") : L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) });
-    })
-    .catch(() => {
-      body.set({ text: null, error: L("Can’t reach the server", "连不上服务器") });
-    });
-}
-function docBody(src: string) {
-  const hit = docCache.get(src);
-  if (hit) {
-    docCache.delete(src);
-    docCache.set(src, hit);
-    if (untracked(hit).error) loadDoc(src, hit);
-    return hit;
-  }
-  const body = signal<DocBody>({ text: null, error: "" });
-  docCache.set(src, body);
-  while (docCache.size > DOC_CACHE_MAX) docCache.delete(docCache.keys().next().value!);
-  loadDoc(src, body);
-  return body;
-}
-function retryDoc(src: string, body: Signal<DocBody>) {
-  if (!docCache.has(src)) {
-    docCache.set(src, body);
-    while (docCache.size > DOC_CACHE_MAX) docCache.delete(docCache.keys().next().value!);
-  }
-  loadDoc(src, body);
-}
 
 /** A Markdown report attached to a message: a file card that opens the report in the chat's reader pane. */
 function DocAttachment(props: { src: string; name: string }) {
@@ -934,51 +313,6 @@ function DocAttachment(props: { src: string; name: string }) {
         </Text>
       </View>
       <Icon name="chevron" size={14} tint={active() ? colors.info : colors.faint} />
-    </View>
-  );
-}
-
-const DOC_SCALES = [0.875, 1, 1.125, 1.25, 1.4];
-/** The reader beside the chat (a full sheet on a phone): the open report rendered with TextView, with text zoom and a wider pane. */
-function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpand: () => void; onClose: () => void }) {
-  const step = signal(1);
-  // looked up once per report, so a re-render never fetches again by itself
-  const cell = computed(() => { const src = props.doc.src; return untracked(() => docBody(src)); });
-  const body = () => cell()();
-  const btn = (p: { id: string; icon: IconName; label: string; on?: boolean; disabled?: boolean; onPress: () => void }) => (
-    <View testID={p.id} role="button" accessibilityLabel={p.label} accessibilityState={{ disabled: !!p.disabled }}
-      onPress={p.disabled ? undefined : p.onPress} hoverStyle={p.disabled ? undefined : hovered()}
-      style={{ width: props.wide ? 28 : 36, height: props.wide ? 28 : 36, borderRadius: 6, alignItems: "center", justifyContent: "center", cursor: p.disabled ? "default" : "pointer", opacity: p.disabled ? 0.35 : 1, backgroundColor: p.on ? alpha(colors.text, 0.07) : undefined }}>
-      <Icon name={p.icon} size={15} tint={colors.muted} />
-    </View>
-  );
-  return (
-    <View testID="doc-reader" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 2, height: props.wide ? 44 : 52, paddingLeft: 14, paddingRight: 8, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }}>
-        <Icon name="document" size={16} tint={colors.muted} />
-        <Text testID="doc-title" style={{ flex: 1, minWidth: 0, marginLeft: 8, marginRight: 6, fontSize: 13.5, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{props.doc.name}</Text>
-        {btn({ id: "doc-zoom-out", icon: "zoom-out", label: L("Smaller text", "缩小文字"), disabled: step() === 0, onPress: () => step.set(Math.max(0, step() - 1)) })}
-        <Text testID="doc-scale" style={{ width: 36, textAlign: "center", fontSize: 11.5, fontVariant: ["tabular-nums"], color: colors.faint }}>{`${Math.round(DOC_SCALES[step()] * 100)}%`}</Text>
-        {btn({ id: "doc-zoom-in", icon: "zoom-in", label: L("Larger text", "放大文字"), disabled: step() === DOC_SCALES.length - 1, onPress: () => step.set(Math.min(DOC_SCALES.length - 1, step() + 1)) })}
-        <If when={props.wide}>
-          {btn({ id: "doc-expand", icon: props.expanded ? "minimize" : "maximize", label: props.expanded ? L("Narrow reader", "收窄阅读栏") : L("Widen reader", "加宽阅读栏"), on: props.expanded, onPress: props.onExpand })}
-        </If>
-        {btn({ id: "doc-close", icon: "close", label: L("Close reader", "关闭阅读栏"), onPress: props.onClose })}
-      </View>
-      <Scroll style={{ flex: 1 }}>
-        <View selectable style={{ width: "100%", maxWidth: 760, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 28 : 20, paddingTop: 28, paddingBottom: 48 }}>
-          <If when={body().text !== null} else={
-            <View style={{ gap: 10, alignItems: "flex-start" }}>
-              <Text testID="doc-status" style={{ fontSize: 14, color: body().error ? colors.danger : colors.faint }}>{body().error || L("Loading…", "读取中…")}</Text>
-              <If when={body().error}>
-                <Btn label={L("Retry", "重试")} onPress={() => retryDoc(props.doc.src, cell())} testID="doc-retry" />
-              </If>
-            </View>
-          }>
-            <Rich text={body().text ?? ""} scale={DOC_SCALES[step()]} />
-          </If>
-        </View>
-      </Scroll>
     </View>
   );
 }
@@ -1016,53 +350,9 @@ function SentCheck() {
 /** A message the owner sent that the hub has not confirmed yet: it reads as sent unless delivery fails. */
 type Outgoing = { id: string; ts: string; text: string; ref: string | null; files: Attachment[]; state: "held" | "sending" | "failed"; channel?: string };
 
-/** Each agent's own color and mark, the same everywhere it appears (stable by its id). */
-const MARKS = ["★", "◆", "▲", "●", "✦", "☾", "✿", "♪"];
 /** From this window width on, the app lays out for a desktop or tablet rather than a phone. */
 const WIDE = 860;
 
-function persona(from: string): { tint: string; mark: string } {
-  const id = from.split("@")[0].toLowerCase();
-  let h = 0;
-  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return { tint: token(`agent-${(h % 8) + 1}` as "agent-1"), mark: MARKS[(h >>> 3) % MARKS.length] };
-}
-
-function Avatar(props: { from: string; small?: boolean; testID?: string }) {
-  const hubbed = isHub(props.from);
-  const p = persona(props.from);
-  const box = props.small ? 22 : 36;
-  return (
-    <View
-      testID={props.testID}
-      accessibilityLabel={displayName(props.from)}
-      style={{
-        width: box,
-        height: box,
-        borderRadius: box / 2,
-        flexShrink: 0,
-        alignItems: "center",
-        justifyContent: "center",
-        backgroundColor: hubbed ? colors.raised : alpha(p.tint, 0.16),
-      }}
-    >
-      <If when={hubbed} else={
-        <If when={avatarOf(props.from) !== null} else={<>
-          <Text style={{ fontSize: props.small ? 12 : 16, fontWeight: "700", color: p.tint }}>{displayName(props.from).slice(0, 1).toUpperCase()}</Text>
-          <If when={!props.small}>
-            <View style={{ position: "absolute", right: -3, bottom: -3, width: 17, height: 17, borderRadius: 9, alignItems: "center", justifyContent: "center", backgroundColor: colors.background }}>
-              <Text style={{ fontSize: 10, lineHeight: 12, color: p.tint }}>{p.mark}</Text>
-            </View>
-          </If>
-        </>}>
-          <Image src={avatarOf(props.from) ?? ""} style={{ width: box, height: box, borderRadius: box / 2 }} />
-        </If>
-      }>
-        <View style={{ width: props.small ? 8 : 12, height: props.small ? 8 : 12, borderRadius: 6, backgroundColor: colors.muted }} />
-      </If>
-    </View>
-  );
-}
 
 /** The label of an option button: the option's own text when the hub gives one ("B: 升级"). */
 function optionText(e: HubEvent, c: string): string {
@@ -1440,11 +730,6 @@ function Message(props: {
 /** A task's state as the sidebar's dot: only what needs attention gets a color. */
 const TONE: Record<string, "on" | "run" | "queue" | "wait" | "off" | "bad"> = { active: "run", blocked: "wait", failed: "bad", done: "off", inbox: "queue", waiting: "wait", nohost: "wait", parked: "wait" };
 
-/** A task's state: its label, color and mark. */
-const STATE_OF = (): Record<string, [string, string, string]> => ({
-  active: [L("In progress", "进行中"), colors.up, "●"], inbox: [L("Queued", "排队中"), colors.info, "○"], waiting: [L("Waiting on subtasks", "等子任务"), colors.warn, "○"], nohost: [L("Waiting for a machine", "等机器"), colors.warn, "○"], parked: [L("Waiting on external result", "等外部结果"), colors.warn, "○"],
-  blocked: [L("Needs your decision", "等你决定"), colors.warn, "!"], failed: [L("Failed", "失败"), colors.danger, "✕"], done: [L("Done", "完成"), colors.faint, "✓"], cancelled: [L("Cancelled", "已取消"), colors.faint, "✕"],
-});
 
 /** A progress step's icon and color. */
 const STEP_OF = (): Record<string, [IconName, string]> => ({
@@ -2027,27 +1312,6 @@ function SideRow(props: { onPress?: () => void; selected?: boolean; title?: stri
   );
 }
 
-/** Ask before ending a task: cancel it, or mark it done when the owner finished it himself. */
-async function confirmEndTask(id: string, done: boolean, running: boolean): Promise<boolean> {
-  const r = done
-    ? await AlertDialog.show({
-      title: L(`Mark ${id} as done?`, `把 ${id} 标记为完成？`),
-      description: running ? L("The running agent will be stopped and the task marked done.", "正在运行的 agent 会被停下，任务记为完成。") : L("The task will be marked done and won’t run again.", "任务记为完成，不再执行。"),
-      actions: [
-        { id: "keep", label: L("Back", "返回"), role: "cancel" },
-        { id: "end", label: L("Mark as done", "标记完成") },
-      ],
-    })
-    : await AlertDialog.show({
-      title: L(`Cancel ${id}?`, `取消 ${id}？`),
-      description: running ? L("The running agent will be stopped. Changes it already made stay in the repository.", "正在运行的 agent 会被停下，已经做了的改动保留在仓库里。") : L("This task won’t run again.", "这个任务不会再执行。"),
-      actions: [
-        { id: "keep", label: L("Keep", "不取消"), role: "cancel" },
-        { id: "end", label: L("Cancel task", "取消任务"), role: "destructive" },
-      ],
-    });
-  return r.action === "end";
-}
 
 /** How far the wide layout's floating sidebar sits from the window's edges. */
 const sidebarInset = 8;
@@ -2502,631 +1766,7 @@ function UpdateRow(props: { onRestart: () => void }) {
   );
 }
 
-// ---------------------------------------------------------------- team settings
 
-function Chip(props: { label: string; on: boolean; onPress: () => void; testID?: string; accessibilityLabel?: string }) {
-  return (
-    <View
-      role="button"
-      testID={props.testID}
-      accessibilityLabel={props.accessibilityLabel}
-      accessibilityState={{ selected: props.on }}
-      onPress={props.onPress}
-      hoverStyle={props.on ? undefined : hovered()}
-      focusStyle={focusRing()}
-      style={{
-        minHeight: touch ? 40 : 34,
-        minWidth: 34,
-        justifyContent: "center",
-        alignItems: "center",
-        paddingHorizontal: 12,
-        borderRadius: radius.control,
-        borderCurve: "continuous",
-        borderWidth: 0.5,
-        borderColor: props.on ? alpha(colors.text, 0.2) : surfaceEdge(),
-        backgroundColor: props.on ? tints.accent : colors.surface,
-        transitionProperty: "background-color, border-color",
-        transitionDuration: 120,
-      }}
-    >
-      <Text style={{ textAlign: "center", fontSize: 14, fontWeight: props.on ? "600" : "400", color: props.on ? colors.accent : colors.text }}>{props.label}</Text>
-    </View>
-  );
-}
-
-/** A shared stepper for the per-machine parallel limit. */
-function ParallelInput(props: { value: number; onChange: (value: number) => void }) {
-  return <NumberInput
-    testID="parallel" accessibilityLabel={L("Tasks each machine runs at once", "每台机器同时运行的任务数")} value={props.value} min={1} max={32}
-    onChange={({ value }) => { if (value != null && value >= 1 && value <= 32 && value !== props.value) props.onChange(value); }}
-    style={{ flexDirection: "row", alignItems: "center", height: touch ? 44 : 36, borderRadius: radius.control, borderCurve: "continuous", backgroundColor: colors.raised }}
-    inputStyle={{ width: 40, textAlign: "center", fontSize: 16, fontWeight: "600", color: colors.text, fontVariant: ["tabular-nums"] }}
-    decrementButtonClass="active:opacity-50 disabled:opacity-30" incrementButtonClass="active:opacity-50 disabled:opacity-30"
-    decrementButtonStyle={{ width: touch ? 44 : 36, height: touch ? 44 : 36, alignItems: "center", justifyContent: "center" }}
-    incrementButtonStyle={{ width: touch ? 44 : 36, height: touch ? 44 : 36, alignItems: "center", justifyContent: "center" }}
-    decrementButton={<View testID="parallel-dec"><Icon name="minus" size={16} tint={colors.text} /></View>}
-    incrementButton={<View testID="parallel-inc"><Icon name="plus" size={16} tint={colors.text} /></View>}
-  />;
-}
-
-/** A settings section: the gallery's Card (a title above one flat surface). */
-const AUTONOMY_DETAIL = (): Record<string, string> => ({
-  onboarding: L("Asks you about most things and learns from your answers", "大多数事先问你，从你的回答里学习"),
-  assisted: L("Handles routine work, asks you about important things", "常规的事自己做，重要的先问你"),
-  autonomous: L("Decides on its own, asks only about high-risk things", "自己拿主意，只有高风险的事才问你"),
-});
-const cliDetail = (c: string[]) => {
-  const name = (x: string) => cliLabel([x]).replace(/^(仅|only)\s*/i, "");
-  return c.length === 1
-    ? L(`Only ${name(c[0]!)}`, `只用 ${name(c[0]!)}`)
-    : L(`${name(c[0]!)} first, then ${name(c[1]!)} on failure or when out of quota`, `先用 ${name(c[0]!)}，失败或额度用尽时换 ${name(c[1]!)}`);
-};
-
-type DropdownOption = { id: string; label: string; detail?: string; testID?: string };
-
-/** A labelled value that opens a menu of its choices (each with a line saying what it means). */
-function Dropdown(props: { label: string; value: string; options: DropdownOption[]; selected: string; onPick: (id: string) => void; testID?: string }) {
-  return (
-    <Menu
-      align="end"
-      offset={6}
-      margin={8}
-      popupStyle={{ minWidth: 260, maxWidth: 340, padding: 4, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
-      trigger={
-        <View
-          role="button"
-          testID={props.testID}
-          accessibilityLabel={`${props.label}${L(": ", "：")}${props.value}`}
-          hoverStyle={hovered()}
-          style={{ flexDirection: "row", alignItems: "center", gap: 6, height: 34, paddingLeft: 11, paddingRight: 9, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
-        >
-          <Text style={{ fontSize: 13, color: colors.faint }}>{props.label}</Text>
-          <Text style={{ fontSize: 14, fontWeight: "500", color: colors.text }}>{props.value}</Text>
-          <Icon name="chevron-down" size={12} tint={colors.muted} />
-        </View>
-      }
-    >
-      <Each of={props.options}>
-        {(o) => (
-          <MenuItem
-            testID={o().testID}
-            role="menuitemradio"
-            checked={o().id === props.selected}
-            onSelect={() => o().id !== props.selected && props.onPick(o().id)}
-            hoverStyle={hovered()}
-            style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 6 }}
-          >
-            <View style={{ width: 14, paddingTop: 3 }}>
-              <If when={o().id === props.selected}>
-                <Icon name="check" size={13} tint={colors.text} />
-              </If>
-            </View>
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={{ fontSize: 14, fontWeight: "500", color: colors.text }}>{o().label}</Text>
-              <If when={o().detail}>
-                <Text style={{ fontSize: 12.5, lineHeight: 17, color: colors.muted }}>{o().detail}</Text>
-              </If>
-            </View>
-          </MenuItem>
-        )}
-      </Each>
-    </Menu>
-  );
-}
-
-function Group(props: { title: string; hint?: string; children: JSX.Element }) {
-  return (
-    <View style={{ gap: 8 }}>
-      <View style={{ gap: 3, paddingHorizontal: 2 }}>
-        <Text style={{ fontSize: 15, fontWeight: "600", color: colors.text }}>{props.title}</Text>
-        {props.hint ? <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted }}>{props.hint}</Text> : null}
-      </View>
-      <View style={{ borderRadius: radius.card, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), overflow: "hidden" }}>{props.children}</View>
-    </View>
-  );
-}
-
-// ---------------------------------------------------------------- notifications (Web Push through host.js; the system's in an installed app)
-
-/** In an installed app (no page host) NSH shows the system's notifications; they appear while the app runs. */
-const systemNotifications = () => !host.available();
-/** The notifications this run showed, by id, to take them back. Ones without an event to open start with `noop:`. */
-const showing = new Set<string>();
-const closeNotification = (id: string) => {
-  if (!showing.delete(id)) return;
-  Notifications.close(id).catch(() => {});
-};
-function clearNotification(ref: string) {
-  if (systemNotifications()) closeNotification(ref);
-  else hostCall("clearNotifications", { ref });
-}
-function setBadge(count: number) {
-  if (systemNotifications()) Notifications.setBadge(count).catch(() => {}); // iOS refuses it before the permission
-  else hostCall("setBadge", { count });
-}
-const DEVICES: Record<string, string> = { macos: "Mac", ios: "iPhone", android: "Android", windows: "Windows", linux: "Linux" };
-
-type PushInfo = { supported: boolean; ios: boolean; standalone: boolean; permission: string; subscribed: boolean; endpoint: string | null; device: string };
-
-async function systemInfo(): Promise<PushInfo | null> {
-  try {
-    const permission = await Notifications.permission();
-    if (permission === "unavailable") return null;
-    const off = !!(await Storage.getItem(KEYS.notifyOff));
-    return { supported: true, ios: false, standalone: true, permission, subscribed: permission === "granted" && !off, endpoint: null, device: DEVICES[platform.os] ?? L("This device", "本设备") };
-  } catch {
-    return null;
-  }
-}
-
-/** This device's push state and the steps that change it (the permission prompt needs the press that calls `enable`). */
-function createPush(hub: Hub, success: (message: string) => void) {
-  const info = signal<PushInfo | null>(null);
-  const busy = signal(false);
-  const note = signal<string | null>(null);
-  const refresh = async () => info.set(systemNotifications() ? await systemInfo() : await hostCall<PushInfo>("pushState"));
-  refresh();
-
-  async function run(work: () => Promise<string>) {
-    busy.set(true);
-    note.set(null);
-    try {
-      success(await work());
-    } catch (e) {
-      note.set(e instanceof Error ? e.message : String(e));
-    } finally {
-      busy.set(false);
-      await refresh();
-    }
-  }
-  const enable = () =>
-    run(async () => {
-      if (systemNotifications()) {
-        const permission = await Notifications.requestPermission();
-        if (permission === "denied") throw new Error(L("Notifications are blocked. Allow Noop in System Settings, then come back and turn them on.", "通知被拦截了：请在系统设置里允许 Noop 发通知，再回来开启"));
-        if (permission !== "granted") throw new Error(L("Notifications aren’t on", "没有开启通知"));
-        await Storage.removeItem(KEYS.notifyOff);
-        return L("On. Decisions that need you appear as system notifications.", "已开启：需要你决定的事会发到系统通知");
-      }
-      // Ask the browser first, while the press still counts as the user's gesture.
-      const v = hub.api("GET", "/api/push/vapid");
-      const key = (await v).data.publicKey;
-      if (typeof key !== "string" || !key) throw new Error(L("The server hasn’t set up push yet, so it can’t be turned on", "服务器还没有配置推送，暂时无法开启"));
-      const r = await hostCall<{ permission: string; subscription: unknown; device?: string }>("pushEnable", { publicKey: key });
-      if (!r) throw new Error(L("Web push isn’t supported here", "这个环境不支持网页推送"));
-      if (r.permission === "denied") throw new Error(L("Notifications are blocked. Allow Noop in your browser or system settings, then come back and turn them on.", "通知被拦截了：请在浏览器或系统设置里允许 Noop 发通知，再回来开启"));
-      if (r.permission !== "granted" || !r.subscription) throw new Error(L("Notifications aren’t on", "没有开启通知"));
-      const s = await hub.api("POST", "/api/push/subscribe", { subscription: r.subscription, device_label: r.device ?? untracked(info)?.device ?? L("Device", "设备") });
-      if (!s.ok) throw new Error(L(`Subscription failed (${s.status || "can’t reach the server"})`, `订阅失败（${s.status || "连不上服务器"}）`));
-      return L("On. Decisions that need you are pushed to this device.", "已开启：需要你决定的事会推送到这台设备");
-    });
-  const disable = () =>
-    run(async () => {
-      if (systemNotifications()) {
-        await Storage.setItem(KEYS.notifyOff, "1");
-        for (const id of [...showing]) closeNotification(id);
-        return L("Notifications are off on this device", "已关闭这台设备的通知");
-      }
-      const r = await hostCall<{ endpoint: string | null }>("pushDisable");
-      if (r?.endpoint) await hub.api("POST", "/api/push/unsubscribe", { endpoint: r.endpoint });
-      return L("Notifications are off on this device", "已关闭这台设备的通知");
-    });
-  const test = () =>
-    run(async () => {
-      if (systemNotifications()) {
-        showing.add("noop:test");
-        if (!(await Notifications.show({ id: "noop:test", title: "Noop", body: L("Test notification: system notifications are working.", "测试通知：系统通知已开通。"), silent: true }))) throw new Error(L("The system didn’t accept the notification", "系统没有接收这条通知"));
-        return L("Test notification sent", "测试通知已发出");
-      }
-      const r = await hub.api("POST", "/api/push/test");
-      if (!r.ok) throw new Error(L(`Couldn’t send the test notification (${r.status || "can’t reach the server"})`, `测试通知发送失败（${r.status || "连不上服务器"}）`));
-      return L("Test notification sent. It should arrive in a few seconds.", "测试通知已发出，几秒内会到");
-    });
-  /** iOS shows web push only to an app added to the home screen. */
-  const needsHomeScreen = () => !!info()?.ios && !info()?.standalone;
-  const canAsk = () => !!info()?.supported && !needsHomeScreen();
-  return { info, busy, note, refresh, enable, disable, test, needsHomeScreen, canAsk };
-}
-type Push = ReturnType<typeof createPush>;
-
-function Steps(props: { steps: string[] }) {
-  return (
-    <View style={{ gap: 8 }}>
-      <Each of={props.steps}>
-        {(s, i) => (
-          <View style={{ flexDirection: "row", gap: 10, alignItems: "flex-start" }}>
-            <View style={{ width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: tints.accent }}>
-              <Text style={{ fontSize: 12.5, fontWeight: "700", color: colors.accent }}>{String(i() + 1)}</Text>
-            </View>
-            <Text style={{ flex: 1, fontSize: 15, lineHeight: 22, color: colors.text }}>{s()}</Text>
-          </View>
-        )}
-      </Each>
-    </View>
-  );
-}
-
-function NotifySettings(props: { push: Push; view: SettingsView | null; save: (patch: Record<string, unknown>) => void; wide: boolean }) {
-  const push = props.push;
-  const { prefs, setPrefs, state } = notifyModel(push, () => props.view, props.save);
-  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: surfaceEdge() });
-  return (
-    <Group title={L("Notifications", "通知")} hint={systemNotifications() ? L("While Noop is running, decisions that need you appear as system notifications. Click one to jump to it.", "Noop 运行时，需要你拍板的事会发系统通知，点开直接到这一条。") : L("Decisions that need you are pushed to your phone. You can pick an option right from the notification.", "需要你拍板的事推送到手机；通知上可以直接选择选项。")}>
-      <View style={{ gap: 12, paddingHorizontal: 16, paddingVertical: 14 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <Dot tone={push.info()?.subscribed ? "on" : push.info()?.permission === "denied" ? "bad" : "off"} />
-          <View style={{ flex: 1, gap: 2 }}>
-            <Text style={{ fontSize: 15.5, fontWeight: "600", color: colors.text }}>{push.info()?.device ?? L("This device", "本设备")}</Text>
-            <Text testID="push-state" style={{ fontSize: 13.5, color: colors.muted }}>{state()}</Text>
-          </View>
-        </View>
-        <If when={push.needsHomeScreen()}>
-          <View style={{ gap: 10, padding: 14, borderRadius: radius.inset, backgroundColor: colors.inset, borderWidth: 1, borderColor: colors.line }}>
-            <Text style={{ fontSize: 15, fontWeight: "600", color: colors.text }}>{L("Turn on notifications on iPhone", "在 iPhone 上开启通知")}</Text>
-            <Steps steps={[L("In Safari, tap the Share button at the bottom", "在 Safari 里点底部的「分享」按钮"), L("Choose “Add to Home Screen”, then tap “Add”", "选「添加到主屏幕」，再点「添加」"), L("Open Noop from the Home Screen, sign in, and tap “Turn on notifications” here", "从主屏幕打开 Noop，登录后回到这里点「开启通知」")]} />
-          </View>
-        </If>
-        <If when={push.info()?.permission === "denied" && !push.needsHomeScreen()}>
-          <Text style={{ fontSize: 14, lineHeight: 21, color: colors.muted }}>{systemNotifications() ? L("Allow Noop in System Settings → Notifications, then come back and turn them on.", "在系统设置 → 通知里允许 Noop，再回来开启。") : L("Allow Noop in the browser’s site settings (or System Settings → Notifications), then reload and turn them on.", "在浏览器的网站设置（或系统设置 → 通知）里允许 Noop，然后刷新页面再开启。")}</Text>
-        </If>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          <If
-            when={push.info()?.subscribed}
-            else={<Btn testID="push-enable" label={L("Turn on notifications", "开启通知")} icon="bell" kind="primary" busy={push.busy()} disabled={!push.canAsk()} onPress={push.enable} />}
-          >
-            <Btn testID="push-test" label={L("Send test notification", "发送测试通知")} icon="bell" busy={push.busy()} onPress={push.test} />
-            <Btn testID="push-disable" label={L("Turn off on this device", "关闭本设备通知")} kind="ghost" onPress={push.disable} />
-          </If>
-        </View>
-        <If when={push.note()}>
-          <Text testID="push-note" style={{ fontSize: 14, lineHeight: 20, color: colors.danger }}>{push.note()}</Text>
-        </If>
-      </View>
-      <If when={props.view}>
-        <View style={row()}>
-          <Text style={{ fontSize: 14, fontWeight: "600", color: colors.muted }}>{L("What to push", "推送哪些")}</Text>
-          <Each of={NOTIFY_KINDS()}>
-            {(k) => (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 12, minHeight: 36 }}>
-                <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{k()[1]}</Text>
-                <Toggle
-                  testID={`notify-${k()[0]}`}
-                  label={k()[1]}
-                  value={prefs().kinds[k()[0]]}
-                  onChange={(on) => setPrefs({ kinds: { ...prefs().kinds, [k()[0]]: on } })}
-                />
-              </View>
-            )}
-          </Each>
-        </View>
-        <View style={row()}>
-          <View style={{ gap: 2 }}>
-            <Text style={{ fontSize: 14, fontWeight: "600", color: colors.muted }}>{L("Quiet hours", "免打扰时段")}</Text>
-            <Text style={{ fontSize: 13, color: colors.faint }}>{L(`Recorded but not pushed during these hours (time zone ${prefs().tz})`, `这段时间只记下，不推送（时区 ${prefs().tz}）`)}</Text>
-          </View>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-            <Each of={QUIET_PRESETS()}>
-              {(q) => (
-                <Chip
-                  testID={`quiet-${quietKey(q().value)}`}
-                  label={q().label}
-                  on={quietKey(q().value) === quietKey(prefs().quiet_hours)}
-                  onPress={() => setPrefs({ quiet_hours: q().value })}
-                />
-              )}
-            </Each>
-          </View>
-        </View>
-      </If>
-    </Group>
-  );
-}
-
-/** The team's settings, shared by the settings page and the pages it pushes on phones. */
-function createSettings(hub: Hub) {
-  const view = signal<SettingsView | null>(null);
-  const error = signal("");
-  const toast = createSettingsToast();
-  const saving = signal(0);
-  let writes = Promise.resolve();
-  let revision = 0;
-  let confirmed: SettingsView | null = null;
-  const pending: { patch: Record<string, unknown> }[] = [];
-  function merge(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
-    const result = { ...base };
-    for (const [key, value] of Object.entries(patch)) {
-      const previous = result[key];
-      result[key] = value && typeof value === "object" && !Array.isArray(value)
-        ? merge(previous && typeof previous === "object" && !Array.isArray(previous) ? previous as Record<string, unknown> : {}, value as Record<string, unknown>)
-        : value;
-    }
-    return result;
-  }
-  function displayed(v: SettingsView): SettingsView {
-    const current = v.current as { clis?: { agents?: Record<string, string[]> }; autonomy?: { agents?: Record<string, string> }; routines?: Record<string, { enabled?: boolean; every?: string }>; host?: { max_parallel?: number } };
-    return { ...v, effective: { ...v.effective,
-      agents: v.effective.agents.map((a) => ({ ...a, clis: current.clis?.agents?.[a.id] ?? a.clis, autonomy: current.autonomy?.agents?.[a.id] ?? a.autonomy })),
-      routines: v.effective.routines.map((r) => ({ ...r, ...current.routines?.[r.name] })),
-      max_parallel: current.host?.max_parallel ?? v.effective.max_parallel,
-    } };
-  }
-  function refresh() {
-    if (!confirmed) return;
-    const current = pending.reduce((state, item) => merge(state, item.patch), confirmed.current);
-    view.set(displayed({ ...confirmed, current }));
-  }
-  const load = () => {
-    error.set("");
-    const started = revision;
-    hub.settings().then((v) => { if (started === revision && !saving()) { confirmed = v; refresh(); } }, (e) => { if (started === revision && !saving()) error.set(String(e?.message ?? e)); });
-  };
-  async function save(patch: Record<string, unknown>) {
-    revision++;
-    error.set("");
-    toast.dismiss();
-    saving.update((n) => n + 1);
-    const item = { patch };
-    pending.push(item);
-    refresh();
-    try {
-      const request = writes.then(() => hub.settings(patch));
-      writes = request.then(() => {}, () => {});
-      confirmed = await request;
-    } catch (e) {
-      error.set(e instanceof Error ? e.message : String(e));
-    } finally {
-      pending.splice(pending.indexOf(item), 1);
-      refresh();
-      saving.update((n) => n - 1);
-      if (!saving() && !error()) {
-        toast.show(L("Saved", "已保存"));
-      }
-    }
-  }
-  // the command being added in 常用指令 (kept here: the settings page may be laid out again while typing)
-  /** The command editor: `editing` is undefined when closed, "" for a new command, else the name being edited. */
-  const commandDraft = { name: signal(""), text: signal(""), editing: signal<string | undefined>(undefined), note: signal("") };
-  /** The section the wide settings page shows (its sidebar picks it). */
-  const tab = signal<SettingsTab>("notify");
-  return { view, error, toast, saving, load, save, commandDraft, tab };
-}
-type Settings = ReturnType<typeof createSettings>;
-
-/** The sections of the wide settings page, in its sidebar's order. */
-const SETTINGS_TABS = () => [
-  ["notify", L("Notifications", "通知"), "bell"],
-  ["members", L("Members", "成员"), "chat"],
-  ["routines", L("Routines", "例行任务"), "play"],
-  ["parallel", L("Parallelism", "并行"), "layers"],
-  ["commands", L("Commands", "常用指令"), "terminal"],
-  ["storage", L("Storage", "存储"), "photos"],
-  ["version", L("Version", "版本"), "github"],
-  ["rules", L("Rules & memory", "规则与记忆"), "scroll"],
-  ["account", L("Account", "账号与连接"), "lock"],
-] as const;
-type SettingsTab = ReturnType<typeof SETTINGS_TABS>[number][0];
-
-/** The wide (desktop, tablet, wide browser) settings page. */
-function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: boolean; onRules: () => void; onConnection: () => void; onDisconnect: () => void }) {
-  const { view, error, save } = props.settings;
-  props.settings.load();
-  const eff = () => view()?.effective;
-  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: surfaceEdge() });
-  const chips: ViewStyle = { flexDirection: "row", flexWrap: "wrap", gap: 6 };
-
-  const tab = props.settings.tab;
-  const on = (k: SettingsTab) => tab() === k;
-  return (
-    <View style={{ flex: 1, flexDirection: "row" }}>
-      <View testID="settings-nav" role="tablist" style={{ width: 208, gap: 2, paddingHorizontal: 10, paddingVertical: 20, borderRightWidth: 0.5, borderRightColor: surfaceEdge() }}>
-        <Each of={[...SETTINGS_TABS()]}>
-          {(x) => (
-            <View
-              role="tab"
-              testID={`settings-tab-${x()[0]}`}
-              accessibilityLabel={x()[1]}
-              accessibilityState={{ selected: on(x()[0]) }}
-              onPress={() => tab.set(x()[0])}
-              hoverStyle={on(x()[0]) ? undefined : hovered()}
-              style={{ flexDirection: "row", alignItems: "center", gap: 10, height: 36, paddingHorizontal: 10, borderRadius: 8, backgroundColor: on(x()[0]) ? colors.raised : undefined }}
-            >
-              <Icon name={x()[2]} size={16} tint={on(x()[0]) ? colors.text : colors.muted} />
-              <Text style={{ fontSize: 14.5, fontWeight: on(x()[0]) ? "600" : "400", color: on(x()[0]) ? colors.text : colors.muted }}>{x()[1]}</Text>
-            </View>
-          )}
-        </Each>
-      </View>
-    <Scroll style={{ flex: 1 }}>
-      <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 28, paddingHorizontal: props.wide ? 32 : 16, paddingTop: props.wide ? 28 : 18, paddingBottom: 48 }}>
-        <If when={error()}>
-          <Text testID="settings-note" style={{ alignSelf: "flex-end", fontSize: 13.5, color: error() ? colors.danger : colors.up }}>{error()}</Text>
-        </If>
-        <If when={on("notify")}>
-          <NotifySettings push={props.push} view={view()} save={save} wide={props.wide} />
-        </If>
-        <If when={on("members") || on("routines") || on("parallel")}>
-        <If when={eff()} else={<Text style={{ fontSize: 14, color: colors.faint }}>{error() ? "" : L("Loading…", "读取中…")}</Text>}>
-          {(e) => (
-            <View style={{ gap: 28 }}>
-              <If when={on("members")}>
-              <Group title={L("Members", "成员")} hint={L("Each role on the team. The model decides who does the work; autonomy decides how big a decision needs your input first.", "团队里的每个角色。模型决定由谁来干活，自主程度决定多大的事要先问你。")}>
-                <Each of={e().agents} key={(a) => a.id}>
-                  {(a, i) => (
-                    <View testID={`member-${a().id}`} style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch", gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: i() === 0 ? 0 : 0.5, borderTopColor: surfaceEdge() }}>
-                      <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12 }}>
-                        <Avatar from={a().id} />
-                        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-                          <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
-                            <Text style={{ fontSize: 15.5, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{displayName(a().id)}</Text>
-                            <If when={displayName(a().id) !== a().id}>
-                              <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{a().id}</Text>
-                            </If>
-                          </View>
-                          <If when={a().about}>
-                            <Text testID={`member-about-${a().id}`} style={{ fontSize: 13.5, lineHeight: 19, color: colors.muted, numberOfLines: 2 }}>{a().about}</Text>
-                          </If>
-                        </View>
-                      </View>
-                      <View style={{ flexDirection: "row", gap: 8, paddingLeft: props.wide ? 0 : 52 }}>
-                        <Dropdown
-                          testID={`cli-${a().id}`}
-                          label={L("Model", "模型")}
-                          value={cliLabel(a().clis)}
-                          options={view()!.options.clis.map((c) => ({ id: cliKey(c), label: cliLabel(c), detail: cliDetail(c), testID: `cli-${a().id}-${cliKey(c)}` }))}
-                          selected={cliKey(a().clis)}
-                          onPick={(k) => { const c = view()!.options.clis.find((x) => cliKey(x) === k); if (c) save(patches.clis(a().id, c)); }}
-                        />
-                        <Dropdown
-                          testID={`autonomy-${a().id}`}
-                          label={L("Autonomy", "自主程度")}
-                          value={autonomyLabel(a().autonomy)}
-                          options={view()!.options.autonomy.map((l) => ({ id: l, label: autonomyLabel(l), detail: AUTONOMY_DETAIL()[l], testID: `autonomy-${a().id}-${l}` }))}
-                          selected={a().autonomy}
-                          onPick={(l) => save(patches.autonomy(a().id, l))}
-                        />
-                      </View>
-                    </View>
-                  )}
-                </Each>
-              </Group>
-              </If>
-
-              <If when={on("routines")}>
-              <Group title={L("Routines", "例行任务")} hint={L("Rules that create tasks on a schedule: on/off and when they run", "定时生成任务的规则：开关和运行时间")}>
-                <Each of={e().routines} key={(r) => r.name}>
-                  {(r, i) => (
-                    <View style={{ ...row(), flexDirection: "row", alignItems: "center", gap: 12, borderTopWidth: i() === 0 ? 0 : 0.5 }}>
-                      <View style={{ flex: 1, gap: 3 }}>
-                        <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
-                          <Text style={{ fontSize: 15.5, fontWeight: "500", color: r().enabled ? colors.text : colors.faint }}>{r().name}</Text>
-                          <If when={r().agent}>
-                            <Text style={{ fontSize: 12.5, color: colors.faint }}>{e().agents.find((a) => a.id === r().agent)?.title ?? r().agent}</Text>
-                          </If>
-                        </View>
-                        <If when={r().desc}>
-                          <Text testID={`routine-desc-${r().name}`} style={{ fontSize: 13, lineHeight: 18, color: colors.muted }}>{r().desc}</Text>
-                        </If>
-                      </View>
-                      <Dropdown
-                        testID={`every-${r().name}`}
-                        label={L("Runs", "运行")}
-                        value={everyLabel(r().every)}
-                        options={intervalsWith(r().every).map((iv) => ({ id: iv, label: everyLabel(iv), testID: `every-${r().name}-${iv}` }))}
-                        selected={r().every}
-                        onPick={(iv) => save(patches.routine(r().name, { every: iv }))}
-                      />
-                      <Toggle
-                        testID={`routine-${r().name}`}
-                        label={r().name}
-                        value={r().enabled}
-                        onChange={(on) => save(patches.routine(r().name, { enabled: on }))}
-                      />
-                    </View>
-                  )}
-                </Each>
-              </Group>
-              </If>
-
-              <If when={on("parallel")}>
-              <Group title={L("Parallelism", "并行")}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
-                  <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{L("Tasks each machine runs at once", "每台机器同时运行的任务数")}</Text>
-                  <ParallelInput value={e().max_parallel ?? 2} onChange={(value) => save(patches.maxParallel(value))} />
-                </View>
-              </Group>
-              </If>
-            </View>
-          )}
-        </If>
-        </If>
-        <If when={on("commands")}>
-        <Group title={L("Commands", "常用指令")} hint={L("Type / in the message box to use one. Built-in commands perform an action; ones you add send a message to the team.", "在输入框里输入 / 选用。内置指令执行操作，你添加的指令把一段话发给团队。")}>
-          <CommandRows settings={props.settings} />
-        </Group>
-        </If>
-        <If when={on("storage")}>
-        <Group title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
-          <MediaDaysChoices settings={props.settings} />
-        </Group>
-        </If>
-        <If when={on("version")}>
-        <Group title={L("Version", "版本")} hint={L("The code each machine runs. Updating makes every machine pull the latest code, and the primary also redeploys the server.", "每台机器运行的代码。更新会让所有机器拉取最新代码，主控机同时重新发布线上。")}>
-          <VersionRows hub={props.hub} />
-        </Group>
-        </If>
-        <If when={on("rules")}>
-        <Group title={L("Memory", "记忆")} hint={L("The rules the team works by, your preferences, member profiles and past decisions. Read-only.", "团队做事依据的规则、你的偏好、成员档案和决策先例。只读。")}>
-          <SetRow first label={L("View rules & memory", "查看规则与记忆")} chevron onPress={props.onRules} testID="settings-rules" />
-        </Group>
-        </If>
-        <If when={on("account")}>
-        <Group title={L("Language", "语言")}>
-          <LangChoices />
-        </Group>
-        <Group title={L("Account", "账号与连接")} hint={L("You stay signed in on this device and reconnect automatically next time.", "登录状态保存在这台设备上，下次打开自动连接。")}>
-          <View style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
-            <View style={{ flex: props.wide ? 1 : undefined, flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Dot tone={props.hub.conn() === "live" ? "on" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "bad" : "wait"} />
-              <Text style={{ flex: 1, fontSize: 15, color: colors.text, numberOfLines: 1 }}>{props.hub.cfg.url}</Text>
-            </View>
-            <View style={{ flexDirection: "row", gap: 8 }}>
-              <Btn label={L("Sign out", "退出登录")} kind="danger" onPress={props.onDisconnect} testID="logout" />
-            </View>
-          </View>
-        </Group>
-        </If>
-      </View>
-    </Scroll>
-    </View>
-  );
-}
-
-// ---------------------------------------------------------------- settings on phones (iOS / Android Settings)
-
-/** What the notification settings show and change, for both layouts. */
-function notifyModel(push: Push, view: () => SettingsView | null, save: (patch: Record<string, unknown>) => void) {
-  const tz = "Asia/Singapore";
-  const prefs = () => notifyPrefsOf(view(), tz);
-  const setPrefs = (change: Partial<NotifyPrefs>) => save(notifyPatch({ ...prefs(), ...change }));
-  const state = () => {
-    const i = push.info();
-    if (!i) return systemNotifications() ? L("System notifications aren’t available here (open the hub’s web page in a phone browser to get push)", "这个环境还不能发系统通知（可以在手机浏览器打开 hub 的网页接收推送）") : L("Web push isn’t supported here (open the hub’s web page in a phone browser)", "这个环境不支持网页推送（请用手机浏览器打开 hub 的网页）");
-    if (push.needsHomeScreen()) return L("On iPhone, add Noop to the Home Screen first", "iPhone 需要先把 Noop 添加到主屏幕");
-    if (!i.supported) return L("This browser doesn’t support web push", "这个浏览器不支持网页推送");
-    if (i.permission === "denied") return systemNotifications() ? L("Blocked by the system", "通知被系统拦截了") : L("Blocked by the browser", "通知被浏览器拦截了");
-    return i.subscribed ? L("On", "已开启") : L("Off", "未开启");
-  };
-  /** The short form for a row's value. */
-  const short = () => {
-    const i = push.info();
-    if (!i || !i.supported || push.needsHomeScreen()) return L("Unavailable", "不可用");
-    if (i.permission === "denied") return L("Blocked", "已拦截");
-    return i.subscribed ? L("On", "已开启") : L("Off", "未开启");
-  };
-  return { prefs, setPrefs, state, short };
-}
-
-/** A grouped, inset section: a muted title above, rows on one rounded surface, a hint below. */
-function Section(props: { title?: string; hint?: string; testID?: string; children: JSX.Element }) {
-  return (
-    <View testID={props.testID} style={{ gap: 7 }}>
-      <If when={props.title}>
-        <Text style={{ paddingHorizontal: 32, fontSize: 13, color: colors.muted }}>{props.title}</Text>
-      </If>
-      <View style={{ marginHorizontal: 16, borderRadius: radius.card, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), overflow: "hidden", backgroundColor: colors.surface }}>{props.children}</View>
-      <If when={props.hint}>
-        <Text style={{ paddingHorizontal: 32, fontSize: 13, lineHeight: 18, color: colors.faint }}>{props.hint}</Text>
-      </If>
-    </View>
-  );
-}
-
-/** The hairline above every row of a section but its first, inset to the text. */
-function Hairline(props: { inset?: number }) {
-  return <View style={{ position: "absolute", top: 0, left: props.inset ?? 16, right: 0, height: 0.5, backgroundColor: surfaceEdge() }} />;
-}
-
-/** A row of a section, at least 48 pt tall: a label (and a line under it), then a value, a control or a chevron. */
 /** The code a machine runs: the short commit, a link to it on GitHub. */
 function RevLink(props: { host: HostInfo }) {
   const short = () => (props.host.rev ?? "").slice(0, 7);
@@ -3146,625 +1786,6 @@ function RevLink(props: { host: HostInfo }) {
   );
 }
 
-/** Ask every machine to update to the latest code; the primary also redeploys the web app and the Worker. */
-async function updateAllMachines(hub: Hub) {
-  const r = await AlertDialog.show({
-    title: L("Update all machines?", "更新所有机器？"),
-    description: L("Each machine pulls the latest code and restarts. Idle machines update now; busy ones restart when their tasks finish. The primary also redeploys the server.", "每台机器拉取最新代码后重启：空闲的马上更新，有任务在跑的等跑完再重启。主控机同时重新发布线上。"),
-    actions: [
-      { id: "cancel", label: L("Cancel", "取消"), role: "cancel" },
-      { id: "update", label: L("Update", "更新") },
-    ],
-  });
-  if (r.action === "update") await hub.api("POST", "/api/fleet/update").catch(() => {});
-}
-
-/** One row per online machine with the commit it runs, then the button that updates them all. */
-/** The commands typed after "/" in the composer: the built-ins, the saved ones (deletable), and a form to add one. */
-function CommandRows(props: { settings: Settings }) {
-  const { view, save } = props.settings;
-  const saved = () => savedCommands(view());
-  const { name, text, editing, note } = props.settings.commandDraft;
-  const open = (c?: Command) => {
-    name.set(c?.name ?? ""); text.set(c?.text ?? ""); note.set("");
-    editing.set(c?.name ?? "");
-  };
-  return (
-    <>
-      <SetRow
-        first
-        label={L("/Update all machines", "/更新所有机器")}
-        detail={L("Make every machine pull the latest code and restart", "让所有机器拉取最新代码并重启")}
-        testID="command-row-builtin"
-        trailing={<Text style={{ fontSize: 12, color: colors.faint, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, backgroundColor: colors.raised }}>{L("Built-in", "内置")}</Text>}
-      />
-      <Each of={saved()} key={(c) => c.name}>
-        {(c) => (
-          <View
-            role="button"
-            testID={`command-row-${c().name}`}
-            accessibilityLabel={L(`Edit command ${c().name}`, `编辑指令 ${c().name}`)}
-            onPress={() => open(c())}
-            hoverStyle={hovered()}
-            class="active:bg-raised"
-          >
-            <Hairline />
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, paddingRight: 14, paddingVertical: 11 }}>
-              <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
-                <Text style={{ fontSize: 15.5, fontWeight: "500", color: colors.text, numberOfLines: 1 }}>/{c().name}</Text>
-                <Text style={{ fontSize: 13.5, lineHeight: 19, color: colors.muted, numberOfLines: 2 }}>{c().text}</Text>
-              </View>
-              <Icon name="chevron" size={14} tint={colors.faint} />
-            </View>
-          </View>
-        )}
-      </Each>
-      <SetRow label={L("New command", "新建指令")} tone="accent" leading={<Icon name="plus" size={16} tint={colors.info} />} onPress={() => open()} testID="command-new" />
-      <CommandEditor settings={props.settings} />
-    </>
-  );
-}
-
-/** New / edit / delete one saved command, in a dialog: a name and the words it sends (several lines welcome). */
-function CommandEditor(props: { settings: Settings }) {
-  const { view, save } = props.settings;
-  const { name, text, editing, note } = props.settings.commandDraft;
-  const isNew = () => editing() === "";
-  const close = () => editing.set(undefined);
-  const others = () => savedCommands(view()).filter((c) => c.name !== editing());
-  const clean = () => name().trim().replace(/^\//, "").replace(/\s+/g, "-");
-  const ok = () => !!clean() && !!text().trim();
-  const submit = async () => {
-    const n = clean(), t = text().trim();
-    if (!n) return note.set(L("Give the command a name", "给指令起个名字"));
-    if (!t) return note.set(L("Write what this command sends to the team", "写下这条指令要发给团队的话"));
-    if (BUILTIN_COMMANDS().some((b) => b.name === n)) return note.set(L(`“${n}” is a built-in command`, `「${n}」是内置指令的名字`));
-    if (others().some((c) => c.name === n)) return note.set(L(`“/${n}” already exists`, `已经有一条「/${n}」`));
-    const list = savedCommands(view());
-    const i = list.findIndex((c) => c.name === editing());
-    const next = i < 0 ? [...list, { name: n, text: t }] : list.map((c, j) => (j === i ? { name: n, text: t } : c));
-    close();
-    await save({ commands: next });
-  };
-  const remove = async () => {
-    const n = editing();
-    close();
-    await save({ commands: savedCommands(view()).filter((c) => c.name !== n) });
-  };
-  const focused = signal(false);
-  return (
-    <Dialog
-      testID="command-editor"
-      open={editing() !== undefined}
-      animation="fade"
-      onOpenChange={({ open }) => !open && close()}
-      backdropClass="bg-scrim"
-      style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}
-    >
-      <View style={{ width: "100%", maxWidth: 560, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
-        <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
-          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{isNew() ? L("New command", "新建指令") : L("Edit command", "编辑指令")}</Text>
-          <ToolButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
-        </View>
-        <View style={{ gap: 16, padding: 20 }}>
-          <Field label={L("Name", "名称")} value={name()} onChange={(v) => { name.set(v); note.set(""); }} placeholder={L("e.g. daily-report", "例如：日报")} testID="command-name" autoFocus={isNew()} hint={clean() ? L(`Type /${clean()} in the message box to use it`, `在输入框里输入 /${clean()} 选用`) : L("Type / and the name in the message box to use it", "在输入框里输入 / 加名称选用")} />
-          <View style={{ gap: 7 }}>
-            <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{L("Message to the team", "发给团队的话")}</Text>
-            <Input
-              testID="command-text"
-              multiline
-              value={text()}
-              onChange={({ value }) => { text.set(value); note.set(""); }}
-              onFocus={() => focused.set(true)}
-              onBlur={() => focused.set(false)}
-              placeholder={L("e.g. Summarize today’s progress on each project as a daily report,\none section per project, conclusion first.", "例如：把今天各项目的进展整理成日报发给我，\n按项目分段，每段先说结论。")}
-              class="placeholder:text-faint"
-              style={{
-                height: 140,
-                paddingHorizontal: 14,
-                paddingVertical: 10,
-                borderRadius: radius.control,
-                borderWidth: 1,
-                borderColor: focused() ? colors.accent : colors.fieldBorder,
-                backgroundColor: colors.field,
-                fontSize: 15.5,
-                lineHeight: 23,
-                color: colors.text,
-                ...(focused() ? { outlineStyle: "solid", outlineWidth: 3, outlineColor: alpha(colors.accent, 0.12) } : {}),
-              }}
-            />
-          </View>
-          <If when={note()}>
-            <Text testID="command-note" style={{ fontSize: 13.5, color: colors.danger }}>{note()}</Text>
-          </If>
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingBottom: 20 }}>
-          <If when={!isNew()}>
-            <Btn label={L("Delete", "删除")} kind="danger" icon="trash" onPress={() => void remove()} testID="command-delete" />
-          </If>
-          <View style={{ flex: 1 }} />
-          <Btn label={L("Cancel", "取消")} kind="ghost" onPress={close} testID="command-cancel" />
-          <Btn label={isNew() ? L("Add", "添加") : L("Save", "保存")} kind="primary" disabled={!ok()} onPress={() => void submit()} testID="command-save" />
-        </View>
-      </View>
-    </Dialog>
-  );
-}
-
-function VersionRows(props: { hub: Hub }) {
-  const hosts = () => props.hub.status()?.hosts ?? [];
-  // the lines age (waiting → not responding, finished → hidden): re-read the clock every few seconds
-  const clock = signal(Date.now());
-  const timer = setInterval(() => clock.set(Date.now()), 5000);
-  cleanup(() => clearInterval(timer));
-  const request = () => props.hub.status()?.update?.at;
-  const summary = () => updateSummary(props.hub.status(), clock());
-  const toneColor = (t: UpdateLine["tone"]) => (t === "ok" ? colors.up : t === "bad" ? colors.danger : colors.muted);
-  // This app's own code: the release it was built for, or the OTA package it runs (nsh/updater).
-  const ota = runningPackage();
-  const client = ota ? L(`${ota.version} · OTA build ${ota.build}`, `${ota.version} · OTA 构建 ${ota.build}`) : CLIENT_VERSION;
-  // The installed app around that code (on iOS its CFBundleShortVersionString / CFBundleVersion) and its NSH runtime.
-  const info = (nshUpdater as { shellInfo?: () => ShellInfo }).shellInfo?.();
-  const shell = shellLine(info, platform.os);
-  const shellText = shell?.text === "no-packages" ? L(`${info!.version ?? "?"} (${info!.build ?? "?"}) takes no over-the-air updates: install the app again`, `${info!.version ?? "?"}（${info!.build ?? "?"}）收不到自动更新：请重新安装 App`)
-    : shell?.text;
-  return (
-    <>
-      <SetRow first label={L("This app", "本机客户端")} value={client} testID="version-client" />
-      <If when={shell}>
-        <SetRow label={L("App shell", "外壳")} value={shell?.tone === "ok" ? shellText : undefined} detail={shell?.tone === "bad" ? shellText : undefined} tone={shell?.tone === "bad" ? "danger" : undefined} testID="version-shell" />
-      </If>
-      <Each of={hosts()} key={(h) => h.host}>
-        {(h) => {
-          const line = () => updateLine(h(), request(), clock());
-          return (
-            <SetRow
-              label={h().host}
-              value={h().rev?.slice(0, 7) ?? L("Unknown", "未知")}
-              chevron={!!h().rev_url}
-              onPress={h().rev_url ? () => void openUrl(h().rev_url!).catch(() => {}) : undefined}
-              testID={`version-${h().host}`}
-              below={
-                <If when={line()}>
-                  <View testID={`update-${h().host}`} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <If when={line()!.busy}>
-                      <Spinner size={12} tint={colors.muted} />
-                    </If>
-                    <Text style={{ flexShrink: 1, fontSize: 13, lineHeight: 18, color: toneColor(line()!.tone) }}>{line()!.text}</Text>
-                  </View>
-                </If>
-              }
-            />
-          );
-        }}
-      </Each>
-      <SetRow
-        first={!hosts().length}
-        label={summary()?.busy ? L("Updating…", "正在更新…") : L("Update all machines", "更新所有机器")}
-        detail={summary()?.text}
-        tone="accent"
-        disabled={!!summary()?.busy}
-        onPress={() => void updateAllMachines(props.hub)}
-        testID="update-fleet"
-      />
-    </>
-  );
-}
-
-function SetRow(props: {
-  label: string;
-  detail?: string;
-  value?: string;
-  first?: boolean;
-  chevron?: boolean;
-  tone?: "danger" | "accent";
-  leading?: JSX.Element;
-  trailing?: JSX.Element;
-  /** Under the label and detail (a progress line). */
-  below?: JSX.Element;
-  inset?: number;
-  disabled?: boolean;
-  onPress?: () => void;
-  testID?: string;
-}) {
-  const press = () => (props.disabled ? undefined : props.onPress);
-  return (
-    <View
-      role={props.onPress ? "button" : undefined}
-      testID={props.testID}
-      accessibilityLabel={props.onPress ? [props.label, props.value].filter(Boolean).join("，") : undefined}
-      accessibilityState={props.onPress ? { disabled: !!props.disabled } : undefined}
-      onPress={press()}
-      class={props.onPress && !props.disabled ? "active:bg-raised" : undefined}
-      style={{ minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, paddingRight: 14, paddingVertical: 10 }}
-    >
-      <If when={!props.first}>
-        <Hairline inset={props.inset} />
-      </If>
-      {props.leading}
-      <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-        <Text
-          style={{
-            fontSize: 16,
-            textAlign: props.tone === "danger" && !props.trailing && !props.chevron ? "center" : "left",
-            color: props.disabled ? colors.faint : props.tone === "danger" ? colors.danger : props.tone === "accent" ? colors.info : colors.text,
-            numberOfLines: 1,
-          }}
-        >
-          {props.label}
-        </Text>
-        <If when={props.detail}>
-          <Text style={{ fontSize: 13, lineHeight: 18, color: colors.muted }}>{props.detail}</Text>
-        </If>
-        {props.below}
-      </View>
-      <If when={props.value}>
-        <Text style={{ flexShrink: 1, fontSize: 16, color: colors.muted, numberOfLines: 1 }}>{props.value}</Text>
-      </If>
-      {props.trailing}
-      <If when={props.chevron}>
-        <Icon name="chevron" size={14} tint={colors.faint} />
-      </If>
-    </View>
-  );
-}
-
-const MEDIA_HINT = () => L("How long screenshots and images in the chat are kept. They’re deleted when they expire.", "聊天里的截图和图片保存多久，过期后自动删除。");
-
-/** How long images are kept: 7, 14, 30 or 90 days. */
-function MediaDaysChoices(props: { settings: Settings }) {
-  const { view, save } = props.settings;
-  return (
-    <Choices
-      label={L("Image retention", "图片保留")}
-      choices={MEDIA_DAYS.map((d) => ({ id: String(d), label: L(`${d} days`, `${d} 天`), testID: `media-days-${d}` }))}
-      selected={view() ? String(mediaDaysOf(view())) : null}
-      onPick={(id) => save(patches.mediaDays(Number(id)))}
-    />
-  );
-}
-
-type Choice = { id: string; label: string; detail?: string; testID: string };
-
-/** Pick one of a few: a radio set of rows, the chosen one checked. */
-function Choices(props: { label: string; choices: Choice[]; selected: string | null; onPick: (id: string) => void }) {
-  return (
-    <RadioGroup>
-      <Each of={props.choices} key={(c) => c.id}>
-        {(c, i) => (
-          <Radio
-            testID={c().testID}
-            checked={c().id === props.selected}
-            onChange={() => props.onPick(c().id)}
-            accessibilityLabel={c().label}
-            class="active:bg-raised"
-            style={{ minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, paddingRight: 16, paddingVertical: 10 }}
-          >
-            <If when={i() > 0}>
-              <Hairline />
-            </If>
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={{ fontSize: 16, color: colors.text }}>{c().label}</Text>
-              <If when={c().detail}>
-                <Text style={{ fontSize: 13, color: colors.muted }}>{c().detail}</Text>
-              </If>
-            </View>
-            <View style={{ width: 20, alignItems: "center" }}>
-              <If when={c().id === props.selected}>
-                <View testID={`choice-check-${c().testID}`}><Icon name="check" size={17} tint={colors.info} /></View>
-              </If>
-            </View>
-          </Radio>
-        )}
-      </Each>
-    </RadioGroup>
-  );
-}
-
-/** A page of sections on the grouped background. */
-function Grouped(props: { testID?: string; settings?: Settings; children: JSX.Element }) {
-  return (
-    <View style={{ flex: 1, backgroundColor: platform.os === "ios" ? (isDark() ? "#1c1c1e" : "#f2f2f2") : colors.background }}>
-      <If when={props.settings}><SaveNote settings={props.settings!} /></If>
-      <Scroll testID={props.testID} style={{ flex: 1 }}>
-        <View style={{ width: "100%", maxWidth: 640, alignSelf: "center", gap: 28, paddingTop: 20, paddingBottom: Math.max(32, safeArea().bottom + 16) }}>{props.children}</View>
-      </Scroll>
-    </View>
-  );
-}
-
-function SaveNote(props: { settings: Settings }) {
-  return (
-    <If when={props.settings.error()}>
-      <Text testID="settings-note" style={{ paddingHorizontal: 32, paddingVertical: 8, fontSize: 13, color: props.settings.error() ? colors.danger : colors.up }}>
-        {props.settings.error()}
-      </Text>
-    </If>
-  );
-}
-
-const routineValue = (r: { enabled: boolean; every: string }) => (r.enabled ? everyLabel(r.every) : L("Off", "已关闭"));
-
-/** 设置 on a phone: a list of sections; 通知, each member and each routine push pages of their own. */
-function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen: (r: Route) => void; onDisconnect: () => void }) {
-  const { view, error, save } = props.settings;
-  props.settings.load();
-  const notify = notifyModel(props.push, view, save);
-  const eff = () => view()?.effective;
-  async function logout() {
-    const r = await AlertDialog.show({
-      title: L("Sign out?", "退出登录？"),
-      description: L("Notifications will be turned off on this device, and you’ll need to sign in again next time.", "这台设备会关闭通知，下次打开需要重新登录。"),
-      actions: [
-        { id: "cancel", label: L("Cancel", "取消"), role: "cancel" },
-        { id: "logout", label: L("Sign out", "退出登录"), role: "destructive" },
-      ],
-    });
-    if (r.action === "logout") props.onDisconnect();
-  }
-  return (
-    <Grouped testID="phone-settings" settings={props.settings}>
-      <Section title={L("Notifications", "通知")} hint={L("Decisions that need you are pushed to this device. You can pick an option right from the notification.", "需要你拍板的事推送到这台设备；通知上可以直接选择选项。")}>
-        <SetRow first label={L("Notifications", "通知")} value={notify.short()} chevron onPress={() => props.onOpen({ name: "notify" })} testID="settings-notify" />
-      </Section>
-      <Section title={L("Language", "语言")}>
-        <LangChoices />
-      </Section>
-      <Section title={L("Memory", "记忆")} hint={L("The rules the team works by, your preferences, member profiles and past decisions. Read-only.", "团队做事依据的规则、你的偏好、成员档案和决策先例。只读。")}>
-        <SetRow first label={L("Rules & memory", "规则与记忆")} chevron onPress={() => props.onOpen({ name: "rules" })} testID="settings-rules" />
-      </Section>
-      <If when={eff()} else={<Text style={{ paddingHorizontal: 32, fontSize: 14, color: colors.faint }}>{error() ? L("Couldn’t load settings", "设置读取失败") : L("Loading…", "读取中…")}</Text>}>
-        {(e) => (
-          <View style={{ gap: 28 }}>
-            <Section title={L("Members", "成员")} hint={L("Model: which to use first, and which to switch to on failure or when out of quota. Autonomy: how big a decision needs your input first.", "模型：先用哪个、失败或额度用尽时换哪个；自主程度：多大的事需要先问你。")}>
-              <Each of={e().agents} key={(a) => a.id}>
-                {(a, i) => (
-                  <SetRow
-                    first={i() === 0}
-                    inset={58}
-                    leading={<Avatar from={a().id} />}
-                    label={displayName(a().id)}
-                    detail={`${cliLabel(a().clis)} · ${autonomyLabel(a().autonomy)}`}
-                    chevron
-                    onPress={() => props.onOpen({ name: "member", id: a().id })}
-                    testID={`member-${a().id}`}
-                  />
-                )}
-              </Each>
-            </Section>
-            <Section title={L("Routines", "例行任务")} hint={L("Things the team does on a schedule.", "团队定时自己做的事。")}>
-              <Each of={e().routines} key={(r) => r.name}>
-                {(r, i) => (
-                  <SetRow
-                    first={i() === 0}
-                    label={r().name}
-                    detail={r().agent}
-                    value={routineValue(r())}
-                    chevron
-                    onPress={() => props.onOpen({ name: "routine", routine: r().name })}
-                    testID={`routine-row-${r().name}`}
-                  />
-                )}
-              </Each>
-            </Section>
-            <Section title={L("Parallelism", "并行")} hint={L("Tasks each machine runs at once, 1 to 32.", "每台机器同时运行的任务数，1 到 32。")}>
-              <SetRow
-                first
-                label={L("At once", "同时运行")}
-                trailing={
-                  <ParallelInput value={e().max_parallel ?? 2} onChange={(value) => save(patches.maxParallel(value))} />
-                }
-              />
-            </Section>
-          </View>
-        )}
-      </If>
-      <Section title={L("Commands", "常用指令")} hint={L("Type / in the message box to use one. Built-in commands perform an action; ones you add send a message to the team.", "在输入框里输入 / 选用。内置指令执行操作，你添加的指令把一段话发给团队。")}>
-        <CommandRows settings={props.settings} />
-      </Section>
-      <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
-        <MediaDaysChoices settings={props.settings} />
-      </Section>
-      <Section title={L("Version", "版本")} hint={L("The code each machine runs. Updating makes every machine pull the latest code, and the primary also redeploys the server.", "每台机器运行的代码。更新会让所有机器拉取最新代码，主控机同时重新发布线上。")}>
-        <VersionRows hub={props.hub} />
-      </Section>
-      <Section title={L("Account", "账号与连接")} hint={L("You stay signed in on this device and reconnect automatically next time.", "登录状态保存在这台设备上，下次打开自动连接。")}>
-        <SetRow
-          first
-          leading={<Dot tone={props.hub.conn() === "live" ? "on" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "bad" : "wait"} />}
-          label={props.hub.cfg.url.replace(/^https?:\/\//, "")}
-        />
-        <SetRow label={L("Sign out", "退出登录")} tone="danger" onPress={() => void logout()} testID="logout" inset={0} />
-      </Section>
-    </Grouped>
-  );
-}
-
-/** 通知 on a phone: this device, what is pushed, and the quiet hours. */
-function PhoneNotify(props: { push: Push; settings: Settings }) {
-  const push = props.push;
-  const { view, save } = props.settings;
-  const notify = notifyModel(push, view, save);
-  return (
-    <Grouped testID="phone-notify" settings={props.settings}>
-      <Section title={L("This device", "本设备")} hint={L("When on, important messages are pushed to this device.", "开启后，重要消息会推送到这台设备。")}>
-        <SetRow first label={push.info()?.device ?? L("This device", "本设备")} trailing={<Text testID="push-state" style={{ fontSize: 16, color: colors.muted }}>{notify.short()}</Text>} />
-        <If
-          when={push.info()?.subscribed}
-          else={<SetRow label={L("Turn on notifications", "开启通知")} tone="accent" disabled={!push.canAsk() || push.busy()} onPress={push.enable} testID="push-enable" />}
-        >
-          <SetRow label={L("Send test notification", "发送测试通知")} tone="accent" disabled={push.busy()} onPress={push.test} testID="push-test" />
-          <SetRow label={L("Turn off on this device", "关闭本设备通知")} tone="danger" onPress={push.disable} testID="push-disable" />
-        </If>
-      </Section>
-      <If when={push.note()}>
-        <Text testID="push-note" style={{ marginTop: -20, paddingHorizontal: 32, fontSize: 13, color: colors.danger }}>{push.note()}</Text>
-      </If>
-      <If when={push.needsHomeScreen()}>
-        <Section title={L("Turn on notifications on iPhone", "在 iPhone 上开启通知")}>
-          <View style={{ padding: 16 }}>
-            <Steps steps={[L("In Safari, tap the Share button at the bottom", "在 Safari 里点底部的「分享」按钮"), L("Choose “Add to Home Screen”, then tap “Add”", "选「添加到主屏幕」，再点「添加」"), L("Open Noop from the Home Screen, sign in, and tap “Turn on notifications” here", "从主屏幕打开 Noop，登录后回到这里点「开启通知」")]} />
-          </View>
-        </Section>
-      </If>
-      <If when={push.info()?.permission === "denied" && !push.needsHomeScreen()}>
-        <Text style={{ paddingHorizontal: 32, fontSize: 13, lineHeight: 18, color: colors.muted }}>{L(`${notify.state()}: allow Noop in the browser’s site settings (or System Settings → Notifications), then reload and turn it on.`, `${notify.state()}：在浏览器的网站设置（或系统设置 → 通知）里允许 Noop，然后刷新页面再开启。`)}</Text>
-      </If>
-      <If when={view()}>
-        <Section title={L("What to push", "推送哪些")}>
-          <Each of={NOTIFY_KINDS()}>
-            {(k, i) => (
-              <SetRow
-                first={i() === 0}
-                label={k()[1]}
-                trailing={
-                  <Toggle
-                    testID={`notify-${k()[0]}`}
-                    label={k()[1]}
-                    value={notify.prefs().kinds[k()[0]]}
-                    onChange={(on) => notify.setPrefs({ kinds: { ...notify.prefs().kinds, [k()[0]]: on } })}
-                  />
-                }
-              />
-            )}
-          </Each>
-        </Section>
-        <Section title={L("Quiet hours", "免打扰时段")} hint={L(`Recorded but not pushed during these hours (time zone ${notify.prefs().tz}).`, `这段时间只记下，不推送（时区 ${notify.prefs().tz}）。`)}>
-          <Choices
-            label={L("Quiet hours", "免打扰时段")}
-            choices={QUIET_PRESETS().map((q) => ({ id: quietKey(q.value), label: q.label, testID: `quiet-${quietKey(q.value)}` }))}
-            selected={quietKey(notify.prefs().quiet_hours)}
-            onPick={(id) => notify.setPrefs({ quiet_hours: QUIET_PRESETS().find((q) => quietKey(q.value) === id)!.value })}
-          />
-        </Section>
-      </If>
-    </Grouped>
-  );
-}
-
-/** A member on a phone: its models and its autonomy. */
-function PhoneMember(props: { id: string; settings: Settings }) {
-  const { view, save } = props.settings;
-  const agent = () => view()?.effective.agents.find((a) => a.id === props.id);
-  return (
-    <Grouped testID="phone-member" settings={props.settings}>
-      <If when={agent()} else={<Text style={{ paddingHorizontal: 32, fontSize: 14, color: colors.faint }}>{L("No such member", "没有这个成员")}</Text>}>
-        {(a) => (
-          <>
-            <Section title={L("Model", "模型")} hint={L("Which to use first; switches to the next on failure or when out of quota.", "先用哪个；失败或额度用尽时换下一个。")}>
-              <Choices
-                label={L("Model", "模型")}
-                choices={view()!.options.clis.map((c) => ({ id: cliKey(c), label: cliLabel(c), testID: `cli-${props.id}-${cliKey(c)}` }))}
-                selected={cliKey(a().clis)}
-                onPick={(id) => save(patches.clis(props.id, view()!.options.clis.find((c) => cliKey(c) === id)!))}
-              />
-            </Section>
-            <Section title={L("Autonomy", "自主程度")} hint={L("How big a decision needs your input first.", "多大的事需要先问你。")}>
-              <Choices
-                label={L("Autonomy", "自主程度")}
-                choices={view()!.options.autonomy.map((l) => ({ id: l, label: autonomyLabel(l), testID: `autonomy-${props.id}-${l}` }))}
-                selected={a().autonomy}
-                onPick={(l) => save(patches.autonomy(props.id, l))}
-              />
-            </Section>
-          </>
-        )}
-      </If>
-    </Grouped>
-  );
-}
-
-/** A routine on a phone: on or off, and how often. */
-function PhoneRoutine(props: { name: string; settings: Settings }) {
-  const { view, save } = props.settings;
-  const routine = () => view()?.effective.routines.find((r) => r.name === props.name);
-  return (
-    <Grouped testID="phone-routine" settings={props.settings}>
-      <If when={routine()} else={<Text style={{ paddingHorizontal: 32, fontSize: 14, color: colors.faint }}>{L("No such routine", "没有这个例行任务")}</Text>}>
-        {(r) => (
-          <>
-            <Section hint={[r().desc, r().agent && L(`Run by ${r().agent}.`, `由 ${r().agent} 执行。`)].filter(Boolean).join("\n")}>
-              <SetRow
-                first
-                label={L("Enabled", "启用")}
-                trailing={<Toggle testID={`routine-${props.name}`} label={L("Enabled", "启用")} value={r().enabled} onChange={(on) => save(patches.routine(props.name, { enabled: on }))} />}
-              />
-            </Section>
-            <Section title={L("Interval", "运行间隔")}>
-              <Choices
-                label={L("Interval", "运行间隔")}
-                choices={intervalsWith(r().every).map((iv) => ({ id: iv, label: everyLabel(iv), testID: `every-${props.name}-${iv}` }))}
-                selected={r().every}
-                onPick={(iv) => save(patches.routine(props.name, { every: iv }))}
-              />
-            </Section>
-          </>
-        )}
-      </If>
-    </Grouped>
-  );
-}
-
-// ---------------------------------------------------------------- the team's rules and memory (read-only)
-
-/** 记忆: policies, the owner's memory, each agent's profile and memory, closed decisions. */
-function RulesList(props: { hub: Hub; onOpen: (path: string) => void }) {
-  const groups = signal<RuleGroup[] | null>(null);
-  const error = signal("");
-  void (async () => {
-    const lists: Record<string, DataFile[]> = {};
-    for (const pre of RULE_PREFIXES) {
-      const r = await props.hub.api("GET", `/api/files/list?prefix=${encodeURIComponent(pre)}`);
-      if (!r.ok) { error.set(r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器")); return; }
-      lists[pre] = (r.data.files as DataFile[] | undefined) ?? [];
-    }
-    groups.set(groupRules(lists));
-  })();
-  return (
-    <Grouped testID="rules">
-      <Text style={{ paddingHorizontal: 32, fontSize: 13, lineHeight: 18, color: colors.muted }}>{L("The rules and memory the team works by. Read-only; the team maintains them as it works.", "团队做事依据的规则和记忆。这里只读，内容由团队在工作中维护。")}</Text>
-      <If when={groups()} else={<Text style={{ paddingHorizontal: 32, fontSize: 14, color: error() ? colors.danger : colors.faint }}>{error() || L("Loading…", "读取中…")}</Text>}>
-        {(gs) => (
-          <Each of={gs()} key={(g) => g.key}>
-            {(g) => (
-              <Section title={g().title} hint={g().hint} testID={`rules-${g().key}`}>
-                <If when={g().items.length} else={<SetRow first label={L("Nothing yet", "暂无内容")} disabled />}>
-                  <Each of={g().items} key={(it) => it.path}>
-                    {(it, i) => (
-                      <SetRow first={i() === 0} label={it().title} value={it().detail} chevron onPress={() => props.onOpen(it().path)} testID={`rule-${it().path}`} />
-                    )}
-                  </Each>
-                </If>
-              </Section>
-            )}
-          </Each>
-        )}
-      </If>
-    </Grouped>
-  );
-}
-
-/** One rules or memory file, rendered as markdown. Read-only. */
-function RuleDoc(props: { hub: Hub; path: string; wide: boolean }) {
-  const text = signal<string | null>(null);
-  const error = signal("");
-  void props.hub.api("GET", `/api/files/read?path=${encodeURIComponent(props.path)}`).then((r) => {
-    if (r.ok && typeof r.data.content === "string") text.set(stripFrontMatter(r.data.content));
-    else error.set(r.status === 404 ? L("This file no longer exists.", "这个文件已经不在了。") : r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器"));
-  });
-  return (
-    <Scroll testID="rule-doc" style={{ flex: 1, backgroundColor: colors.background }}>
-      <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 32 : 16, paddingTop: 20, paddingBottom: Math.max(32, safeArea().bottom + 16) }}>
-        <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{props.path}</Text>
-        <If when={text() !== null} else={<Text style={{ fontSize: 14, color: error() ? colors.danger : colors.faint }}>{error() || L("Loading…", "读取中…")}</Text>}>
-          <If when={(text() ?? "").trim()} else={<Text style={{ fontSize: 14, color: colors.faint }}>{L("(Empty file)", "（空文件）")}</Text>}>
-            <View selectable><Rich text={text() ?? ""} /></View>
-          </If>
-        </If>
-      </View>
-    </Scroll>
-  );
-}
 
 // ---------------------------------------------------------------- commands ("/" in the composer)
 
@@ -3826,69 +1847,6 @@ function CommandList(props: {
   );
 }
 
-// ---------------------------------------------------------------- keyboard help
-
-const SHORTCUTS = (): [string, string][] => [
-  ["Enter", L("Send", "发送")],
-  ["Shift+Enter", L("New line", "换行")],
-  [`${keymap.label("mod+enter")}`, L("Send (anytime)", "发送（任何时候）")],
-  [`/  ·  ${keymap.label("mod+k")}`, L("Focus the message box", "聚焦输入框")],
-  [`1 – 9  ·  ${keymap.label("alt+1")}…`, L("Pick an option on the current decision", "选择当前决策的选项")],
-  [`J / K  ·  ${keymap.label("alt+j")} / ${keymap.label("alt+k")}`, L("Next / previous pending decision", "下一个 / 上一个待决策")],
-  [`R  ·  ${keymap.label("alt+r")}`, L("Reply to the current decision (other instructions)", "回复当前决策（其他指示）")],
-  [`G  ·  ${keymap.label("alt+g")}`, L("Back to bottom", "回到底部")],
-  ["Esc", L("Cancel reply / leave the message box / close", "取消回复 / 离开输入框 / 关闭")],
-  [keymap.label("mod+,"), L("Team settings", "团队设置")],
-  [keymap.label("mod+b"), L("Show / hide sidebar", "显示 / 隐藏侧栏")],
-  [keymap.label("mod+shift+l"), L("Toggle light / dark", "切换浅色 / 深色")],
-  ["?", L("All keyboard shortcuts", "快捷键一览")],
-];
-
-/** The keyboard shortcuts, in a `Dialog`: Escape, the backdrop and the close button close it. */
-function HelpSheet(props: { open: boolean; onClose: () => void }) {
-  return (
-    <Dialog
-      testID="help"
-      open={props.open}
-      animation="fade"
-      onOpenChange={({ open }) => !open && props.onClose()}
-      backdropClass="bg-scrim"
-      backdropTestID="help-backdrop"
-      style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}
-    >
-      <View
-        accessibilityLabel={L("Keyboard shortcuts", "键盘快捷键")}
-        style={{
-          width: "100%",
-          maxWidth: 520,
-          borderRadius: 16,
-          borderWidth: 1,
-          borderColor: colors.border,
-          backgroundColor: colors.surface,
-          overflow: "hidden",
-        }}
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
-          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{L("Keyboard shortcuts", "键盘快捷键")}</Text>
-          <ToolButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={props.onClose} />
-        </View>
-        <View style={{ paddingVertical: 8 }}>
-          <Each of={SHORTCUTS()}>
-            {(s) => (
-              <View style={{ flexDirection: "row", alignItems: "center", minHeight: 38, paddingHorizontal: 20, gap: 12 }}>
-                <Text style={{ flex: 1, fontSize: 15, color: colors.text }}>{s()[1]}</Text>
-                <View style={{ flexDirection: "row", gap: 4 }}>
-                  <Each of={s()[0].split("  ·  ")}>{(k) => <Kbd k={k()} />}</Each>
-                </View>
-              </View>
-            )}
-          </Each>
-        </View>
-        <Text style={{ fontSize: 13, color: colors.faint, paddingHorizontal: 20, paddingBottom: 16 }}>{L("Single-key shortcuts work outside the message box; while typing, use the Alt (⌥) combinations.", "单键快捷键在输入框外生效；打字时用带 Alt（⌥）的组合键。")}</Text>
-      </View>
-    </Dialog>
-  );
-}
 
 // ---------------------------------------------------------------- chat
 
@@ -3947,6 +1905,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     sidebarOpen.set(open);
   };
   const help = signal(false);
+  const helpOpened = latch(help);
   // The pages: the channel at the bottom, what the sidebar, a link or settings opened above it.
   const nav = createNavStack<Route>([CHANNEL]);
   const top = () => { const r = nav.routes(); return r[r.length - 1]; };
@@ -3975,10 +1934,12 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (t.name === "host" || t.name === "tasks" || (t.name === "channel" && untracked(scope))) { drawer.set(false); nav.push({ name: "task", id }); }
     else show({ name: "task", id });
   };
-  taskLink = openTask;
   const repos = computed(() => { const m = new Map<string, string>(); for (const e of props.hub.events()) reposIn(`${e.text}\n${(e.options ?? []).join("\n")}`, m); return m; });
-  knownRepos = repos;
-  taskState = (id) => { const s = props.hub.status(); return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === id)?.state ?? (s?.active.some((t) => t.id === id) ? "active" : undefined); };
+  bindMarkdown({
+    taskLink: openTask,
+    knownRepos: repos,
+    taskState: (id) => { const s = props.hub.status(); return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === id)?.state ?? (s?.active.some((t) => t.id === id) ? "active" : undefined); },
+  });
   /** A card being scrolled to (picked from the sidebar, a notification): entering the channel leaves the scroll to it. */
   let jumping: string | null = null;
   // Entering the channel (first load, back from a task or settings) shows the latest messages.
@@ -4976,7 +2937,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                   class={platform.os === "ios" ? "placeholder:text-muted-foreground" : "placeholder:text-faint"}
                   style={{
                     height: compactComposer() ? (touch ? 44 : 36) : inputHeight(),
-                    marginLeft: compactComposer() ? (touch ? 44 : 36) - 2 + (hasEmojiPicker ? (touch ? 44 : 36) + 6 : 0) : 0,
+                    marginLeft: compactComposer() ? (touch ? 44 : 36) - 2 + (hasEmojiPicker() ? (touch ? 44 : 36) + 6 : 0) : 0,
                     marginRight: compactComposer() && canDictate() ? (touch ? 44 : 36) + 8 : 0,
                     minWidth: 0, fontSize: size.text, lineHeight: 24, color: colors.text,
                     paddingVertical: compactComposer() ? (touch ? 10 : 6) : 2,
@@ -5266,7 +3227,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
         )}
       </If>
 
-      <HelpSheet open={help()} onClose={() => help.set(false)} />
+      <If when={helpOpened()}>
+        <HelpSheet open={help()} onClose={() => help.set(false)} />
+      </If>
       <If when={dropping()}>
         {(files) => <DropTarget files={files()} />}
       </If>
@@ -5301,61 +3264,6 @@ function DropTarget(props: { files: string[] }) {
 
 // ---------------------------------------------------------------- connect
 
-function Field(props: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  onSubmit?: () => void;
-  placeholder?: string;
-  masked?: boolean;
-  testID?: string;
-  hint?: string;
-  autoFocus?: boolean;
-  keyboardType?: "email-address" | "number-pad" | "url";
-  autoComplete?: "email" | "one-time-code" | "url";
-  maxLength?: number;
-  big?: boolean;
-}) {
-  const focused = signal(false);
-  return (
-    <View style={{ gap: 7 }}>
-      <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{props.label}</Text>
-      <Input
-        testID={props.testID}
-        value={props.value}
-        masked={props.masked}
-        autoFocus={props.autoFocus}
-        keyboardType={props.keyboardType}
-        autoComplete={props.autoComplete}
-        maxLength={props.maxLength}
-        autoCapitalize="none"
-        autoCorrect={false}
-        placeholder={props.placeholder}
-        class="placeholder:text-faint"
-        submitBehavior="submit"
-        onSubmit={() => props.onSubmit?.()}
-        onChange={({ value }) => props.onChange(value)}
-        onFocus={() => focused.set(true)}
-        onBlur={() => focused.set(false)}
-        style={{
-          height: props.big ? 56 : 44,
-          paddingHorizontal: 14,
-          borderRadius: radius.control,
-          borderWidth: 1,
-          borderColor: focused() ? colors.accent : colors.fieldBorder,
-          backgroundColor: colors.field,
-          fontSize: 16,
-          color: colors.text,
-          ...(props.big ? { fontSize: 26, letterSpacing: 10, textAlign: "center", fontVariant: ["tabular-nums"] } : {}),
-          ...(focused() ? { outlineStyle: "solid", outlineWidth: 3, outlineColor: alpha(colors.accent, 0.12) } : {}),
-        }}
-      />
-      <If when={props.hint}>
-        <Text style={{ fontSize: 13, lineHeight: 19, color: colors.muted }}>{props.hint}</Text>
-      </If>
-    </View>
-  );
-}
 
 const RESEND = 60;
 

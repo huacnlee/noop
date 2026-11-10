@@ -1,13 +1,25 @@
-import { keyboardFrame, safeArea, signal, Text, View, windowSize } from "nsh";
+import { keyboardFrame, platform, safeArea, signal, Text, View } from "nsh";
 import { Button, Popover, Sheet } from "nsh/base";
-import * as base from "nsh/base";
 import { L } from "./i18n";
+import { lazyComponent, lazyModule } from "./lazy";
 import { colors, hovered, Icon, Tip } from "./ui";
 import { popupSurface } from "./ui/popup";
 
-// Package updates can reach shells predating EmojiPicker. Keep those shells usable.
-const EmojiPicker = base.EmojiPicker;
-export const hasEmojiPicker = typeof EmojiPicker === "function";
+// The picker is a chunk of its own (emoji-picker.tsx): on the web it and EmojiPicker's part of the runtime download
+// when it first opens. Package updates can reach shells predating EmojiPicker: the chunk tells, and native bundles
+// inline it, so a native shell knows at once whether to show the button. A web page runs the runtime packaged with
+// this code, which has it.
+const panel = lazyModule(() => import("./emoji-picker"));
+const native = platform.os !== "web";
+if (native) void panel.load().catch(() => {});
+/** Whether the composer shows the emoji button. */
+export const hasEmojiPicker = (): boolean => (native ? panel.loaded()?.hasEmojiPicker === true : panel.loaded()?.hasEmojiPicker !== false);
+
+const Panel = lazyComponent(panel, (m) => m.EmojiPanel, (state) => (
+  <Text testID="emoji-loading" class="p-6 text-center text-sm text-muted-foreground">
+    {state.failed ? L("Couldn’t load emoji. Close and try again.", "表情加载失败，关闭后再试一次。") : L("Loading emoji…", "正在加载表情…")}
+  </Text>
+));
 
 export function ComposerEmoji(props: {
   touch: boolean;
@@ -15,7 +27,6 @@ export function ComposerEmoji(props: {
   onSelect: (emoji: string) => void;
   onInserted: () => void;
 }) {
-  if (!hasEmojiPicker) return null;
   const open = signal(false);
   const recent = signal<string[]>([]);
   let inserted = false;
@@ -39,15 +50,9 @@ export function ComposerEmoji(props: {
     </Button>
   );
   const picker = () => (
-    <EmojiPicker
-      testID="emoji-picker"
-      accessibilityLabel={L("Emoji", "表情")}
-      searchAccessibilityLabel={L("Search emoji", "搜索表情")}
-      placeholder={L("Search emoji", "搜索表情（英文名称）")}
-      autoFocus={!props.touch}
-      columns={props.touch ? Math.max(1, Math.min(7, Math.floor((windowSize().width - 16) / 44))) : 8}
+    <Panel
+      touch={props.touch}
       recent={recent()}
-      groupLabels={{ recent: L("Recent", "最近使用"), smileysEmotion: L("Smileys & emotion", "笑脸与情感"), peopleBody: L("People & body", "人物与身体"), animalsNature: L("Animals & nature", "动物与自然"), foodDrink: L("Food & drink", "食物与饮料"), travelPlaces: L("Travel & places", "旅行与地点"), activities: L("Activities", "活动"), objects: L("Objects", "物品"), symbols: L("Symbols", "符号"), flags: L("Flags", "旗帜") }}
       onSelect={({ emoji, base }) => {
         recent.update((items) => [base, ...items.filter((item) => item !== base)].slice(0, 24));
         props.onSelect(emoji);
@@ -55,17 +60,11 @@ export function ComposerEmoji(props: {
         change(false);
       }}
       onCancel={() => change(false)}
-      style={{ width: props.touch ? "100%" : Math.min(336, windowSize().width - 32), height: Math.max(120, Math.min(380, windowSize().height - keyboardFrame().height - safeArea().top - safeArea().bottom - 96)) }}
-      searchBarClass="mx-2 mt-2 h-11 flex-row items-center rounded-lg bg-muted px-3"
-      searchClass="flex-1 text-base text-foreground placeholder:text-muted-foreground"
-      rowClass="px-2"
-      groupClass="px-3 pt-3 pb-1 text-xs font-semibold text-muted-foreground"
-      itemClass="flex-1 h-11 items-center justify-center rounded-md text-2xl hover:bg-accent focus:bg-accent active:bg-accent"
-      empty={<Text class="p-6 text-center text-sm text-muted-foreground">{L("No emoji found", "没有找到表情")}</Text>}
-      loading={<Text class="p-6 text-center text-sm text-muted-foreground">{L("Loading emoji…", "正在加载表情…")}</Text>}
     />
   );
-  return props.touch ? (
+  return (
+    <If when={hasEmojiPicker()}>
+    {props.touch ? (
     <View>
       {trigger()}
       <Sheet open={open()} onOpenChange={({ open }) => change(open)} onClose={closed} closeOnSwipe
@@ -86,5 +85,7 @@ export function ComposerEmoji(props: {
       placement="top" align="start" offset={8} margin={12} popupStyle={popupSurface()} trigger={trigger()}>
       {picker()}
     </Popover>
+  )}
+    </If>
   );
 }

@@ -1994,3 +1994,65 @@ test("composer emoji also inserts into task replies", async () => {
   await app.waitUntil(() => posts.length === 1);
   expect(posts[0]).toMatchObject({ text: "收到😀", reply_to: "T-0005" });
 });
+
+// Settings, the report reader, a full-size image, the shortcuts and the emoji picker load the first time they show
+// (lazy.tsx); in a native bundle that is at once. Each must open again after closing, from the module it loaded.
+describe("lazy interfaces", () => {
+  const desk = { storage: STORAGE, width: 1200, height: 800, platform: "macos" as const };
+  const view = {
+    current: {},
+    effective: { agents: [], autonomy: "assisted", routines: [], max_parallel: 3 },
+    options: { clis: [["claude"]], autonomy: ["onboarding", "assisted", "autonomous"] },
+  };
+
+  test("settings opens, closes and opens again, with the parallel stepper", async () => {
+    const app = await open("./App.tsx", { ...desk, network: { ...hub([]), [`GET ${URL}/api/settings`]: { body: view } } });
+    await app.waitFor("id:composer");
+    await app.keyboard.press("mod+,");
+    await app.waitFor("Team settings");
+    await app.press("id:settings-tab-parallel");
+    await app.waitFor("id:parallel-inc");
+    await app.keyboard.press("escape");
+    await app.waitUntil(() => !app.shows("Team settings"));
+    await app.keyboard.press("mod+,");
+    await app.waitFor("Team settings");
+    await app.waitFor("id:parallel-inc");
+    expect(app.shows("id:lazy-status")).toBe(false);
+  });
+
+  test("an image opens at full size, closes and opens again", async () => {
+    const shot = { id: "m1", ts: ts(8), from: "dev@linux-box", kind: "notice", text: "截图", attachments: ["/media/shot.png"] };
+    // the image stays on its way: its thumbnail shows, neither loaded nor expired
+    const app = await open("./App.tsx", { ...desk, network: { ...hub([], [shot]), [`GET ${URL}/media/*`]: { body: "", delay: 60_000 } } });
+    await app.waitFor("label:View full size");
+    expect(app.shows("id:image-preview")).toBe(false);
+    await app.press("label:View full size");
+    await app.waitFor("id:image-preview");
+    await app.press("id:image-preview");
+    await app.waitUntil(() => !app.shows("id:image-preview"));
+    await app.press("label:View full size");
+    await app.waitFor("id:image-preview");
+  });
+
+  test("the shortcuts open again after Escape closes them", async () => {
+    const app = await open("./App.tsx", { ...desk, network: hub([]) });
+    await app.waitFor("id:composer");
+    expect(app.shows("Keyboard shortcuts")).toBe(false);
+    await app.keyboard.press("escape");
+    await app.keyboard.press("shift+/");
+    await app.waitFor("Keyboard shortcuts");
+    await app.keyboard.press("escape");
+    await app.waitUntil(() => !app.shows("Keyboard shortcuts"));
+    await app.keyboard.press("shift+/");
+    await app.waitFor("Keyboard shortcuts");
+  });
+
+  test("the emoji button shows in a native shell that has the picker", async () => {
+    const app = await open("./App.tsx", { ...desk, network: hub([]) });
+    await app.waitFor("id:composer");
+    await app.waitFor("id:emoji");
+    await app.press("id:emoji");
+    await app.waitFor("id:emoji-picker");
+    expect(app.shows("id:emoji-loading")).toBe(false);
+  });
+});
