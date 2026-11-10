@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { backoffMinutes, isMergeCard, isNoChangeRoutine, mergeHeadline, tooManyWakes, waitKind, waitMeta } from "../src/waits";
+import { autoResumable, backoffMinutes, isMergeCard, isNoChangeRoutine, mergeHeadline, tooManyWakes, waitCause, waitKind, waitMeta, waitOver } from "../src/waits";
 
 test("CI wait_check backs off 5 → 10 → 20 → 40 minutes", () => {
   expect([0, 1, 2, 3, 4, 9].map(backoffMinutes)).toEqual([5, 10, 20, 40, 40, 40]);
@@ -33,4 +33,19 @@ test("routine runs without changes stay out of the owner channel", () => {
   expect(isNoChangeRoutine("routine:own-prs-ci", "本轮没有修改或推送。")).toBe(true);
   expect(isNoChangeRoutine("owner@chat", "本轮没有修改")).toBe(false);
   expect(isNoChangeRoutine("routine:pr-review", "审了 nsh #981，发了评论")).toBe(false);
+});
+
+test("waitCause: quota waits are told apart from CI and people (T-0064 / D-0013)", () => {
+  expect(waitCause({ wait_check: "bun /x/src/review-account.ts check claude", waiting_on: "恢复后合并 PR #4" })).toBe("quota");
+  expect(waitCause({ waiting_on: "Claude 共享账户额度冷却至 19:22" })).toBe("quota");
+  expect(waitCause({ waiting_on: "rate limit resets at 3pm" })).toBe("quota");
+  expect(waitCause({ waiting_on: "CI run 123", wait_check: "gh run view 123" })).toBe("ci");
+  expect(waitCause({ waiting_on: "owner 合并 PR" })).toBe("human");
+  expect([waitOver("quota", 0, 0), waitOver("quota", 1, 0), waitOver("ci", 0, 0), waitOver("ci", 0, 1), waitOver("ci", 0, undefined)]).toEqual([true, false, false, true, false]);
+  const q = { wait_check: "bun review-account.ts check claude" };
+  expect(autoResumable(q)).toBe(true);
+  expect(autoResumable({ ...q, decision: "D-1" }, { open: true, supervisor_cause: "platform:os:macos" })).toBe(true);
+  expect(autoResumable({ ...q, decision: "D-1" }, { open: true })).toBe(false);
+  expect(autoResumable({ ...q, decision: "D-1" }, { open: false })).toBe(true);
+  expect(autoResumable({ wait_check: "gh run view 1" })).toBe(false);
 });

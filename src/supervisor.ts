@@ -4,6 +4,7 @@
 // Gates are never touched: a supervisor card never sets gate_override, so merge/release/external messages stay gated.
 import { existsSync, unlinkSync } from "node:fs";
 import { type Cfg, type HostBeat, L, P, journal, list, nextId, now, onlineHosts, readDoc, writeDoc } from "./core";
+import { waitCause } from "./waits";
 
 export type Meta = Record<string, string>;
 export type Task = { meta: Meta; folder: "waiting" | "blocked"; body?: string };
@@ -32,11 +33,28 @@ export function checkUnrunnable(check: string | undefined, primaryOs: string): b
   return false;
 }
 
+const capableOf = (ctx: Ctx, r: string[]) =>
+  ctx.online.filter((h) => !ctx.retired.includes(h.host) && r.every((x) => x.split("|").some((y) => h.caps.includes(y.trim()))));
+
+/** The platform itself holds the task up: no host for it is online, or its wait_check can only answer on that platform.
+ * A macOS task waiting on CI, a person or an account's quota while a Mac is online is not a platform problem (D-0013). */
+export function platformBound(m: Meta, ctx: Ctx): boolean {
+  const plat = platform(m);
+  if (!plat || waitCause(m) === "quota") return false;
+  return !capableOf(ctx, [plat]).length || checkUnrunnable(m.wait_check, ctx.primaryOs) || PLATFORM_WAIT.test(`${m.waiting_on ?? ""}\n${m.wait_check ?? ""}`);
+}
+/** Waits on the platform's own environment: a desktop session, an unlocked screen, a simulator, native tooling. */
+const PLATFORM_WAIT = /桌面|desktop|解锁|unlock|登录.{0,6}(机器|主机|mac)|\bGUI\b|屏幕|screen|display|模拟器|simulator|\bswift\b|\bxcrun\b|\bosascript\b/i;
+
+/** A quota wait with a check is watched by the daemon, which requeues it once the check passes; only a check that has
+ * not passed for this many max-age periods is worth a card (the check itself may be broken). */
+export const QUOTA_AGE_FACTOR = 4;
+
 /** Decide what is wrong with one waiting/blocked task and what to do first. Pure: unit-tested. */
 export function classify(t: Task, ctx: Ctx): Verdict | null {
   const m = t.meta;
   const v = (cause: string, action: Action, reasons: string[], requires?: string): Verdict => ({ id: m.id, cause, reasons, action, requires });
-  const capable = (r: string[]) => ctx.online.filter((h) => !ctx.retired.includes(h.host) && r.every((x) => x.split("|").some((y) => h.caps.includes(y.trim()))));
+  const capable = (r: string[]) => capableOf(ctx, r);
   // 1. pinned to / claimed by a retired host → move it to any host with the same remaining requirements
   const pin = pinnedHost(m);
   const gone = [pin, m.claimed_by].find((h) => h && ctx.retired.includes(h));
@@ -67,21 +85,30 @@ export function classify(t: Task, ctx: Ctx): Verdict | null {
   const plat = platform(m);
   if (plat && pin && !ctx.online.some((h) => h.host === pin) && capable(reqs(m).filter((r) => r !== `host:${pin}`)).length)
     return v(`host:${pin}`, "reroute", [L(`pinned host ${pin} is offline`, `绑定的主机 ${pin} 离线`)], reqs(m).filter((r) => r !== `host:${pin}`).join(","));
+  // 5. read what it waits on before blaming the platform (D-0013): quota, CI and people are their own causes
+  const cause = waitCause(m);
+  if (cause === "quota") {
+    if (m.wait_check && !checkUnrunnable(m.wait_check, ctx.primaryOs) && age < ctx.maxAgeHours * QUOTA_AGE_FACTOR) return null;
+    if (!reasons.length && t.folder === "waiting") return null;
+    return v("quota", "escalate", [...reasons, m.wait_check ? L("the quota check still has not passed", "额度检查仍未通过") : L("no quota check recorded", "没有记录额度检查")]);
+  }
   if (!reasons.length && t.folder === "waiting") return null; // young and cycling normally
   // platform host is online but the wait_check can't run here: hand the task back to that host to check itself
   if (plat && capable([plat]).length && checkUnrunnable(m.wait_check, ctx.primaryOs) && !m.supervisor_requeued)
     return v(`platform:${plat}`, "reroute", [...reasons, L(`a ${plat} host is online, handed back to it to check`, `${plat} 主机在线，交回该主机自行检查`)], reqs(m).filter((r) => !r.startsWith("host:")).join(","));
-  if (plat) return v(`platform:${plat}`, "escalate", [...reasons, capable([plat]).length ? L(`a ${plat} host is online, but the task still did not advance after being handed back`, `${plat} 主机在线，但任务交回后仍未推进`) : L(`no ${plat} host is online`, `没有在线的 ${plat} 主机`)]);
+  if (plat && platformBound(m, ctx)) return v(`platform:${plat}`, "escalate", [...reasons, capable([plat]).length ? L(`a ${plat} host is online, but the task still did not advance after being handed back`, `${plat} 主机在线，但任务交回后仍未推进`) : L(`no ${plat} host is online`, `没有在线的 ${plat} 主机`)]);
   if (!reasons.length) reasons.push(L("blocked", "被阻塞"));
+  if (m.waiting_on || m.wait_check) return v(`wait:${cause}`, "escalate", reasons);
   return v(`slow:${m.claimed_by || "any"}`, "escalate", reasons);
 }
 
 /** Once a platform is escalated, other waiting tasks on the same platform join the same card (even if still young),
  * so the owner gets one card for the cause instead of a new one each time another task crosses the threshold. */
-export function sweepPlatform(tasks: Task[], vs: Verdict[]): Verdict[] {
+export function sweepPlatform(tasks: Task[], vs: Verdict[], ctx?: Ctx): Verdict[] {
   const causes = new Set(vs.filter((v) => v.action === "escalate" && v.cause.startsWith("platform:")).map((v) => v.cause));
   const have = new Set(vs.map((v) => v.id));
-  return tasks.filter((t) => t.folder === "waiting" && !t.meta.children && !have.has(t.meta.id) && causes.has(`platform:${platform(t.meta)}`))
+  return tasks.filter((t) => t.folder === "waiting" && !t.meta.children && !have.has(t.meta.id) && causes.has(`platform:${platform(t.meta)}`)
+    && waitCause(t.meta) !== "quota" && (!ctx || platformBound(t.meta, ctx)))
     .map((t) => ({ id: t.meta.id, cause: `platform:${platform(t.meta)}`, reasons: [L(`also needs ${platform(t.meta)}`, `同样需要 ${platform(t.meta)}`)], action: "escalate" as const }));
 }
 
@@ -100,7 +127,9 @@ export function alreadyAsked(cause: string, ids: string[], cards: Meta[]): strin
 
 const CAUSE_LABEL = (c: string) =>
   c === "platform:os:macos" ? L("macOS tasks not advancing", "macOS 任务推不动") : c === "platform:os:windows" ? L("Windows tasks not advancing", "Windows 任务推不动")
-    : c.startsWith("host:") ? L(`host ${c.slice(5)} unavailable`, `主机 ${c.slice(5)} 不可用`) : c === "no-wait" ? L("no wait condition recorded", "没有记录等待条件") : c.startsWith("slow:") ? L(`long run on ${c.slice(5)}`, `${c.slice(5)} 上的长时间运行`) : c;
+    : c.startsWith("host:") ? L(`host ${c.slice(5)} unavailable`, `主机 ${c.slice(5)} 不可用`)
+    : c === "quota" ? L("quota wait not clearing", "额度等待迟迟未恢复") : c === "wait:ci" ? L("CI/machine wait running long", "CI/机器等待过久")
+    : c === "wait:human" ? L("waiting on a person for long", "等人处理过久") : c === "no-wait" ? L("no wait condition recorded", "没有记录等待条件") : c.startsWith("slow:") ? L(`long run on ${c.slice(5)}`, `${c.slice(5)} 上的长时间运行`) : c;
 
 export function cardFor(cause: string, items: { id: string; title: string; reasons: string[] }[]) {
   const lines = items.map((i) => L(`- ${i.id} ${i.title} (${i.reasons.join("; ")})`, `- ${i.id} ${i.title}（${i.reasons.join("；")}）`)).join("\n");
@@ -159,7 +188,7 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
       journal(host, L(`🧭 supervisor: ${meta.id} has no wait condition, requeued`, `🧭 supervisor: ${meta.id} 没有等待条件，重新排队`)); counts.requeue++;
     } else verdicts.push(v);
   }
-  for (const x of sweepPlatform(tasks, verdicts)) verdicts.push(x);
+  for (const x of sweepPlatform(tasks, verdicts, ctx)) verdicts.push(x);
   const cards = (["open", "closed"] as const).flatMap((f) => list(P("decisions", f)).map((p) => readDoc(p).meta));
   const byId = new Map(tasks.map((x) => [x.meta.id, x]));
   for (const [cause, vs] of groupByCause(verdicts)) {

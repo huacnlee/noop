@@ -12,6 +12,28 @@ export function waitKind(res: { wait_kind?: string; waiting_on?: string }): Wait
   return HUMAN.test(res.waiting_on ?? "") ? "human" : "ci";
 }
 
+/** What a wait is really about, read from what the agent recorded (T-0064): an account's quota cooling down is not a
+ * platform problem, a CI run or a person. Quota comes first because those waits often mention the PR they will review. */
+export type WaitCause = "quota" | WaitKind;
+const QUOTA = /review-account\.ts\s+check\b|额度|配额|限额|\bquota\b|rate[ -]?limit|usage limit|cool(ing)?[ -]?down|冷却/i;
+export function waitCause(m: { wait_kind?: string; waiting_on?: string; wait_check?: string }): WaitCause {
+  if (QUOTA.test(`${m.wait_check ?? ""}\n${m.waiting_on ?? ""}`)) return "quota";
+  return waitKind(m);
+}
+
+/** Is the wait over? A quota check exits 0 once the account is usable again, whatever it returned before; other checks
+ * are over when their exit code differs from the first one seen. */
+export const waitOver = (cause: WaitCause, code: number, base: number | undefined) =>
+  cause === "quota" ? code === 0 : base !== undefined && code !== base;
+
+/** A blocked task the daemon may put back in the queue by itself once its quota check passes: parked after too many
+ * wakes (no card) or under a supervisor card. A card the agent raised for the owner still needs the owner's answer. */
+export function autoResumable(m: Record<string, string | undefined>, card?: { open: boolean; supervisor_cause?: string }): boolean {
+  if (!m.wait_check || waitCause(m) !== "quota") return false;
+  if (!m.decision) return true;
+  return !!card && (!card.open || !!card.supervisor_cause);
+}
+
 /** Poll interval for a CI wait_check after `checks` earlier polls: 5 → 10 → 20 → 40 minutes, then stays at 40. */
 export const backoffMinutes = (checks: number) => 5 * 2 ** Math.min(3, Math.max(0, checks));
 

@@ -12,7 +12,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { writeRules } from "./rules";
-import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
+import { autoResumable, backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitCause, waitMeta, waitOver } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -502,6 +502,40 @@ function wakeParents(host: string, ready = new Set<string>()) {
     journal(host, `🧩 ${meta.id} subtasks finished → consolidating`);
   }
 }
+/** The card a task is parked under, as far as auto-resume cares. */
+function cardState(id: string | undefined) {
+  if (!id) return undefined;
+  for (const open of [true, false]) {
+    const f = P("decisions", open ? "open" : "closed", `${id}.md`);
+    if (existsSync(f)) return { open, supervisor_cause: readDoc(f).meta.supervisor_cause };
+  }
+  return undefined;
+}
+
+/** Blocked quota waits whose check passed (T-0064): back to the queue. A supervisor card left with no blocked task is
+ * closed by the system (no lesson, no gate), so the owner is not asked about a cause that went away by itself. */
+export function resumeBlocked(host: string, ready: Set<string>) {
+  const cards = new Set<string>();
+  for (const id of ready) {
+    const p = P("tasks", "blocked", `${id}.md`);
+    if (!existsSync(p)) continue;
+    const { meta, body } = readDoc(p);
+    if (!autoResumable(meta, cardState(meta.decision))) continue;
+    if (meta.decision) cards.add(meta.decision);
+    writeDoc(P("tasks", "inbox", `${id}.md`), { ...meta, claimed_by: undefined, status: undefined, decision: undefined, wake_at: undefined, wait_kind: undefined,
+      wait_check_base: undefined, wakes: undefined, resumed: "yes" },
+      `${body}\nResumed: the wait check passed (${meta.waiting_on ?? "?"}). Check it now; if still not ready, return "waiting" again.\n`);
+    unlinkSync(p);
+    journal(host, L(`⏰ ${id} quota is back, requeued`, `⏰ ${id} 额度已恢复，自动重新排队`));
+  }
+  const blocked = list(P("tasks", "blocked"), /^T-.*\.md$/).map((p) => readDoc(p).meta.decision);
+  for (const d of cards) {
+    const c = cardState(d);
+    if (!c?.open || !c.supervisor_cause || blocked.includes(d)) continue;
+    closeDecision(d, L("Resolved by itself: the wait condition cleared and the tasks were requeued", "已自动解除：等待条件恢复，任务已重新排队"), "system");
+    journal(host, L(`🧭 ${d} closed: every task under it resumed by itself`, `🧭 ${d} 已自动关闭：卡下任务均已自行恢复`));
+  }
+}
 const runningIds = new Set<string>();
 
 /** Waits with a wait_check: the daemon runs it itself (no agent) with backoff 5 → 10 → 20 → 40 minutes; once its exit
@@ -514,6 +548,15 @@ export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Se
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta } = readDoc(p);
     if (!(meta.wake_at || meta.wait_kind) || !meta.wait_check) continue;
+    waiting.add(meta.id);
+    const c = waitChecks.get(meta.id);
+    if (c && c.cmd === meta.wait_check && c.next > now) continue;
+    due.push([meta.id, meta.wait_check, p]);
+  }
+  // Blocked quota waits too (T-0064): once the account is usable again they go back to the queue without the owner.
+  for (const p of list(P("tasks", "blocked"), /^T-.*\.md$/)) {
+    const { meta } = readDoc(p);
+    if (!autoResumable(meta, cardState(meta.decision))) continue;
     waiting.add(meta.id);
     const c = waitChecks.get(meta.id);
     if (c && c.cmd === meta.wait_check && c.next > now) continue;
@@ -538,7 +581,8 @@ export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Se
       else if (doc) writeDoc(path, { ...doc.meta, wait_check_base: `${code} ${cmd}` }, doc.body);
     }
     waitChecks.set(id, { cmd, base: base ?? code, next: now + (everyMs ?? backoffMinutes(n) * 60_000), n });
-    if (base !== undefined && code !== base) { ready.add(id); waitChecks.delete(id); }
+    // Exit 0 means "over" only for a check that is itself an account check; a quota mentioned in waiting_on alone keeps the diff rule.
+    if (waitOver(waitCause({ wait_check: cmd }), code, base)) { ready.add(id); waitChecks.delete(id); }
   }));
   for (const id of waitChecks.keys()) if (!waiting.has(id)) waitChecks.delete(id);
   return ready;
@@ -608,6 +652,7 @@ export async function tick(cfg: Cfg, background = false) {
       runRoutines(cfg, host, primary);
       reapStale(cfg, host);
       wakeParents(host, ready);
+      resumeBlocked(host, ready);
       maybeSupervise(cfg, host);
       await proposeBatch(cfg, host);
       noteUnservable(cfg, host);

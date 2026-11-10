@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { P, list, readDoc, writeDoc } from "../src/core";
 import { sweepPlatform, alreadyAsked, cardFor, checkUnrunnable, classify, groupByCause, supervise, type Ctx, type Task } from "../src/supervisor";
 import { closeDecision, ignoreDecision } from "../src/decisions";
@@ -48,10 +49,11 @@ test("keep going first: retired host → reroute, answered card → resume, no w
 });
 
 test("groups by cause: all macOS-desktop tasks share one card", () => {
-  const vs = ["T-1", "T-2", "T-3"].map((id) => classify(task({ id, requires: "os:macos", wakes: "5" }), ctx())!);
+  const vs = ["T-1", "T-2", "T-3"].map((id) => classify(task({ id, requires: "os:macos", wakes: "5", waiting_on: "Mac 桌面会话" }), ctx())!);
   vs.push(classify(task({ id: "T-9", requires: "os:linux", wakes: "4", claimed_by: "lb" }), ctx())!);
+  vs.push(classify(task({ id: "T-8", requires: "os:linux", wakes: "4", claimed_by: "lb", waiting_on: "", wait_check: "" }, "blocked"), ctx())!);
   const g = groupByCause(vs);
-  expect([...g.keys()].sort()).toEqual(["platform:os:macos", "slow:lb"]);
+  expect([...g.keys()].sort()).toEqual(["platform:os:macos", "slow:lb", "wait:ci"]);
   expect(g.get("platform:os:macos")!.map((v) => v.id)).toEqual(["T-1", "T-2", "T-3"]);
   const c = cardFor("platform:os:macos", g.get("platform:os:macos")!.map((v) => ({ id: v.id, title: v.id, reasons: v.reasons })));
   expect(c.options.length).toBeGreaterThanOrEqual(2);
@@ -110,8 +112,8 @@ test("dated follow-ups are exempt; a delegated parent on a retired host is re-pi
   expect(classify(task({ id: "T-1", wakes: "9", wait_check: "test $(date +%Y%m%d) -lt 20261114" }), ctx())).toBeNull();
   const p = classify(task({ id: "T-2", children: "T-3", requires: "host:omarchy-jason" }), ctx())!;
   expect([p.action, p.requires]).toEqual(["repin", ""]);
-  const young = task({ id: "T-4", requires: "os:macos" });
-  const stuck = classify(task({ id: "T-5", requires: "os:macos", wakes: "7" }), ctx())!;
+  const young = task({ id: "T-4", requires: "os:macos", waiting_on: "Mac 解锁" });
+  const stuck = classify(task({ id: "T-5", requires: "os:macos", wakes: "7", waiting_on: "Mac 解锁" }), ctx())!;
   expect(classify(young, ctx())).toBeNull();
   expect(sweepPlatform([young], [stuck]).map((v) => [v.id, v.cause])).toEqual([["T-4", "platform:os:macos"]]);
 });
@@ -120,4 +122,84 @@ test("macOS host online + wait_check unrunnable on the primary: hand back to the
   const m = { id: "T-1", requires: "os:macos", created: new Date(NOW - 10 * H).toISOString(), waiting_on: "x", wait_check: "test -f /Users/j/done" };
   expect(classify(task(m), ctx())!.action).toBe("reroute");
   expect(classify(task({ ...m, supervisor_requeued: "yes" }), ctx())!.action).toBe("escalate");
+});
+
+// D-0013 (2026-11-10): four macOS tasks all waited on `review-account.ts check claude` (Claude quota cooling down) while
+// the Mac primary was online, and the supervisor still sent a "macOS tasks not advancing" card.
+const quota = (id: string, o: Record<string, string> = {}) => task({ id, requires: "os:macos", created: new Date(NOW - 4 * H).toISOString(),
+  waiting_since: new Date(NOW - 4 * H).toISOString(), wakes: "2", wait_kind: "ci",
+  waiting_on: "Claude 额度冷却至北京时间 19:22；恢复后继续跨模型 review", wait_check: "bun /Users/k/.agent-hub/work/noop/src/review-account.ts check claude", ...o });
+
+test("D-0013: quota waits on a Mac primary are not a platform card; the daemon watches their check", () => {
+  const mc = ctx({ primaryOs: "macos" });
+  for (const id of ["T-0034", "T-0036", "T-0043", "T-0056"]) expect(classify(quota(id), mc)).toBeNull();
+  expect(classify({ ...quota("T-0043"), folder: "blocked" }, mc)).toBeNull(); // parked after wakes: the daemon resumes it
+  // a young quota task never joins a platform card either
+  const stuck = classify(task({ id: "T-5", requires: "os:macos", wakes: "7", waiting_on: "Mac 解锁" }), mc)!;
+  expect(stuck.cause).toBe("platform:os:macos");
+  expect(sweepPlatform([quota("T-0056", { wakes: "0" })], [stuck], mc)).toEqual([]);
+  // the check never passing for 4x the max age is a quota card, not a platform card
+  const old = classify(quota("T-0034", { created: new Date(NOW - 13 * H).toISOString(), waiting_since: new Date(NOW - 13 * H).toISOString() }), mc)!;
+  expect([old.cause, old.action]).toEqual(["quota", "escalate"]);
+  expect(cardFor("quota", [{ id: "T-0034", title: "t", reasons: old.reasons }]).question).toContain("额度");
+});
+
+test("separates causes: CI and human waits on an online platform host are not platform cards", () => {
+  const mc = ctx({ primaryOs: "macos" });
+  const age = new Date(NOW - 5 * H).toISOString();
+  const ci = classify(task({ id: "T-1", requires: "os:macos", created: age, waiting_on: "CI run 123", wait_check: "gh run view 123 --exit-status" }), mc)!;
+  expect(ci.cause).toBe("wait:ci");
+  const human = classify(task({ id: "T-2", requires: "os:macos", created: age, waiting_on: "owner 合并 PR", wait_kind: "human", wait_check: "gh pr view 1" }), mc)!;
+  expect(human.cause).toBe("wait:human");
+  // no macOS host online at all: that one is the platform
+  const off = classify(task({ id: "T-3", requires: "os:macos", created: age, waiting_on: "CI run 123" }), ctx({ online: [lin] }))!;
+  expect(off.cause).toBe("platform:os:macos");
+});
+
+test("supervise(): D-0013 quota tasks get no card; a quota pass resumes them and closes their supervisor card", async () => {
+  const { checkWaits, resumeBlocked } = await import("../src/cli");
+  const flag = `${tmpdir()}/noop-quota-${process.pid}`.replace(/\\/g, "/");
+  rmSync(flag, { force: true });
+  // stands in for `review-account.ts check claude`: exit 1 while cooling down, 0 once usable
+  const check = `test -f ${flag} # review-account.ts check claude`;
+  const t0 = new Date(Date.now() - 5 * H).toISOString();
+  const ids = ["T-0301", "T-0302", "T-0303", "T-0304"];
+  for (const id of ids) writeDoc(P("tasks", "waiting", `${id}.md`), { id, title: id, requires: "os:macos", created: t0, waiting_since: t0, wakes: "2",
+    wait_kind: "ci", waiting_on: "Claude 额度冷却", wait_check: check, supervisor_requeued: "yes" }, "b");
+  const before = list(P("decisions", "open")).length;
+  supervise({ supervisor: {}, fleet: {} } as any, "lara0");
+  expect(list(P("decisions", "open")).length).toBe(before);
+  for (const id of ids) expect(existsSync(P("tasks", "waiting", `${id}.md`))).toBe(true);
+  // The old supervisor already parked two of them under a platform card, and one was parked after too many wakes.
+  writeDoc(P("decisions", "open", "D-9013.md"), { id: "D-9013", task: "T-0301", tasks: "T-0301,T-0302", supervisor_cause: "platform:os:macos", question: "macOS 任务推不动" }, "c");
+  for (const id of ["T-0301", "T-0302"]) {
+    const d = readDoc(P("tasks", "waiting", `${id}.md`));
+    writeDoc(P("tasks", "blocked", `${id}.md`), { ...d.meta, status: "needs_decision", decision: "D-9013", wait_check_base: `1 ${check}` }, d.body);
+    rmSync(P("tasks", "waiting", `${id}.md`));
+  }
+  const d3 = readDoc(P("tasks", "waiting", "T-0303.md"));
+  writeDoc(P("tasks", "blocked", "T-0303.md"), { ...d3.meta, status: "blocked", wakes: "7" }, d3.body);
+  rmSync(P("tasks", "waiting", "T-0303.md"));
+  // A card an agent raised for the owner is not the daemon's to answer, even with a quota check.
+  writeDoc(P("decisions", "open", "D-9014.md"), { id: "D-9014", task: "T-0305", question: "发布吗？" }, "c");
+  writeDoc(P("tasks", "blocked", "T-0305.md"), { id: "T-0305", title: "x", status: "needs_decision", decision: "D-9014", waiting_on: "额度", wait_check: check }, "b");
+
+  const t = Date.now();
+  expect((await checkWaits(t, 1000)).size).toBe(0); // still cooling down
+  resumeBlocked("lara0", new Set());
+  await Bun.write(flag, "1"); // quota is back
+  const ready = await checkWaits(t + 2000, 1000);
+  expect([...ready].sort()).toEqual(["T-0301", "T-0302", "T-0303", "T-0304"]);
+  resumeBlocked("lara0", ready);
+  for (const id of ["T-0301", "T-0302", "T-0303"]) {
+    const m = readDoc(P("tasks", "inbox", `${id}.md`)).meta;
+    expect([m.decision, m.status, m.gate_override].filter(Boolean)).toEqual([]);
+  }
+  expect(existsSync(P("decisions", "open", "D-9013.md"))).toBe(false);
+  const closed = readDoc(P("decisions", "closed", "D-9013.md")).meta;
+  expect(closed.answered_by).toBe("system");
+  expect(existsSync(P("tasks", "blocked", "T-0305.md"))).toBe(true); // the owner's card stands
+  expect(existsSync(P("decisions", "open", "D-9014.md"))).toBe(true);
+  rmSync(flag, { force: true });
+  for (const id of [...ids, "T-0305"]) for (const f of ["inbox", "waiting", "blocked"]) rmSync(P("tasks", f, `${id}.md`), { force: true });
 });
