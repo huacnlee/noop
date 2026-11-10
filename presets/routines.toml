@@ -57,3 +57,15 @@ agent = "rust-maintainer"
 prefer = "os:macos"
 prompt = "Build and run tests of the Core repos on this host's OS (prefer macOS). Report platform-specific failures as follow-ups."
 
+
+# Copy presets/pr-closeout.md to policies/pr-closeout.md before enabling this optional routine.
+# Requires a Noop version with kind=pr-closeout; discovery itself never merges/releases.
+[[routine]]
+name = "pr-closeout"
+kind = "pr-closeout"
+readonly = true
+every = "30m"
+agent = "lead"
+scheduler = "primary"
+# requires = "os:macos"  # use when release artifact acceptance needs macOS
+prompt = "Run noop pr-closeout --enqueue; only generate owner-decision tasks, never merge or release."

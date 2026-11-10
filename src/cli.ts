@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // hub — CLI + daemon for the agent fleet.
 import { guestCmd } from "./guest";
+import { enqueueCloseout, scanCloseout } from "./pr-closeout";
 import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -92,6 +93,14 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
         appendEvent({ from: "hub", kind: "notice", text: rep.markdown });
         journal(host, `📊 usage report → ${rep.file}`);
       } catch (e) { journal(host, `📊 usage report failed: ${(e as Error).message}`); }
+      continue;
+    }
+    if (r.kind === "pr-closeout") { // deterministic discovery: only queues owner-decision tasks
+      state[r.name] = new Date().toISOString();
+      try {
+        const result = enqueueCloseout(cfg);
+        journal(host, `PR closeout: ${result.ids.length} decision tasks; ${result.skipped.length} repos skipped`);
+      } catch (e) { journal(host, `PR closeout failed: ${(e as Error).message}`); }
       continue;
     }
     // scheduler "each": every machine runs its own copy, pinned to it (e.g. the weekly security check of this computer)
@@ -943,6 +952,7 @@ const HELP = `Noop — your own AI team
   noop status                 queue / decision / accounts / resources overview
   noop learn [--full] [--dry]  learn the CEO from local Claude/Codex sessions (digest stays local; principles go to memory)
   noop metrics [days]         per-agent success, judge vs owner decisions (feeds self-evolution)
+  noop pr-closeout [--enqueue] read-only scan; preview cards by default, --enqueue creates owner-decision tasks
   noop usage                  weekly usage report (also posted every Monday by the built-in routine)
   noop agents                 list fleet members
   noop notify "text"          test Slack/Discord
@@ -1007,6 +1017,17 @@ async function main() {
         if (!overrideJudge(id, ans.join(" "), `cli@${host}`, host)) { console.error("no such open decision"); process.exit(1); }
       } else journal(host, `✔ ${id} owner answered via cli: ${ans.join(" ")}`);
       await commitPush(`[${host}] decide ${id}`);
+      return;
+    }
+    case "pr-closeout": {
+      if (rest.some((a) => !["--enqueue", "--dry-run"].includes(a)) || (rest.includes("--enqueue") && rest.includes("--dry-run"))) throw new Error("use --dry-run OR --enqueue");
+      if (!rest.includes("--enqueue")) return console.log(JSON.stringify(scanCloseout(cfg), null, 2));
+      if (!isPrimary(cfg, host)) throw new Error("enqueue pr-closeout only on the primary host");
+      await locked(async () => {
+        await _pull();
+        console.log(JSON.stringify(enqueueCloseout(cfg), null, 2));
+        await _commitPush(`[${host}] pr-closeout cards`);
+      });
       return;
     }
     case "status": return void (await status(cfg, rest.includes("--brief")));
