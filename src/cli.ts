@@ -98,8 +98,8 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
     if (r.kind === "pr-closeout") { // deterministic discovery: only queues owner-decision tasks
       state[r.name] = new Date().toISOString();
       try {
-        const result = enqueueCloseout(cfg);
-        journal(host, L(`PR closeout: ${result.ids.length} decision tasks; ${result.skipped.length} repos skipped`, `PR 收尾：${result.ids.length} 个决策任务；跳过 ${result.skipped.length} 个仓库`));
+        const result = enqueueCloseout(cfg, r.name);
+        if (result.ids.length) journal(host, L(`PR closeout: ${result.ids.length} decision tasks; ${result.skipped.length} repos skipped`, `PR 收尾：${result.ids.length} 个决策任务；跳过 ${result.skipped.length} 个仓库`));
       } catch (e) { journal(host, L(`PR closeout failed: ${(e as Error).message}`, `PR 收尾失败：${(e as Error).message}`)); }
       continue;
     }

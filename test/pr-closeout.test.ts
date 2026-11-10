@@ -66,6 +66,22 @@ test("missing/cyclic dependencies or one bad PR block the whole repository", () 
   expect(plan([a, b], ev([a, b]), []).cards).toHaveLength(0);
 });
 
+test("any linked current-head findings block a card regardless of evidence order or scope", () => {
+  const p = make(), clean = review();
+  const findings = review(); findings.text = findings.text.replace("VERDICT: CLEAN", "VERDICT: FINDINGS 2");
+  const incremental = { ...findings, text: findings.text.replace("base origin/main", `commit ${sha}`) };
+  for (const blocked of [findings, incremental, review("- Not fixed: unresolved issue\n")]) {
+    for (const evidence of [[clean, blocked], [blocked, clean]]) {
+      expect(cleanReview(p, evidence)).toBeUndefined();
+      expect(plan([p], { [p.url]: evidence }, []).cards).toHaveLength(0);
+    }
+  }
+  const stale = { ...findings, text: findings.text.replace(sha.slice(0, 7), "1234567") };
+  expect(cleanReview(p, [stale, clean])).toBe(clean.report);
+  const resolved = { ...findings, text: findings.text + clean.text.replace("Round 1", "Round 2") };
+  expect(cleanReview(p, [resolved])).toBe(clean.report);
+});
+
 test("dedupe pending releases by repo, exact prior snapshot by key; changed head is a new card", () => {
   const p = make(); const c = plan([p], ev([p]), []).cards[0];
   expect(plan([p], ev([p]), [{ meta: { closeout_key: c.key }, body: "" }]).cards).toHaveLength(0);
@@ -99,14 +115,22 @@ test("discovery uses exactly one search and one GraphQL query, rejects partial r
 
 test("enqueue creates native owner cards and blocked tasks; rejecting/ignoring cannot grant approval", () => {
   const p = make(); const c = plan([p], ev([p]), []).cards[0];
-  const cfg = { owner: { github: "owner" }, routine: [{ name: "pr-closeout", kind: "pr-closeout", readonly: true }] };
+  const cfg = { owner: { github: "owner" }, routine: [
+    { name: "disabled", kind: "pr-closeout", readonly: true, enabled: false },
+    { name: "writable", kind: "pr-closeout", readonly: false },
+    { name: "closeout", kind: "pr-closeout", readonly: true },
+  ] };
   expect(() => enqueueCards([c], {})).toThrow();
+  expect(() => enqueueCards([c], cfg, "disabled")).toThrow();
+  expect(() => enqueueCards([c], cfg, "writable")).toThrow();
+  expect(() => enqueueCards([c], cfg, "missing")).toThrow();
   const { P, writeDoc, readDoc } = require("../src/core");
   const { existsSync, unlinkSync } = require("node:fs");
   const { isMergeCard } = require("../src/waits");
   const { ignoreDecision } = require("../src/decisions");
   writeDoc(P("policies", "pr-closeout.md"), {}, "policy");
-  const [pair] = enqueueCards([c], cfg);
+  expect(enqueueCards([], cfg)).toEqual([]);
+  const [pair] = enqueueCards([c], cfg, "closeout");
   const d = readDoc(P("decisions", "open", `${pair.decision}.md`));
   expect(isMergeCard(d.meta)).toBe(true);
   expect(existsSync(P("tasks", "blocked", `${pair.task}.md`))).toBe(true);

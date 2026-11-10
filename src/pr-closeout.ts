@@ -56,6 +56,7 @@ export function green(p: PR): boolean {
 }
 
 export function cleanReview(p: PR, evidence: Evidence[]): string | undefined {
+  let clean: string | undefined;
   for (const e of evidence) {
     const sections = e.text.split(/^## /m).slice(1);
     const last = sections.at(-1) ?? "";
@@ -63,14 +64,15 @@ export function cleanReview(p: PR, evidence: Evidence[]): string | undefined {
     const verdicts = [...last.matchAll(/^VERDICT: (CLEAN|FINDINGS\s+\d+)\s*$/gm)];
     const head = last.match(/· HEAD `([a-f0-9]{7,40})`/)?.[1];
     const scope = last.match(/· scope: (base|commit|uncommitted) ([^\n]*?) · HEAD/);
-    if (verdicts.length !== 1 || verdicts[0][1] !== "CLEAN" || !head || !p.headRefOid.startsWith(head)) continue;
+    if (!head || !p.headRefOid.startsWith(head)) continue;
+    // A second linked review can invalidate a clean report, even if its scope is incremental.
+    if (verdicts.length !== 1 || verdicts[0][1] !== "CLEAN" || /^- Not fixed:/m.test(e.text)) return undefined;
     if (scope?.[1] !== "base" && !(scope?.[1] === "commit" && p.commitCount === 1 && p.headRefOid.startsWith(scope[2].trim()))) continue;
     // Matching the head alone is insufficient: an incremental fix-only review is not a full-PR review.
     if (scope?.[1] === "base" && ![p.baseRefName, `origin/${p.baseRefName}`, p.baseRefOid].includes(scope[2].trim())) continue;
-    // A documented unresolved finding is not a clean hand-off, even when the reviewer printed CLEAN.
-    if (/^- Not fixed:/m.test(e.text)) continue;
-    return e.report;
+    clean ??= e.report;
   }
+  return clean;
 }
 
 export function order(prs: PR[]): PR[] | undefined {
@@ -154,8 +156,9 @@ export function scanCloseout(cfg: Cfg) {
   return plan(prs, evidence, records);
 }
 
-export function enqueueCards(cards: Card[], cfg: Cfg) {
-  const routine = cfg.routine?.find((r: any) => r.name === "pr-closeout" && r.kind === "pr-closeout");
+export function enqueueCards(cards: Card[], cfg: Cfg, routineName?: string) {
+  const routine = cfg.routine?.find((r: any) => r.kind === "pr-closeout" && r.enabled !== false && r.readonly === true &&
+    (routineName === undefined || r.name === routineName));
   if (!routine || routine.enabled === false || routine.readonly !== true) throw new Error("enable the readonly pr-closeout routine before enqueueing");
   if (!existsSync(P("policies", "pr-closeout.md"))) throw new Error("install policies/pr-closeout.md before enqueueing");
   return cards.map((c) => {
@@ -172,7 +175,7 @@ export function enqueueCards(cards: Card[], cfg: Cfg) {
   });
 }
 
-export function enqueueCloseout(cfg: Cfg) {
+export function enqueueCloseout(cfg: Cfg, routineName?: string) {
   const result = scanCloseout(cfg);
-  return { ...result, ids: enqueueCards(result.cards, cfg) };
+  return { ...result, ids: enqueueCards(result.cards, cfg, routineName) };
 }
