@@ -12,7 +12,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { writeRules } from "./rules";
-import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
+import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, newWaitCheckMode, tooManyWakes, waitCheckMode, waitCheckReady, waitMeta, type WaitCheckMode } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -237,7 +237,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const wakes = Number(meta.wakes ?? 0);
     // the owner's approval covers the whole task: a wait for CI before the approved merge must not revoke it
     writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, gate_override: meta.gate_override, waiting_since: meta.waiting_since || now(), parked_at: now(), wake_at: w.wake_at, wait_kind: w.kind, wakes: wakes ? String(wakes) : undefined,
-      waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_base: undefined },
+      waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_mode: res.wait_check ? newWaitCheckMode(res) : undefined, wait_check_base: undefined },
       body + runNote + `\n**Waiting on:** ${res.waiting_on ?? "?"} (${w.kind === "human" ? "wakes on the owner's answer or an event" : `check again ${w.wake_at}`})\n`);
     journal(host, w.kind === "human" ? L(`⏳ ${meta.id} waiting on you: ${res.waiting_on ?? ""} (no timer, continues on the event)`, `⏳ ${meta.id} 等你处理：${res.waiting_on ?? ""}（不定时唤醒，事件到达再继续）`) : L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""}, checking again in ${w.minutes} minutes`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}，${w.minutes} 分钟后再看`));
   } else if (res.status === "needs_decision") {
@@ -457,10 +457,10 @@ async function handleFailure(meta: Record<string, string>, body: string, summary
 const GH_HEAVY = new Set(["dispatcher", "reviewer", "ops-watcher", "oss-triage", "release-manager"]);
 
 /** Parent tasks waiting on delegated children: when every child is finished, requeue the parent to consolidate. */
-function wakeParents(host: string, ready = new Set<string>()) {
+export function wakeParents(host: string, ready = new Set<string>()) {
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta, body } = readDoc(p);
-    if (meta.wait_kind === "human" && !meta.wake_at) { // waits on a person: only an event wakes it, never the clock
+    if (meta.wait_kind === "human") { // waits on a person: only an event wakes it, never the clock
       if (!ready.has(meta.id)) continue;
     }
     if (meta.wake_at || meta.wait_kind) { // parked on something slow: back to the queue once the time is up, or as soon as its check changes
@@ -504,41 +504,53 @@ function wakeParents(host: string, ready = new Set<string>()) {
 }
 const runningIds = new Set<string>();
 
-/** Waits with a wait_check: the daemon runs it itself (no agent) with backoff 5 → 10 → 20 → 40 minutes; once its exit
- * code differs from the first run, the wait is over. Human waits are checked too: that is how an event (PR merged) wakes them. */
-const waitChecks = new Map<string, { cmd: string; base?: number; next: number; n: number }>();
+/** Poll completion predicates or legacy exit-code transitions locally with 5 → 40 minute backoff.
+ * Human waits retain transition semantics: a successful first poll is not owner action or approval. */
+const waitChecks = new Map<string, { key: string; base?: number; next: number; n: number }>();
+const waitCheckKey = (meta: Record<string, string>) => JSON.stringify([meta.wait_check, waitCheckMode(meta), meta.parked_at, meta.wait_check_base]);
 export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Set<string>> {
   const ready = new Set<string>();
-  const due: [string, string, string][] = [];
+  const due: { id: string; cmd: string; path: string; key: string; mode: WaitCheckMode }[] = [];
   const waiting = new Set<string>();
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta } = readDoc(p);
     if (!(meta.wake_at || meta.wait_kind) || !meta.wait_check) continue;
     waiting.add(meta.id);
+    const key = waitCheckKey(meta);
     const c = waitChecks.get(meta.id);
-    if (c && c.cmd === meta.wait_check && c.next > now) continue;
-    due.push([meta.id, meta.wait_check, p]);
+    if (c && c.key === key && c.next > now) continue;
+    due.push({ id: meta.id, cmd: meta.wait_check, path: p, key, mode: waitCheckMode(meta) });
   }
-  await Promise.all(due.map(async ([id, cmd, path]) => {
-    // Non-login: the service already carries the user's PATH, and sourcing their profile can cost seconds (conda, etc.).
-    const proc = Bun.spawn(["bash", "-c", cmd], { stdout: "ignore", stderr: "ignore", cwd: homedir() });
-    const timer = setTimeout(() => proc.kill(), 60_000);
-    const code = await proc.exited;
-    clearTimeout(timer);
-    if (proc.signalCode) return; // timed out: no answer this round
+  await Promise.all(due.map(async ({ id, cmd, path, key, mode }) => {
     const prev = waitChecks.get(id);
-    const same = prev && prev.cmd === cmd;
+    const same = prev?.key === key;
     const n = same ? prev.n + 1 : 0;
-    // The baseline is persisted in the task, so a daemon restart can't make a wait that finished meanwhile its new baseline.
+    const next = now + (everyMs ?? backoffMinutes(n) * 60_000);
+    // Failed launches, signals and timeouts are unanswered polls; still back off instead of retrying every tick.
+    waitChecks.set(id, { key, base: same ? prev.base : undefined, next, n });
+    let code: number;
+    try {
+      // Non-login: the service already carries PATH; sourcing a profile can cost seconds.
+      const proc = Bun.spawn(["bash", "-c", cmd], { stdout: "ignore", stderr: "ignore", cwd: homedir() });
+      const timer = setTimeout(() => proc.kill(), 60_000);
+      try { code = await proc.exited; } finally { clearTimeout(timer); }
+      if (proc.signalCode) return;
+    } catch { return; }
+    // The task may have been answered, replaced or moved while the command ran.
+    if (!existsSync(path)) return;
+    const doc = readDoc(path);
+    if (waitCheckKey(doc.meta) !== key) return;
     let base = same ? prev.base : undefined;
-    if (base === undefined) {
-      const doc = existsSync(path) ? readDoc(path) : undefined;
-      const saved = doc?.meta.wait_check_base?.match(/^(-?\d+) ([\s\S]*)$/);
+    if (mode === "change" && base === undefined) {
+      const saved = doc.meta.wait_check_base?.match(/^(-?\d+) ([\s\S]*)$/);
       if (saved && saved[2] === cmd) base = Number(saved[1]);
-      else if (doc) writeDoc(path, { ...doc.meta, wait_check_base: `${code} ${cmd}` }, doc.body);
+      else {
+        doc.meta.wait_check_base = `${code} ${cmd}`;
+        writeDoc(path, doc.meta, doc.body);
+      }
     }
-    waitChecks.set(id, { cmd, base: base ?? code, next: now + (everyMs ?? backoffMinutes(n) * 60_000), n });
-    if (base !== undefined && code !== base) { ready.add(id); waitChecks.delete(id); }
+    waitChecks.set(id, { key: waitCheckKey(doc.meta), base: base ?? code, next, n });
+    if (waitCheckReady(mode, code, base)) { ready.add(id); waitChecks.delete(id); }
   }));
   for (const id of waitChecks.keys()) if (!waiting.has(id)) waitChecks.delete(id);
   return ready;

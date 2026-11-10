@@ -12,6 +12,23 @@ export function waitKind(res: { wait_kind?: string; waiting_on?: string }): Wait
   return HUMAN.test(res.waiting_on ?? "") ? "human" : "ci";
 }
 
+export type WaitCheckMode = "success" | "change";
+type CheckMeta = { wait_kind?: string; wait_check_mode?: string };
+
+/** Existing tasks without a mode keep exit-code-change semantics. Human waits still require an observed event. */
+export function waitCheckMode(meta: CheckMeta): WaitCheckMode {
+  return meta.wait_kind !== "human" && meta.wait_check_mode === "success" ? "success" : "change";
+}
+
+/** Newly returned machine waits use a completion predicate; agents can explicitly request the legacy transition rule. */
+export function newWaitCheckMode(res: CheckMeta & { waiting_on?: string }): WaitCheckMode {
+  return waitKind(res) === "human" || res.wait_check_mode === "change" ? "change" : "success";
+}
+
+export function waitCheckReady(mode: WaitCheckMode, code: number, base?: number): boolean {
+  return mode === "success" ? code === 0 : base !== undefined && code !== base;
+}
+
 /** Poll interval for a CI wait_check after `checks` earlier polls: 5 → 10 → 20 → 40 minutes, then stays at 40. */
 export const backoffMinutes = (checks: number) => 5 * 2 ** Math.min(3, Math.max(0, checks));
 
