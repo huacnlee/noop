@@ -1814,6 +1814,7 @@ function SideRow(props: { onPress?: () => void; selected?: boolean; title?: stri
       hoverStyle={props.onPress && !props.selected ? hovered() : undefined}
       style={{
         minHeight: size.row,
+        marginVertical: 1,
         minWidth: 0,
         overflow: "hidden",
         marginHorizontal: 10,
@@ -1937,7 +1938,7 @@ function Sidebar(props: {
       </View>
       <Scroll testID="sidebar-scroll" style={{ flex: 1, minWidth: 0 }}>
         {/* Keep intrinsic text widths from expanding the scrollable content. */}
-        <View style={{ width: "100%", minWidth: 0, overflow: "hidden", paddingBottom: 16, gap: 1 }}>
+        <View style={{ width: "100%", minWidth: 0, overflow: "hidden", paddingBottom: 16 }}>
           <View style={{ paddingTop: 8 }}>
             <ContextMenu margin={8} popupStyle={menuStyle()} trigger={
             <SideRow onPress={props.onHome} selected={props.home()} title={L("Channel", "主会话")}>
