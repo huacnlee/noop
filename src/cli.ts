@@ -25,11 +25,11 @@ import { medic } from "./medic";
 import { githubStarved } from "./github";
 import { doctor, visual } from "./visual";
 import { answerFromChat, appendEvent, cancelTask, drainInbound, feed, handleOwnerMessage, mediaDays, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
-import { followUpTarget, reopenTask, type BrainOut, ClaudeModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
+import { addFollowUp, followUpTarget, reopenTask, type BrainOut, ClaudeModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
 import { runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
-import { judgeAccuracy, level, needsApproval, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
+import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
 import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
@@ -97,7 +97,12 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
     // scheduler "each": every machine runs its own copy, pinned to it (e.g. the weekly security check of this computer)
     const pin = owner === "each" ? host : undefined;
     const queued = routineQueued(r.name, pin); // a copy queued or running → this run is redundant
-    if (queued) { state[r.name] = new Date().toISOString(); journal(host, `⏰ routine \`${r.name}\` skipped: ${queued} still queued/running`); continue; }
+    if (queued) {
+      state[r.name] = new Date().toISOString();
+      journal(host, `⏰ routine \`${r.name}\` skipped: ${queued} still queued/running`);
+      noteStuckRoutine(cfg, r.name, queued, state);
+      continue;
+    }
     if (r.signal && !signalChanged(r, state)) { state[r.name] = new Date().toISOString(); continue; } // nothing new → no AI run
     if (r.agent === "architect") computeMetrics(r.name === "evolve-deep" ? 30 : 7);
     const prompt = r.readonly ? `${r.prompt}\n\nRead-only routine: observe and report only. Do not change code, PRs, issues or settings; propose any change as a follow-up.` : r.prompt;
@@ -710,7 +715,7 @@ async function daemon(cfg: Cfg) {
     for (const dir of ["inbox", "active", "waiting", "blocked", "done", "failed"]) {
       const f = P("tasks", dir, `${tid}.md`);
       if (!existsSync(f)) continue;
-      const { meta, body } = readDoc(f);
+      const { meta } = readDoc(f);
       // waiting on the owner's card: what they write on the task is their answer to it
       if (dir === "blocked" && meta.decision && existsSync(P("decisions", "open", `${meta.decision}.md`))) {
         answerFromChat(String(meta.decision), text, false);
@@ -723,13 +728,7 @@ async function daemon(cfg: Cfg) {
         queueMicrotask(() => void planInbox(cfg, host).then(wakeDaemon).catch(() => {}));
         return String(meta.title ?? tid);
       }
-      const added = `${body}\n\n${FOLLOW_UP} ${now()}\n> ${text.replace(/\n/g, "\n> ")}\n`;
-      if (dir === "waiting") { // parked until its sub-tasks finish: the owner's new message is acted on now, not then
-        const kids = meta.children ? ` Its sub-tasks (${meta.children}) may still be open: check them, don't start them again.` : "";
-        writeDoc(P("tasks", "inbox", `${tid}.md`), { ...meta, claimed_by: undefined, status: undefined, wake_at: undefined, resumed: "yes" },
-          `${added}\nWoken from waiting by the owner's message above: act on it now.${kids}\n`);
-        unlinkSync(f);
-      } else writeDoc(f, meta, added);
+      addFollowUp(f, text, dir === "waiting"); // a waiting one is acted on now, not when its wait ends
       journal(host, `💬 ${tid} owner added${dir === "waiting" ? " (woken from waiting)" : ""}: ${text.slice(0, 80)}`);
       await _commitPush(`[${host}] chat follow-up ${tid}`);
       return String(meta.title ?? tid);
