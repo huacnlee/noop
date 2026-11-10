@@ -19,7 +19,7 @@ export function reviewerAccount(cli: string): Account {
 /** CLI diagnostics only: a session transcript can quote quota text before failing for another reason. */
 export function reviewerFailure(output: string): { kind: ReturnType<typeof classify>; diagnostic: string } {
   const lines = output.slice(-4000).replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split(/\r?\n/);
-  const diagnostic = lines.filter(line => /^(?:ERROR:|API Error:|You've hit|You have hit|Rate.?limit|Usage limit|Quota|Insufficient_quota|Credit balance|Out of credits|Overloaded|Too many requests)(?!\w)/i.test(line.trim())).at(-1)?.trim() ?? "";
+  const diagnostic = lines.filter(line => /^(?:ERROR:|API Error:|(?:Claude(?: AI)? )?(?:usage|session|weekly|\d+-hour) limit reached|You've hit|You have hit|Rate.?limit|Usage limit|Quota|Insufficient_quota|Credit balance|Out of credits|Overloaded|Too many requests)(?!\w)/i.test(line.trim())).at(-1)?.trim() ?? "";
   return { kind: classify(diagnostic), diagnostic };
 }
 

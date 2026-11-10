@@ -74,6 +74,10 @@ esac
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/second-review.XXXXXX")"
 out="$tmp/out"; err="$tmp/err"; log="$tmp/log"; : > "$out"; : > "$err"; : > "$log"
+: > "$tmp/bunfig.toml"
+# Internal Bun helpers must never load preloads from the repository being reviewed.
+run_bridge() { (cd "$tmp" && bun --config="$tmp/bunfig.toml" "$bridge" "$@"); }
+review_cwd="$(pwd)"
 trap 'rm -rf "$tmp"' EXIT
 rc=0; reason=""; detail=""; ran=""; recovery=""
 
@@ -92,14 +96,15 @@ state() { git rev-parse HEAD 2>/dev/null; git status --porcelain=v1 -uall 2>/dev
 
 # Bun is already required by the account bridge; GNU timeout isn't installed on stock macOS.
 run_with_timeout() {
-  bun -e '
+  seconds="$1"; shift
+  (cd "$tmp" && bun --config="$tmp/bunfig.toml" -e '
     const { spawnSync } = require("node:child_process");
-    const result = spawnSync(process.argv[2], process.argv.slice(3), {
-      stdio: "inherit", timeout: Number(process.argv[1]) * 1000, killSignal: "SIGKILL"
+    const result = spawnSync(process.argv[3], process.argv.slice(4), {
+      cwd: process.argv[2], stdio: "inherit", timeout: Number(process.argv[1]) * 1000, killSignal: "SIGKILL"
     });
     if (result.error) console.error("review runner: " + result.error.code);
     process.exit(result.error?.code === "ETIMEDOUT" ? 124 : (result.status ?? 127));
-  ' "$@"
+  ' "$seconds" "$review_cwd" "$@")
 }
 
 # Preflight: never review with the model that is running (that is not a cross-model review).
@@ -111,7 +116,7 @@ elif [ ! -f "$bridge" ] || ! command -v bun >/dev/null 2>&1; then
   reason="error"; detail="shared account bridge unavailable; update Noop before retrying"
 else
   check_rc=0
-  recovery="$(bun "$bridge" check "$rev" 2>"$err")" || check_rc=$?
+  recovery="$(run_bridge check "$rev" 2>"$err")" || check_rc=$?
   if [ "$check_rc" -eq 1 ]; then
     reason="quota"
     printf '%s' "$recovery" | grep -q '"reason":"auth"' && reason="auth"
@@ -180,7 +185,7 @@ EOF
   elif [ "$rc" -eq 0 ] && [ -z "$verdict" ]; then
     reason="parse"; detail="exit 0 but the output has no final 'VERDICT: CLEAN|FINDINGS <n>' line"
   elif [ "$rc" -ne 0 ]; then
-    failure_kind="$(printf '%s' "$quota_text" | bun "$bridge" classify "$rev" 2>/dev/null)"
+    failure_kind="$(printf '%s' "$quota_text" | run_bridge classify "$rev" 2>/dev/null)"
     if [ "$failure_kind" = quota ]; then reason="quota"
     elif [ "$failure_kind" = auth ]; then reason="auth"
     elif m 'operation not permitted|EPERM|sandbox(-exec)? (denied|deny)|permission denied|read-only file system'; then reason="permission"
@@ -192,7 +197,7 @@ fi
 
 # Persist quota failures through the same account store as the daemon. Preflight skips never extend cooldowns.
 if [ "$reason" = quota ] && [ -n "$ran" ]; then
-  recovery="$(printf '%s' "$quota_text" | bun "$bridge" record "$rev" 2>"$err")" || {
+  recovery="$(printf '%s' "$quota_text" | run_bridge record "$rev" 2>"$err")" || {
     reason="error"; detail="quota detected but shared recovery could not be saved";
   }
 fi

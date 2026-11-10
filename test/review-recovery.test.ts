@@ -12,7 +12,7 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     const env = { ...process.env, NOOP_HOME: join(dir, "home"), HUB_DATA: data, HUB_SYNC: "local",
       PATH: `${bin}:${process.env.PATH}`, NOOP_REVIEW_CODE_DIR: resolve(import.meta.dir, "../src"),
       CODEX_THREAD_ID: "fixture", CLAUDECODE: "", CLAUDE_CONFIG_DIR: "", CODEX_HOME: "", NOOP_SECOND_REVIEW: "1" };
-    const run = (cmd: string[], cwd = repo) => spawnSync(cmd[0], cmd.slice(1), { cwd, env, encoding: "utf8", timeout: 20_000 });
+    const run = (cmd: string[], cwd = cmd[0] === "bun" ? dir : repo) => spawnSync(cmd[0], cmd.slice(1), { cwd, env, encoding: "utf8", timeout: 20_000 });
     run(["git", "init", "-q"]);
     writeFileSync(join(repo, "a"), "fixture\n"); run(["git", "add", "a"]);
     expect(run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]).status).toBe(0);
@@ -23,6 +23,9 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     writeFileSync(join(dir, "answer"), "You've hit your 5-hour limit · resets in 2h 13m\n");
     const script = resolve(import.meta.dir, "../scripts/second-review.sh");
     const args = ["sh", script, "T-TEST", repo, "--uncommitted", "--author", "codex"];
+    writeFileSync(join(repo, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+    writeFileSync(join(repo, "preload.ts"), `require("node:fs").writeFileSync(${JSON.stringify(join(dir, "preloaded"))}, "loaded");`);
+
     const statePath = join(dir, "home/accounts/state.json");
     writeFileSync(join(dir, "answer"), 'Review mentions quota, 429 and "resets in 2h 13m" but forgot a verdict.\n');
     const malformed = run(args);
@@ -63,12 +66,12 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     // A custom CLI config directory remains usable, with a separate stable machine-local key.
     env.CLAUDE_CONFIG_DIR = join(dir, "custom-claude");
     expect(run(args.map(a => a === "T-TEST" ? "T-CUSTOM" : a)).status).toBe(0);
-    writeFileSync(join(dir, "answer"), "usage limit; resets in 13m\n");
+    writeFileSync(join(dir, "answer"), "Claude usage limit reached; resets in 13m\n");
     writeFileSync(join(dir, "exit-code"), "1");
     expect(run(args.map(a => a === "T-TEST" ? "T-CUSTOM" : a)).stdout).toContain("reason=quota");
     expect(Object.keys(JSON.parse(readFileSync(statePath, "utf8")).accounts).some(k => /^claude-env-[a-f0-9]{16}$/.test(k))).toBe(true);
     const beforeRecord = readFileSync(statePath, "utf8");
-    const invalidRecord = spawnSync("bun", [bridge, "record", "claude"], { cwd: repo, env, input: "ordinary failure", encoding: "utf8" });
+    const invalidRecord = spawnSync("bun", [bridge, "record", "claude"], { cwd: dir, env, input: "ordinary failure", encoding: "utf8" });
     expect(invalidRecord.status).toBe(2);
     expect(readFileSync(statePath, "utf8")).toBe(beforeRecord);
     // Codex stderr is a transcript; quoted code is not a quota failure when the final error is a disconnect.
@@ -82,9 +85,15 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     expect(codexFailure.stdout).toContain("reason=network");
     expect(readFileSync(statePath, "utf8")).toBe(beforeRecord);
     const classifyInput = (input: string) => spawnSync("bun", [bridge, "classify", "codex"], { env: codexEnv, input, encoding: "utf8" }).stdout.trim();
+    for (const message of ["Claude AI usage limit reached|1762790400", "Claude usage limit reached. Your limit will reset at 5pm (America/Los_Angeles).", "5-hour limit reached ∙ resets 3am", "Weekly limit reached ∙ resets Nov 12, 3pm"]) {
+      expect(classifyInput(message)).toBe("quota");
+    }
     expect(classifyInput('ERROR: out of credits')).toBe("quota");
     expect(classifyInput('ERROR: unauthorized; please run /login')).toBe("auth");
     expect(classifyInput('ERROR: usage limit; resets in 2h 13m\nERROR: stream disconnected')).toBe("none");
+    expect(existsSync(join(dir, "preloaded"))).toBe(false);
+    expect(spawnSync("bun", ["-e", "0"], { cwd: repo, env, encoding: "utf8" }).status).toBe(0);
+    expect(existsSync(join(dir, "preloaded"))).toBe(true); // proves the fixture would execute without isolation
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }, 20_000);
 
