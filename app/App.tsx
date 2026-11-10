@@ -1803,18 +1803,27 @@ function SideEmpty(props: { text: string }) {
   return <Text style={{ fontSize: 13.5, color: colors.faint, paddingHorizontal: 20, paddingVertical: 6 }}>{props.text}</Text>;
 }
 
+/** The popup of a sidebar row's context menu. */
+const menuStyle = () => ({ minWidth: 160, padding: 4, borderRadius: radius.control, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface });
+
 /** A sidebar row: the gallery's SidebarRow, at 34 pt (44 on touch). */
-function SideRow(props: { onPress?: () => void; selected?: boolean; title?: string; children: JSX.Element }) {
-  return (
+function SideRow(props: { onPress?: () => void; selected?: boolean; title?: string; menu?: JSX.Element; children: JSX.Element }) {
+  // While its context menu is open the row keeps the pressed fill, so it is clear which row the menu is about.
+  const menuOpen = signal(false);
+  const row = (
     <View
       onPress={props.onPress}
       role={props.onPress ? "button" : undefined}
       accessibilityLabel={props.title}
       tooltip={props.title && !props.onPress ? <Tooltip label={props.title} placement="right" /> : undefined}
       hoverStyle={props.onPress && !props.selected ? hovered() : undefined}
+      activeStyle={props.onPress ? { transform: [{ scale: 0.985 }] } : undefined}
       style={{
         minHeight: size.row,
         marginVertical: 1,
+        transitionProperty: "background-color, transform",
+        transitionDuration: 180,
+        transitionTimingFunction: "ease-out",
         minWidth: 0,
         overflow: "hidden",
         marginHorizontal: 10,
@@ -1824,11 +1833,17 @@ function SideRow(props: { onPress?: () => void; selected?: boolean; title?: stri
         paddingHorizontal: 10,
         borderRadius: radius.control,
         borderCurve: "continuous",
-        backgroundColor: props.selected ? alpha(colors.text, 0.08) : "transparent",
+        backgroundColor: props.selected || menuOpen() ? alpha(colors.text, 0.08) : "transparent",
       }}
     >
       {props.children}
     </View>
+  );
+  if (!props.menu) return row;
+  return (
+    <ContextMenu margin={8} popupStyle={menuStyle()} onOpenChange={({ open }) => menuOpen.set(open)} trigger={row}>
+      {props.menu}
+    </ContextMenu>
   );
 }
 
@@ -1900,7 +1915,6 @@ function Sidebar(props: {
     const running = (s()?.active ?? []).some((a) => a.id === id);
     if (await confirmEndTask(id, done, running)) await props.hub.api("POST", "/api/tasks/cancel", done ? { id, done: true } : { id }).catch(() => {});
   };
-  const menuStyle = () => ({ minWidth: 160, padding: 4, borderRadius: radius.control, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface });
   const itemStyle = { height: 32, justifyContent: "center" as const, paddingHorizontal: 10, borderRadius: 6 };
   const taskItems = (id: string) => [
     <MenuItem testID={`side-done-${id}`} onSelect={() => void endTask(id, true)} hoverStyle={hovered()} style={itemStyle}>
@@ -1940,8 +1954,11 @@ function Sidebar(props: {
         {/* Keep intrinsic text widths from expanding the scrollable content. */}
         <View style={{ width: "100%", minWidth: 0, overflow: "hidden", paddingBottom: 16 }}>
           <View style={{ paddingTop: 8 }}>
-            <ContextMenu margin={8} popupStyle={menuStyle()} trigger={
-            <SideRow onPress={props.onHome} selected={props.home()} title={L("Channel", "主会话")}>
+            <SideRow onPress={props.onHome} selected={props.home()} title={L("Channel", "主会话")} menu={<>
+              <MenuItem testID="read-all" disabled={!props.unread()} onSelect={props.onReadAll} hoverStyle={hovered()} style={{ height: touch ? 44 : 32, justifyContent: "center", paddingHorizontal: 10, borderRadius: 6 }}>
+                <Text style={{ fontSize: 14, color: props.unread() ? colors.text : colors.faint }}>{L("Mark all as read", "全部标为已读")}</Text>
+              </MenuItem>
+            </>}>
               <Icon name="chat" size={17} tint={props.home() ? colors.text : colors.muted} />
               <Text style={{ ...rowText(), fontWeight: "600" }}>{L("Channel", "主会话")}</Text>
               <If when={waits().length && !props.unread()}>
@@ -1951,11 +1968,6 @@ function Sidebar(props: {
                 <Count testID="channel-unread" accessibilityLabel={L(`${props.unread()} unread`, `${props.unread()} 条未读`)} value={props.unread()} />
               </If>
             </SideRow>
-            }>
-              <MenuItem testID="read-all" disabled={!props.unread()} onSelect={props.onReadAll} hoverStyle={hovered()} style={{ height: touch ? 44 : 32, justifyContent: "center", paddingHorizontal: 10, borderRadius: 6 }}>
-                <Text style={{ fontSize: 14, color: props.unread() ? colors.text : colors.faint }}>{L("Mark all as read", "全部标为已读")}</Text>
-              </MenuItem>
-            </ContextMenu>
             <SideRow onPress={props.onRules} selected={props.rules()} title={L("Memory", "记忆")}>
               <Icon name="scroll" size={17} tint={props.rules() ? colors.text : colors.muted} />
               <Text style={rowText()}>{L("Memory", "记忆")}</Text>
@@ -1964,17 +1976,7 @@ function Sidebar(props: {
           <SideHeading title={L("Needs your decision", "待你决定")} count={waits().length || undefined} accent />
           <Each of={waits()} key={(d) => d.id}>
             {(d) => (
-              <ContextMenu
-                margin={8}
-                popupStyle={{ minWidth: 160, padding: 4, borderRadius: radius.control, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface }}
-                trigger={
-                  <SideRow onPress={() => props.onPick(d().id)} title={d().id}>
-                    <Indicator status="waiting" />
-                    <Text style={rowText()}>{d().question || d().id}</Text>
-                    <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.faint }}>{d().id}</Text>
-                  </SideRow>
-                }
-              >
+              <SideRow onPress={() => props.onPick(d().id)} title={d().id} menu={<>
                 <MenuItem
                   testID={`side-ignore-${d().id}`}
                   onSelect={() => props.onIgnore(d().id)}
@@ -1984,7 +1986,11 @@ function Sidebar(props: {
                   <Text style={{ fontSize: 14, color: colors.text }}>{L("Ignore, you decide", "忽略，你来定")}</Text>
                 </MenuItem>
                 {d().task ? taskItems(d().task!) : null}
-              </ContextMenu>
+              </>}>
+                <Indicator status="waiting" />
+                <Text style={rowText()}>{d().question || d().id}</Text>
+                <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.faint }}>{d().id}</Text>
+              </SideRow>
             )}
           </Each>
           <If when={!waits().length}>
@@ -1994,15 +2000,11 @@ function Sidebar(props: {
           <SideHeading title={L("In progress", "进行中")} count={s()?.active.length || undefined} />
           <Each of={s()?.active ?? []} key={(a) => a.id}>
             {(a) => (
-              <ContextMenu margin={8} popupStyle={menuStyle()} trigger={
-                <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${a().agent}${a().host ? ` @ ${a().host}` : ""}`}>
+                              <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${a().agent}${a().host ? ` @ ${a().host}` : ""}`} menu={taskItems(a().id)}>
                   <Indicator status="running" />
                   <Text style={rowText()}>{a().title}</Text>
                   <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{since(a().started)}</Text>
                 </SideRow>
-              }>
-                {taskItems(a().id)}
-              </ContextMenu>
             )}
           </Each>
           <If when={!s()?.active.length}>
@@ -2013,15 +2015,11 @@ function Sidebar(props: {
             <SideHeading testID="side-queued" open={queuedOpen} title={L("Queued", "排队")} count={(s()?.recent ?? []).filter((t) => !(s()?.active ?? []).some((a) => a.id === t.id) && isQueued(t.state)).length} />
             <Each of={queuedOpen() ? (s()?.recent ?? []).filter((t) => !(s()?.active ?? []).some((a) => a.id === t.id) && isQueued(t.state)) : []} key={(a) => a.id}>
               {(a) => (
-                <ContextMenu margin={8} popupStyle={menuStyle()} trigger={
-                <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`}>
+                                <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`} menu={taskItems(a().id)}>
                   <Indicator status={TONE[a().state ?? ""] ?? "idle"} />
                   <Text style={{ ...rowText(), color: colors.muted }}>{a().title}</Text>
                   <Text style={{ maxWidth: "50%", minWidth: 0, flexShrink: 1, numberOfLines: 1, fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{a().state === "waiting" ? L("Waiting on subtasks", "等子任务") : a().state === "parked" ? L("Waiting", "等待") : a().state === "nohost" ? L(`Waiting for ${needsLabel((a() as { needs?: string }).needs)}`, `等 ${needsLabel((a() as { needs?: string }).needs)}`) : L("Queued", "排队中")}</Text>
                 </SideRow>
-                }>
-                  {taskItems(a().id)}
-                </ContextMenu>
               )}
             </Each>
           </If>
@@ -2155,7 +2153,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
   const row = (): ViewStyle => ({ flexDirection: "row", alignItems: "center", gap: m.gap, ...(touch ? { minHeight: m.row, paddingVertical: 12 } : { height: m.row }), paddingHorizontal: m.padX, borderRadius: touch ? 12 : 7, borderCurve: "continuous" });
   const label = (text: string) => <Text style={{ flex: 1, minWidth: 0, fontSize: m.label, color: colors.text, ...(touch ? {} : { numberOfLines: 1 }) }}>{text}</Text>;
   const lead = (name: IconName) => <Icon name={name} size={m.icon} tint={colors.muted} />;
-  const sep = () => <MenuSeparator style={{ height: 1, marginVertical: touch ? 6 : 4, marginHorizontal: m.sepX, backgroundColor: alpha(colors.text, 0.07) }} />;
+  const sep = () => <MenuSeparator style={{ height: 1, marginVertical: touch ? 6 : 4, marginHorizontal: m.sepX, backgroundColor: alpha(colors.text, 0.14) }} />;
   const initial = () => (account().slice(0, 1) || "?").toUpperCase();
   const avatar = (box: number) => (
     <View style={{ width: box, height: box, borderRadius: box / 2, flexShrink: 0, alignItems: "center", justifyContent: "center", backgroundColor: initialColor(initial()) }}>

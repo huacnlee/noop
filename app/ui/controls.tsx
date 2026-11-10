@@ -7,11 +7,11 @@
  * (`fill.press`), keyboard focus the field's ring (`focusRing`), disabled half strength with no hover or press.
  */
 import type { JSX, ViewStyle } from "nsh";
-import { signal, Text, View } from "nsh";
+import { createMotion, signal, Text, View } from "nsh";
 import { Input as BaseInput, Switch as BaseSwitch } from "nsh/base";
 import { Icon, type IconName } from "./icons";
 import { alpha, colors, focusRing, motion, tints } from "./theme";
-import { corner, duration, fill, font, leading, size, space, touch } from "./tokens";
+import { corner, duration, fill, font, leading, press as give, size, space, touch } from "./tokens";
 import { follow, Spinner } from "./index";
 import { Tooltip } from "./tooltip";
 
@@ -120,7 +120,7 @@ export function Button(props: {
       onMouseEnter={() => over.set(true)}
       onMouseLeave={() => over.set(false)}
       hoverStyle={hover()}
-      activeStyle={press()}
+      activeStyle={idle() || props.checked ? undefined : { ...press(), transform: [{ scale: give.control }] }}
       focusStyle={focusRing()}
       style={{
         minHeight: m().height,
@@ -138,8 +138,9 @@ export function Button(props: {
         borderWidth: 1,
         opacity: props.disabled && !props.checked ? DISABLED : 1,
         cursor: "default",
-        transitionProperty: "background-color, border-color, opacity",
-        transitionDuration: duration.quick,
+        transitionProperty: "background-color, border-color, opacity, transform",
+        transitionDuration: duration.settle,
+        transitionTimingFunction: "ease-out",
         ...look(),
       }}
     >
@@ -200,7 +201,7 @@ export function IconButton(props: {
       onMouseLeave={() => over.set(false)}
       tooltip={showTip() ? <Tooltip label={props.label} shortcut={props.shortcut} /> : undefined}
       hoverStyle={props.disabled ? undefined : primary() ? { opacity: 0.88 } : wash(fill.ghostHover)}
-      activeStyle={props.disabled ? undefined : primary() ? { opacity: 0.78 } : wash(fill.ghostPress)}
+      activeStyle={props.disabled ? undefined : { ...(primary() ? { opacity: 0.78 } : wash(fill.ghostPress)), transform: [{ scale: give.icon }] }}
       focusStyle={focusRing()}
       style={{
         width: box(),
@@ -214,17 +215,34 @@ export function IconButton(props: {
         borderColor: "transparent",
         opacity: props.disabled ? DISABLED : 1,
         cursor: "default",
-        transitionProperty: "background-color, opacity",
-        transitionDuration: duration.quick,
+        transitionProperty: "background-color, opacity, transform",
+        transitionDuration: duration.settle,
+        transitionTimingFunction: "ease-out",
         ...(props.selected && !primary() ? wash(fill.selected) : {}),
       }}
     >
-      <If when={primary()} else={<Icon name={props.icon} size={glyph()} tint={tint()} />}>
+      <If when={primary()} else={<Glyph name={props.icon} size={glyph()} tint={tint()} />}>
         <View style={{ width: touch ? 32 : 28, height: touch ? 32 : 28, borderRadius: touch ? 16 : 14, alignItems: "center", justifyContent: "center", backgroundColor: colors.accentFill }}>
           <Icon name={props.icon} size={touch ? 18 : 16} tint={colors.onAccent} />
         </View>
       </If>
     </View>
+  );
+}
+
+/** An icon button's glyph: when it swaps (copy → check), the new one pops in from a little smaller. */
+function Glyph(props: { name: IconName; size: number; tint: string }) {
+  return (
+    <Each of={[props.name]} key={(n) => n}>
+      {(n) => {
+        const m = createMotion({ enter: { keyframes: { opacity: [0, 1], scale: [0.6, 1] }, duration: duration.settle, easing: "easeOut" } });
+        return (
+          <View style={m.style}>
+            <Icon name={n()} size={props.size} tint={props.tint} />
+          </View>
+        );
+      }}
+    </Each>
   );
 }
 

@@ -58,7 +58,13 @@ export const leading = { key: 16, badge: 16, sm: 18, md: 20, lg: 24 } as const;
 export const fill = { rest: 0.07, hover: 0.12, press: 0.16, ghostHover: 0.1, ghostPress: 0.15, selected: 0.12 } as const;
 
 /** Durations shared by hover / state transitions (milliseconds). */
-export const duration = { quick: 120, enter: 420 } as const;
+export const duration = { quick: 120, settle: 180, enter: 420 } as const;
+
+/**
+ * Press feedback, kept small: a control gives a little under the finger and settles back (`duration.settle`). Rows
+ * barely move; icon buttons, being small, a touch more.
+ */
+export const press = { control: 0.97, icon: 0.9, row: 0.985 } as const;
 
 /**
  * A floating surface, for the composer and the sidebar: Apple's Liquid Glass where it is drawn (iOS 26, macOS 26), a

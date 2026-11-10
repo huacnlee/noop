@@ -218,7 +218,7 @@ export const motion = {
  * over its surface, quieter than pressed and than selected. Leave it off a
  * disabled control and off a selected one, whose own fill shows.
  */
-export const hovered = (): ViewStyle => ({ backgroundColor: alpha(colors.text, 0.05) });
+export const hovered = (): ViewStyle => ({ backgroundColor: alpha(colors.text, 0.1) });
 
 /**
  * The keyboard focus (`focusStyle`): the edge turns the theme's muted olive
