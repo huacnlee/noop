@@ -407,3 +407,4 @@ export { Icon, type IconName } from "./icons";
 export { Tooltip, TooltipContent } from "./tooltip";
 export * from "./tokens";
 export * from "./controls";
+export * from "./page";

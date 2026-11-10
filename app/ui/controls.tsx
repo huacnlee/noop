@@ -40,7 +40,7 @@ export function Button(props: {
   /** Work started by it is going on: a spinner in the icon's place, no presses. */
   loading?: boolean;
   disabled?: boolean;
-  /** The option the owner picked: a check and a selected fill, not dimmed. */
+  /** The option the owner picked: a blue check at the end and a selected fill, not dimmed. */
   checked?: boolean;
   /** Grows to share a row with its siblings. */
   grow?: boolean;
@@ -128,11 +128,13 @@ export function Button(props: {
         flexShrink: 1,
         flexGrow: props.grow ? 1 : 0,
         flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "center",
+        // top-aligned, so a label that wraps (an option's sentence) keeps its first line beside the icon; the padding
+        // centres a single line in the size's height
+        alignItems: "flex-start",
+        justifyContent: props.grow ? "center" : "flex-start",
         gap: m().gap,
         paddingHorizontal: m().padX,
-        paddingVertical: 0,
+        paddingVertical: (m().height - m().line) / 2 - 1,
         borderRadius: corner.control,
         borderCurve: "continuous",
         borderWidth: 1,
@@ -144,21 +146,22 @@ export function Button(props: {
         ...look(),
       }}
     >
-      <If when={props.checked}>
-        <Icon name="check" size={m().icon} tint={colors.text} />
-      </If>
       <If when={props.kbd}>
         <Kbd keys={props.kbd!} inverted={variant() === "primary" && !props.checked} />
       </If>
       <If when={props.loading}>
-        <Spinner size={m().icon - 2} tint={fg()} />
+        <View style={{ marginTop: (m().line - m().icon) / 2 + 1 }}><Spinner size={m().icon - 2} tint={fg()} /></View>
       </If>
       <If when={!props.loading && !props.checked && props.icon}>
-        <Icon name={props.icon!} size={m().icon} tint={fg()} />
+        <View style={{ marginTop: (m().line - m().icon) / 2 }}><Icon name={props.icon!} size={m().icon} tint={fg()} /></View>
       </If>
-      <Text style={{ flexShrink: 1, textAlign: "center", fontSize: m().font, lineHeight: m().line, fontWeight: "500", color: fg() }}>{props.label}</Text>
+      <Text style={{ flexShrink: 1, textAlign: props.grow ? "center" : "left", fontSize: m().font, lineHeight: m().line, fontWeight: "500", color: fg() }}>{props.label}</Text>
       <If when={props.note}>
         <Text style={{ fontSize: font.sm, lineHeight: leading.sm, color: variant() === "primary" && !props.checked ? alpha(colors.onAccent, 0.7) : colors.faint }}>{props.note}</Text>
+      </If>
+      {/* the picked option: a blue check at the end */}
+      <If when={props.checked}>
+        <View style={{ marginTop: (m().line - m().icon) / 2 }}><Icon name="check" size={m().icon} tint={colors.info} /></View>
       </If>
     </View>
   );

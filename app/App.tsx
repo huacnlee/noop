@@ -93,6 +93,7 @@ import {
   SettingsItem,
   SettingsChoices,
   NumberField,
+  PageHeader,
 } from "./ui";
 import {
   answeredIds,
@@ -1621,14 +1622,14 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
     >
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", paddingHorizontal: props.wide ? 32 : 16, paddingTop: 24, paddingBottom: composerHeight() + 24 }}>
         <If when={t()} else={<Text style={{ fontSize: 15, color: colors.muted }}>{missing() ? L(`Can’t find ${props.id}.`, `找不到 ${props.id}。`) : L("Loading…", "读取中…")}</Text>}>
-          <View testID="task-head" style={{ gap: 8 }}>
+          <PageHeader testID="task-head">
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Badge label={stateLabel()} variant={t()!.state === "failed" ? "danger" : t()!.state === "blocked" ? "warn" : "neutral"} />
               <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.muted }}>{t()!.id}</Text>
               <View style={{ flex: 1 }} />
               <If when={cancellable() && !cancelling()}>
-                <Button testID="finish-task" label={L("Done", "完成")} variant="ghost" icon="check" onPress={() => void finish()} />
-                <Button testID="cancel-task" label={L("Cancel task", "取消任务")} variant="ghost" icon="close" onPress={() => void cancel()} />
+                <Button testID="finish-task" label={L("Done", "完成")} variant="outline" size="sm" icon="check" onPress={() => void finish()} />
+                <Button testID="cancel-task" label={L("Cancel task", "取消任务")} variant="outline" size="sm" icon="close" onPress={() => void cancel()} />
               </If>
               <If when={cancelling()}>
                 <Text style={{ fontSize: 13, color: colors.muted }}>{L("Working…", "处理中…")}</Text>
@@ -1641,7 +1642,7 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
                 t()!.state === "active" ? L(`Running for ${since(t()!.started)}`, `已运行 ${since(t()!.started)}`) : t()!.finished ? L(`Took ${since(t()!.started, t()!.finished)}`, `用时 ${since(t()!.started, t()!.finished)}`) : "",
                 Number(t()!.attempt ?? 1) > 1 ? L(`Attempt ${t()!.attempt}`, `第 ${t()!.attempt} 次`) : ""].filter(Boolean).join(" · ")}
             </Text>
-          </View>
+          </PageHeader>
           <If when={t()!.state === "active" ? activityLine(t()!.activity) : null}>
             {(a) => (
               <Text testID="task-activity" style={{ marginTop: 10, fontSize: 13.5, lineHeight: 19, color: a().quiet ? colors.warn : colors.muted }}>{a().text}</Text>
@@ -3493,7 +3494,10 @@ function RuleDoc(props: { hub: Hub; path: string; wide: boolean }) {
   return (
     <Scroll testID="rule-doc" style={{ flex: 1, backgroundColor: colors.background }}>
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 32 : 16, paddingTop: 20, paddingBottom: Math.max(32, safeArea().bottom + 16) }}>
-        <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{props.path}</Text>
+        <PageHeader style={{ marginBottom: 8 }}>
+          <Text style={{ fontSize: 20, fontWeight: "600", color: colors.text }}>{props.path.split("/").pop()!.replace(/\.md$/, "")}</Text>
+          <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{props.path}</Text>
+        </PageHeader>
         <If when={text() !== null} else={<Text style={{ fontSize: 14, color: error() ? colors.danger : colors.faint }}>{error() || L("Loading…", "读取中…")}</Text>}>
           <If when={(text() ?? "").trim()} else={<Text style={{ fontSize: 14, color: colors.faint }}>{L("(Empty file)", "（空文件）")}</Text>}>
             <Rich text={text() ?? ""} />
@@ -3946,11 +3950,12 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // A message reads as sent at once but leaves a few seconds later, so 撤回 (or Mod+Z) can still take it back.
   const UNDO_MS = 5000;
   const holds = new Map<string, ReturnType<typeof setTimeout>>();
-  function send(text: string, ref: string | null, id = `local:${crypto.randomUUID()}`, files: Attachment[] = []) {
+  function send(text: string, ref: string | null, id = `local:${crypto.randomUUID()}`, files: Attachment[] = [], silent = false) {
     const ts = new Date().toISOString();
     const channel = untracked(scope) ?? undefined;
     outbox.update((o) => [...o.filter((x) => x.id !== id), { id, ts, text, ref, files, state: "held", channel }]);
-    jumpToEnd();
+    // answering a card is a quiet act: the reader stays where the card is
+    if (!silent) jumpToEnd();
     holds.set(id, setTimeout(() => { holds.delete(id); void deliver(id); }, UNDO_MS));
   }
   function deliverHeld() {
@@ -4182,7 +4187,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const compactComposer = () => !focused() && !draft() && !attachments().length && !replyTo() && speech() === "off";
   const answer = (ref: string, c: string) => {
     clearNotification(ref);
-    return send(`${ref} ${c}`, null);
+    return send(`${ref} ${c}`, null, undefined, [], true);
   };
 
   function pick(ref: string) {
@@ -4712,7 +4717,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     focused.set(false);
                   }}
                   onContentSizeChange={({ size: s }) => inputHeight.set(Math.min(220, Math.max(28, s.height)))}
-                  placeholder={replyTo() ? L(`Reply to ${replyTo()}…`, `回复 ${replyTo()}…`) : scope() ? L(`Message #${scoped()?.name ?? scope()}`, `在 #${scoped()?.name ?? scope()} 里讨论…`) : wide() ? L("Tell the team what to do, e.g. screenshot and check the nsh gallery on Linux", "给团队下指令，例如：把 nsh 的 gallery 在 Linux 上截图检查一遍") : L("Tell the team what to do…", "给团队下指令…")}
+                  placeholder={replyTo() ? L(`Reply to ${replyTo()}…`, `回复 ${replyTo()}…`) : scope() ? L(`Message #${scoped()?.name ?? scope()}`, `在 #${scoped()?.name ?? scope()} 里讨论…`) : wide() ? L("Tell the team what to do, e.g. review the open pull requests", "给团队下指令，例如：审查一遍待处理的 PR") : L("Tell the team what to do…", "给团队下指令…")}
                   class={platform.os === "ios" ? "placeholder:text-muted-foreground" : "placeholder:text-faint"}
                   style={{
                     height: compactComposer() ? (touch ? 44 : 36) : inputHeight(),
