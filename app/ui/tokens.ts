@@ -28,11 +28,15 @@ export const size = {
   column: 880,
 };
 
+/** Type steps (points), each with its line height: a label never sets its own. */
+export const font = { key: 12, badge: 12, xs: 12, sm: 14, md: 16, lg: 17 } as const;
+export const leading = { key: 16, badge: 16, xs: 16, sm: 20, md: 22, lg: 24 } as const;
+
 /** What moves with a control's size: its height, side padding, gaps, glyph and type. Shared by every control. */
 export const controlMetrics = (sm: boolean) =>
   sm
-    ? { height: size.controlSm, padX: 8, gap: 4, icon: 14, font: 12, line: 16 }
-    : { height: size.control, padX: 12, gap: 6, icon: 16, font: 13, line: 18 };
+    ? { height: size.controlSm, padX: 8, gap: 4, icon: 14, font: font.xs, line: leading.xs }
+    : { height: size.control, padX: 12, gap: 6, icon: 16, font: font.sm, line: leading.sm };
 
 /**
  * The corner-radius ladder, largest first: the composer, then fields, then buttons and rows, then icon buttons, then
@@ -51,9 +55,6 @@ export const corner = {
 /** Spacing steps (points). */
 export const space = { xs: 4, sm: 6, md: 8, lg: 12, xl: 16, xxl: 24 } as const;
 
-/** Type steps (points), each with its line height: a label never sets its own. */
-export const font = { key: 12, badge: 12, sm: 13, md: 15, lg: 17 } as const;
-export const leading = { key: 16, badge: 16, sm: 18, md: 20, lg: 24 } as const;
 
 /**
  * The quiet fills of controls, as the text color's opacity over whatever surface they sit on: the same steps in light
