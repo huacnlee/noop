@@ -1088,7 +1088,7 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
   };
   return (
     <View style={{ flexDirection: "row", justifyContent: "flex-end", paddingVertical: 8 }} onMouseEnter={() => over.set(true)} onMouseLeave={() => over.set(false)}>
-      <View style={{ maxWidth: "82%", alignItems: "flex-end", gap: 4 }}>
+      <View style={{ maxWidth: "82%", minWidth: 0, flexShrink: 1, alignItems: "flex-end", gap: 4 }}>
         <If
           when={props.out?.state === "failed"}
           else={
@@ -1145,6 +1145,10 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
             borderBottomRightRadius: 6,
             backgroundColor: tints.accent,
             gap: 4,
+            // long code lines wrap or scroll inside the bubble, never widen it past the column
+            maxWidth: "100%",
+            minWidth: 0,
+            overflow: "hidden",
           }}
         >
           {/^[DLP]-[A-Z]?\d{4} \S/.test(e.text) && !e.text.includes("\n")
