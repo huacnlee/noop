@@ -11,7 +11,7 @@ import { createMotion, signal, Text, View } from "nsh";
 import { Input as BaseInput, NumberInput as BaseNumberInput, Switch as BaseSwitch } from "nsh/base";
 import { Icon, type IconName } from "./icons";
 import { alpha, colors, focusRing, motion, tints } from "./theme";
-import { controlMetrics, corner, duration, fill, font, leading, press as give, size, space, touch } from "./tokens";
+import { controlMetrics, corner, duration, edge, fill, font, leading, press as give, size, space, touch } from "./tokens";
 import { follow, Spinner } from "./index";
 import { Tooltip } from "./tooltip";
 
@@ -70,12 +70,12 @@ export function Button(props: {
     if (props.checked) return { ...wash(fill.selected), borderColor: "transparent" };
     switch (variant()) {
       case "primary":
-        return { backgroundColor: colors.accentFill, borderColor: alpha(colors.text, 0.12), boxShadow: "0 1px 2px rgba(0,0,0,0.12)" };
+        return { backgroundColor: colors.accentFill, borderColor: "transparent", boxShadow: "0 1px 2px rgba(0,0,0,0.12)" };
       // a raised control: a hairline edge and a soft drop, on the field's fill
       case "secondary":
-        return { backgroundColor: colors.field, borderColor: colors.fieldBorder, boxShadow: "0 1px 2px rgba(0,0,0,0.06)" };
+        return { backgroundColor: colors.field, borderColor: alpha(colors.text, edge.rest), boxShadow: "0 1px 2px rgba(0,0,0,0.06)" };
       case "outline":
-        return { backgroundColor: "transparent", borderColor: colors.fieldBorder, boxShadow: "0 1px 2px rgba(0,0,0,0.04)" };
+        return { backgroundColor: "transparent", borderColor: alpha(colors.text, edge.rest), boxShadow: "0 1px 2px rgba(0,0,0,0.04)" };
       case "ghost":
         return { backgroundColor: "transparent", borderColor: "transparent" };
       case "danger":
@@ -91,7 +91,7 @@ export function Button(props: {
         return { backgroundColor: alpha(colors.danger, 0.16) };
       case "secondary":
       case "outline":
-        return { ...wash(fill.ghostHover / 2), borderColor: alpha(colors.text, 0.28) };
+        return { ...wash(fill.ghostHover / 2), borderColor: alpha(colors.text, edge.hover) };
       default:
         return wash(fill.ghostHover);
     }
@@ -105,7 +105,7 @@ export function Button(props: {
         return { backgroundColor: alpha(colors.danger, 0.22) };
       case "secondary":
       case "outline":
-        return { ...wash(fill.ghostPress / 2), borderColor: alpha(colors.text, 0.28), boxShadow: "none" };
+        return { ...wash(fill.ghostPress / 2), borderColor: alpha(colors.text, edge.hover), boxShadow: "none" };
       default:
         return wash(fill.ghostPress);
     }

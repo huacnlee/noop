@@ -62,6 +62,9 @@ export const leading = { key: 16, badge: 16, sm: 18, md: 20, lg: 24 } as const;
  */
 export const fill = { rest: 0.07, hover: 0.12, press: 0.16, ghostHover: 0.1, ghostPress: 0.15, selected: 0.12, menuOpen: 0.06 } as const;
 
+/** A control's edge: a neutral hairline of the text color, so it reads as part of the surface rather than a grey line. */
+export const edge = { rest: 0.11, hover: 0.18 } as const;
+
 /** Durations shared by hover / state transitions (milliseconds). */
 export const duration = { quick: 120, settle: 180, enter: 420 } as const;
 
