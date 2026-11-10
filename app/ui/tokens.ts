@@ -55,7 +55,7 @@ export const leading = { key: 16, badge: 16, sm: 18, md: 20, lg: 24 } as const;
  * and dark. `rest` is a secondary control's own fill, `hover` and `press` its states; a ghost control starts clear and
  * takes `hover` / `press`, and the selected or checked one keeps `selected`.
  */
-export const fill = { rest: 0.07, hover: 0.1, press: 0.14, ghostHover: 0.06, ghostPress: 0.1, selected: 0.1 } as const;
+export const fill = { rest: 0.07, hover: 0.12, press: 0.16, ghostHover: 0.1, ghostPress: 0.15, selected: 0.12 } as const;
 
 /** Durations shared by hover / state transitions (milliseconds). */
 export const duration = { quick: 120, enter: 420 } as const;
