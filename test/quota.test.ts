@@ -46,6 +46,9 @@ test.each([
   ["try again in 3 days 2 hours 37 minutes", "2026-11-13T11:44:00Z"],
   ["try again in 3d 2h 37m", "2026-11-13T11:44:00Z"],
   ["resets in 1 day", "2026-11-11T09:07:00Z"],
+  ["try again in 2h13m", "2026-11-10T11:20:00Z"],
+  ["try again in 0h30m", "2026-11-10T09:37:00Z"],
+  ["try again in 3 days 2h37m", "2026-11-13T11:44:00Z"],
   ["try again in 2 hrs, 5 mins", "2026-11-10T11:12:00Z"],
   ["Weekly limit reached ∙ resets Nov 12, 3pm (Asia/Shanghai)", "2026-11-12T07:02:00Z"],
   ["try again at Nov 12th, 2026 3:15 PM (UTC)", "2026-11-12T15:17:00Z"],
@@ -56,7 +59,7 @@ test.each([
   expect(quotaRecovery(text, at)).toEqual({ until: new Date(until).toISOString(), source: "parsed" });
 });
 
-test.each(["try again in 30 days", "resets Nov 31, 3pm (UTC)", "resets Nov 9, 3pm (UTC)", "try again at Nov 9th, 2025 3:15 PM (UTC)",
+test.each(["try again in 30 days", "try again in 2hx", "resets Nov 31, 3pm (UTC)", "resets Nov 9, 3pm (UTC)", "try again at Nov 9th, 2025 3:15 PM (UTC)",
   "resets Foo 12, 3pm", "Claude AI usage limit reached|1700000000"])
 ("bounded fallback for distant, past or invalid dates: %s", text => {
   expect(quotaRecovery(text, now)).toEqual({ until: "2026-11-10T10:05:00.000Z", source: "fallback" });

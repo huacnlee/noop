@@ -15,7 +15,7 @@ export function quotaRecovery(output: string, now = Date.now()): Recovery {
   // Claude CLI's machine form: "Claude AI usage limit reached|<unix seconds>".
   const epoch = text.match(/limit reached\|(\d{10})\b/i);
   if (epoch && +epoch[1] * 1000 + GRACE > now) return parsed(+epoch[1] * 1000);
-  const relative = text.match(/(?:try again|resets?)\s+in\s+(?=\d)(?:(\d+)\s*d(?:ays?)?\b[\s,]*)?(?:(\d+)\s*h(?:(?:ou)?rs?)?\b[\s,]*)?(?:(\d+)\s*m(?:in(?:ute)?s?)?\b)?/i);
+  const relative = text.match(/(?:try again|resets?)\s+in\s+(?=\d)(?:(\d+)\s*d(?:ays?)?(?![a-z])[\s,]*)?(?:(\d+)\s*h(?:(?:ou)?rs?)?(?![a-z])[\s,]*)?(?:(\d+)\s*m(?:in(?:ute)?s?)?(?![a-z]))?/i);
   if (relative && (relative[1] || relative[2] || relative[3]))
     return parsed(now + (((+relative[1] || 0) * 24 + (+relative[2] || 0)) * 60 + (+relative[3] || 0)) * 60_000);
   // "resets Nov 12, 3pm" / "try again at Nov 12th, 2026 3:15 PM" before the time-only form.
