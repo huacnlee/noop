@@ -1226,7 +1226,8 @@ function Message(props: {
           </If>
           {tag && !ask ? <Badge label={tag} /> : null}
           <View style={{ flex: 1 }} />
-          <If when={e.text.trim()}>
+          {/* with a pointer the actions sit in the header and show on hover; a phone keeps them under the message */}
+          <If when={!touch && e.text.trim()}>
             <MsgActions id={e.id} text={e.text} show={() => touch || over()} unread={props.unread} onToggleRead={props.onToggleRead} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? firstLine(e.text) : undefined) : undefined} align="flex-end" />
           </If>
         </View>
@@ -1290,6 +1291,9 @@ function Message(props: {
         ) : (
           body
         )}
+        <If when={touch && e.text.trim()}>
+          <MsgActions id={e.id} text={e.text} show={() => touch || over()} unread={props.unread} onToggleRead={props.onToggleRead} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? firstLine(e.text) : undefined) : undefined} />
+        </If>
       </View>
     </View>
   );
