@@ -1178,7 +1178,7 @@ function Message(props: {
       <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 22 }}>
           <If when={!wide()}><View style={{ position: "relative" }}><Avatar testID={`avatar-inline-${e.id}`} from={e.from} small /></View></If>
-          <Text style={{ fontSize: 15, fontWeight: "600", color: colors.text }}>{displayName(e.from)}</Text>
+          <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{displayName(e.from)}</Text>
           <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
           <If when={props.unread?.()}>
             <View testID={`unread-dot-${e.id}`} accessibilityLabel={L("Unread", "未读")} style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: colors.info }} />
