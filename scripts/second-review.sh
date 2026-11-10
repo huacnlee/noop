@@ -90,6 +90,18 @@ tailf() { tail -n 25 "$1" 2>/dev/null | tail -c 2500 | redact; }
 
 state() { git rev-parse HEAD 2>/dev/null; git status --porcelain=v1 -uall 2>/dev/null; git diff HEAD 2>/dev/null | shasum 2>/dev/null; }
 
+# Bun is already required by the account bridge; GNU timeout isn't installed on stock macOS.
+run_with_timeout() {
+  bun -e '
+    const { spawnSync } = require("node:child_process");
+    const result = spawnSync(process.argv[2], process.argv.slice(3), {
+      stdio: "inherit", timeout: Number(process.argv[1]) * 1000, killSignal: "SIGKILL"
+    });
+    if (result.error) console.error("review runner: " + result.error.code);
+    process.exit(result.error?.code === "ETIMEDOUT" ? 124 : (result.status ?? 127));
+  ' "$@"
+}
+
 # Preflight: never review with the model that is running (that is not a cross-model review).
 if [ -n "$runtime" ] && [ "$runtime" = "$rev" ]; then
   reason="same-model"; detail="this script runs inside $runtime and the reviewer would also be $rev (--author $author); a $rev review of its own run is not a second opinion"
@@ -142,10 +154,10 @@ Output format (plain markdown, concise):
 EOF
   before="$(state)"; ran=1
   if [ "$rev" = codex ]; then
-    timeout "$((tmo * 60))" codex exec --sandbox read-only --skip-git-repo-check --ephemeral -C "$(pwd)" \
+    run_with_timeout "$((tmo * 60))" codex exec --sandbox read-only --skip-git-repo-check --ephemeral -C "$(pwd)" \
       -o "$out" - < "$prompt_file" > "$log" 2>"$err" || rc=$?
   else
-    timeout "$((tmo * 60))" claude -p --permission-mode default \
+    run_with_timeout "$((tmo * 60))" claude -p --permission-mode default \
       --allowedTools "Read" "Grep" "Glob" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)" \
       --disallowedTools "Edit" "Write" "NotebookEdit" < "$prompt_file" > "$out" 2>"$err" || rc=$?
   fi

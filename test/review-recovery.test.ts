@@ -17,11 +17,14 @@ test("review quota shares state, skips calls during cooldown, and resumes withou
     writeFileSync(join(repo, "a"), "fixture\n"); run(["git", "add", "a"]);
     expect(run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]).status).toBe(0);
     writeFileSync(join(bin, "claude"), `#!/bin/sh\necho called >> '${dir}/calls'\ncat '${dir}/answer'\n`, { mode: 0o755 });
+    // Stock macOS has no GNU timeout. Never rely on a host-installed copy.
+    writeFileSync(join(bin, "timeout"), "#!/bin/sh\necho timeout unavailable >&2\nexit 127\n", { mode: 0o755 });
     writeFileSync(join(dir, "answer"), "You've hit your 5-hour limit · resets in 2h 13m\n");
     const script = resolve(import.meta.dir, "../scripts/second-review.sh");
     const args = ["sh", script, "T-TEST", repo, "--uncommitted", "--author", "codex"];
     const first = run(args);
     expect(first.status).toBe(2);
+    expect(first.stdout).toContain("reason=quota");
     expect(first.stdout).toContain("account_recovery=");
     const statePath = join(dir, "home/accounts/state.json");
     const stateText = readFileSync(statePath, "utf8"), state = JSON.parse(stateText);
