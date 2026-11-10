@@ -1,8 +1,8 @@
-// Interfaces the owner opens now and then (settings, the report reader, an image at full size, the emoji picker, the
-// keyboard help, a confirmation) live in modules of their own, loaded the first time one shows. On the web each is a
-// chunk the page downloads then, with the side modules of the runtime it needs (NumberInput's, EmojiPicker's), so the
-// first load fetches only the chat. Native bundles inline every module: `import()` resolves at once, which is why a
-// shell that updates its code over the air needs nothing new for this.
+// Interfaces the owner opens now and then (settings, the report reader, a message's images at full size, the keyboard
+// help, a confirmation) live in modules of their own, loaded the first time one shows. On the web each is a chunk the
+// page downloads then, with the side modules of the runtime it needs (NumberInput's, Carousel's), so the first load
+// fetches only the chat. Native bundles inline every module: `import()` resolves at once, which is why a shell that
+// updates its code over the air needs nothing new for this.
 import { computed, effect, keymap, Overlay, signal, Text, untracked, View } from "nsh";
 import type { JSX } from "nsh";
 import { L } from "./i18n";

@@ -2,8 +2,8 @@
 import { keymap, Text, View } from "nsh";
 import { Dialog } from "nsh/base";
 import { L } from "./i18n";
-import { colors } from "./ui";
-import { Kbd, surfaceEdge, ToolButton } from "./kit";
+import { colors, IconButton, Kbd } from "./ui";
+import { surfaceEdge } from "./kit";
 
 // ---------------------------------------------------------------- keyboard help
 
@@ -49,7 +49,7 @@ export function HelpSheet(props: { open: boolean; onClose: () => void }) {
       >
         <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
           <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{L("Keyboard shortcuts", "键盘快捷键")}</Text>
-          <ToolButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={props.onClose} />
+          <IconButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={props.onClose} />
         </View>
         <View style={{ paddingVertical: 8 }}>
           <Each of={SHORTCUTS()}>
@@ -57,7 +57,7 @@ export function HelpSheet(props: { open: boolean; onClose: () => void }) {
               <View style={{ flexDirection: "row", alignItems: "center", minHeight: 38, paddingHorizontal: 20, gap: 12 }}>
                 <Text style={{ flex: 1, fontSize: 15, color: colors.text }}>{s()[1]}</Text>
                 <View style={{ flexDirection: "row", gap: 4 }}>
-                  <Each of={s()[0].split("  ·  ")}>{(k) => <Kbd k={k()} />}</Each>
+                  <Each of={s()[0].split("  ·  ")}>{(k) => <Kbd keys={k()} />}</Each>
                 </View>
               </View>
             )}

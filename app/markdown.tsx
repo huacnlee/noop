@@ -2,8 +2,8 @@
 import { openUrl, Text, token, View, type ViewStyle } from "nsh";
 import { TextView, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
 import { L } from "./i18n";
-import { alpha, colors } from "./ui";
-import { linkColor, MONO, size, STATE_OF } from "./kit";
+import { alpha, colors, corner, size } from "./ui";
+import { linkColor, MONO, STATE_OF } from "./kit";
 
 /** Opens a task's page from a T-0000 in any text (set by the channel). */
 let taskLink: (id: string) => void = () => {};
@@ -17,6 +17,31 @@ const EXTENSIONS: MarkdownExtension[] = [
   { name: "task", pattern: "\\bT-[A-Z]?\\d{4}\\b" },
   { name: "item", pattern: "\\b[DP]-[A-Z]?\\d{4}\\b" },
 ];
+/**
+ * An id inside a file path ("tasks/done/T-0930.md", "T-0930/notes") names the file, not the task: it stays plain
+ * text, so the path reads and copies whole. The patterns cannot see past the match (Rust's `regex` has no
+ * lookaround), so this looks at the text on either side of each chip.
+ */
+function pathInlines(inlines: TextViewInline[]): TextViewInline[] {
+  const out: TextViewInline[] = [];
+  const text = (t: string) => {
+    const prev = out[out.length - 1];
+    if (prev?.type === "text") out[out.length - 1] = { ...prev, text: prev.text + t };
+    else out.push({ type: "text", text: t });
+  };
+  inlines.forEach((i, k) => {
+    if (i.type === "custom" && (i.name === "task" || i.name === "item")) {
+      const prev = out[out.length - 1];
+      const next = inlines[k + 1];
+      const before = prev?.type === "text" ? prev.text : "";
+      const after = next?.type === "text" ? next.text : "";
+      if (/[\w.-]\/$/.test(before) || /^(\.\w|\/[\w.-])/.test(after)) return text(i.text ?? "");
+    }
+    if (i.type === "text") return text(i.text);
+    out.push("content" in i && Array.isArray(i.content) ? ({ ...i, content: pathInlines(i.content) } as TextViewInline) : i);
+  });
+  return out;
+}
 const GH = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)\/?$/;
 
 /** A bare GitHub PR or issue link reads as "nsh#747": still a plain link, not a chip (GFM autolinks bare URLs). */
@@ -60,7 +85,7 @@ function onceInlines(inlines: TextViewInline[], seen = new Set<string>()): TextV
 function ghBlocks(blocks: TextViewBlock[]): TextViewBlock[] {
   return blocks.map((b): TextViewBlock => {
     const x = { ...b } as Record<string, unknown>;
-    if (Array.isArray(x.content)) x.content = ghInlines(onceInlines(x.content as TextViewInline[]));
+    if (Array.isArray(x.content)) x.content = ghInlines(onceInlines(pathInlines(x.content as TextViewInline[])));
     if (Array.isArray(x.children)) x.children = ghBlocks(x.children as TextViewBlock[]);
     if (Array.isArray(x.items)) x.items = (x.items as { children: TextViewBlock[] }[]).map((it) => ({ ...it, children: ghBlocks(it.children) }));
     return x as TextViewBlock;
@@ -85,7 +110,7 @@ const LABEL = /(?:^|[\n。；;，,])[\s*+\-\d.)]*([A-Za-z][\w.-]*)\**\s*[:：](?
 /**
  * A "#746" is a GitHub PR or issue: "nsh #747" / "NSH#747" links to that repository when the channel has linked it
  * before; a bare "#747" to the one repository the message, or what it is about (`context`: a card's options, the
- * thread it belongs to), names. Code spans are left alone.
+ * thread it belongs to), names. Code spans and existing Markdown links are left alone.
  */
 function linkRepoRefs(text: string, context = ""): string {
   const known = reposIn(`${text}\n${context}`, new Map(knownRepos()));
@@ -117,7 +142,7 @@ function linkRepoRefs(text: string, context = ""): string {
   const near = (at: number) => { let s: string | null = null; for (const [i, slug] of marks) { if (i >= at) break; s = slug; } return s; };
   const url = (slug: string, n: string) => `https://github.com/${slug}/issues/${n}`;
   let base = 0;
-  return text.split(/(`[^`\n]*`)/).map((part, i) => { const off = base; base += part.length; return i % 2 ? part : part.replace(
+  return text.split(/(`[^`\n]*`|\[[^\]\n]*\]\([^)\n]*\))/).map((part, i) => { const off = base; base += part.length; return i % 2 ? part : part.replace(
     REF,
     (all, pre: string, name: string | undefined, sp: string, n: string, at: number) => {
       const slug = name && slugOf(name);
@@ -145,11 +170,11 @@ function hubMarkdown(text: string): string {
 export const chipText = { cursor: "pointer", userSelect: "none" } as const;
 /** A message's first line, without markdown marks, for a one-line quote. */
 export const firstLine = (t: string) => (t.split("\n").find((l) => l.trim()) ?? "").replace(/^\s*(#+|>)\s*/, "").replace(/[*_`]/g, "").trim().slice(0, 80);
-const chipFrame: ViewStyle = {
+const chipFrame = (): ViewStyle => ({
   cursor: "pointer", verticalAlign: "middle", flexDirection: "row", alignItems: "center", gap: 5, marginHorizontal: 2, height: 20,
-  borderWidth: 1, borderColor: colors.border, backgroundColor: alpha(colors.text, 0.05),
-};
-const chipHover: ViewStyle = { borderColor: colors.fieldBorder, backgroundColor: alpha(colors.text, 0.09) };
+  borderRadius: corner.badge, borderCurve: "continuous", backgroundColor: alpha(colors.text, 0.07),
+});
+const chipHover = (): ViewStyle => ({ backgroundColor: alpha(colors.text, 0.12) });
 
 function Custom(props: { node: TextViewCustomNode; small: boolean }) {
   const n = props.node;
@@ -158,7 +183,7 @@ function Custom(props: { node: TextViewCustomNode; small: boolean }) {
     const st = () => STATE_OF()[taskState(n.text!) ?? ""];
     return (
       <View role="link" testID={`task-chip-${n.text}`} accessibilityLabel={L(`Task ${n.text}`, `任务 ${n.text}`)} onPress={() => taskLink(n.text!)}
-        hoverStyle={chipHover} style={{ ...chipFrame, paddingHorizontal: 7, borderRadius: 999 }}>
+        hoverStyle={chipHover()} style={{ ...chipFrame(), paddingHorizontal: 6 }}>
         <If when={st()}>
           <View style={{ cursor: "pointer", width: 6, height: 6, borderRadius: 3, backgroundColor: st()?.[1] ?? colors.muted }} />
         </If>
@@ -167,7 +192,7 @@ function Custom(props: { node: TextViewCustomNode; small: boolean }) {
     );
   }
   return (
-    <View style={{ verticalAlign: "middle", height: 20, justifyContent: "center", marginHorizontal: 2, paddingHorizontal: 6, borderRadius: 5, backgroundColor: alpha(colors.text, 0.06) }}>
+    <View style={{ verticalAlign: "middle", height: 20, justifyContent: "center", marginHorizontal: 2, paddingHorizontal: 6, borderRadius: corner.badge, backgroundColor: alpha(colors.text, 0.07) }}>
       <Text style={{ fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.muted }}>{n.text}</Text>
     </View>
   );
@@ -177,8 +202,8 @@ function Custom(props: { node: TextViewCustomNode; small: boolean }) {
 export function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?: string; scale?: number }) {
   const small = !!(props.muted || props.quiet);
   const k = () => props.scale ?? 1;
-  const fontSize = () => (props.quiet ? 14 : props.muted ? size.small : size.text) * k();
-  const lineHeight = () => (small ? 21 : size.line) * k();
+  const fontSize = () => (props.quiet ? 13 : props.muted ? size.small : size.text) * k();
+  const lineHeight = () => (props.quiet ? 19 : small ? 21 : size.line) * k();
   const doc = () => {
     const d = TextView.parse(hubMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, EXTENSIONS);
     return { ...d, blocks: ghBlocks(d.blocks) };

@@ -1,13 +1,17 @@
 // The settings pages, wide and on phones, and the team's rules and memory: a lazy chunk, loaded the first time one
-// shows (lazy.tsx). NumberInput comes with it, and on the web its part of the runtime.
+// shows (lazy.tsx). NumberField's NumberInput comes with it, and on the web its part of the runtime.
 import { cleanup, openUrl, platform, safeArea, Scroll, signal, Text, View, type ViewStyle } from "nsh";
 import type { JSX } from "nsh";
-import { AlertDialog, Dialog, Input, Menu, MenuItem, NumberInput, Radio, RadioGroup } from "nsh/base";
+import { AlertDialog, Dialog, Input, Menu, MenuItem } from "nsh/base";
 import { runningPackage } from "nsh/updater";
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { L, lang, LANGS } from "./i18n";
-import { alpha, colors, focusRing, hovered, Icon, isDark, radius, Spinner, tints, Toggle } from "./ui";
+import {
+  alpha, Badge, Button, cardEdge, colors, corner, focusRing, hovered, Icon, IconButton, Indicator, isDark, MenuPanel, menuBox,
+  menuRowHover, NumberField, PageHeader, pageContent, radius, Separator, SettingsChoices, SettingsGroup, SettingsItem, size,
+  Spinner, Switch, tints, touch,
+} from "./ui";
 import {
   autonomyLabel, BUILTIN_COMMANDS, cliKey, cliLabel, type Command, type DataFile, everyLabel, groupRules, intervalsWith,
   MEDIA_DAYS, mediaDaysOf, NOTIFY_KINDS, notifyPatch, type NotifyPrefs, notifyPrefsOf, patches, QUIET_PRESETS, quietKey,
@@ -15,7 +19,7 @@ import {
 } from "./hub";
 import { shellLine, type ShellInfo } from "./update";
 import { CLIENT_VERSION } from "./version";
-import { Avatar, Btn, displayName, Dot, Field, MONO, pickLang, size, surfaceEdge, ToolButton, touch } from "./kit";
+import { Avatar, displayName, Field, MONO, pickLang, surfaceEdge } from "./kit";
 import { Rich } from "./markdown";
 import type { Hub } from "./connection";
 import { type Push, systemNotifications } from "./push";
@@ -71,17 +75,16 @@ function Chip(props: { label: string; on: boolean; onPress: () => void; testID?:
 
 /** A shared stepper for the per-machine parallel limit. */
 function ParallelInput(props: { value: number; onChange: (value: number) => void }) {
-  return <NumberInput
-    testID="parallel" accessibilityLabel={L("Tasks each machine runs at once", "每台机器同时运行的任务数")} value={props.value} min={1} max={32}
-    onChange={({ value }) => { if (value != null && value >= 1 && value <= 32 && value !== props.value) props.onChange(value); }}
-    style={{ flexDirection: "row", alignItems: "center", height: touch ? 44 : 36, borderRadius: radius.control, borderCurve: "continuous", backgroundColor: colors.raised }}
-    inputStyle={{ width: 40, textAlign: "center", fontSize: 16, fontWeight: "600", color: colors.text, fontVariant: ["tabular-nums"] }}
-    decrementButtonClass="active:opacity-50 disabled:opacity-30" incrementButtonClass="active:opacity-50 disabled:opacity-30"
-    decrementButtonStyle={{ width: touch ? 44 : 36, height: touch ? 44 : 36, alignItems: "center", justifyContent: "center" }}
-    incrementButtonStyle={{ width: touch ? 44 : 36, height: touch ? 44 : 36, alignItems: "center", justifyContent: "center" }}
-    decrementButton={<View testID="parallel-dec"><Icon name="minus" size={16} tint={colors.text} /></View>}
-    incrementButton={<View testID="parallel-inc"><Icon name="plus" size={16} tint={colors.text} /></View>}
-  />;
+  return (
+    <NumberField
+      testID="parallel"
+      accessibilityLabel={L("Tasks each machine runs at once", "每台机器同时运行的任务数")}
+      value={props.value}
+      min={1}
+      max={32}
+      onChange={(value) => { if (value >= 1 && value <= 32 && value !== props.value) props.onChange(value); }}
+    />
+  );
 }
 
 /** A settings section: the gallery's Card (a title above one flat surface). */
@@ -106,14 +109,14 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
       align="end"
       offset={6}
       margin={8}
-      popupStyle={{ minWidth: 260, maxWidth: 340, padding: 4, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
+      popupStyle={menuBox()}
       trigger={
         <View
           role="button"
           testID={props.testID}
           accessibilityLabel={`${props.label}${L(": ", "：")}${props.value}`}
           hoverStyle={hovered()}
-          style={{ flexDirection: "row", alignItems: "center", gap: 6, height: 34, paddingLeft: 11, paddingRight: 9, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
+          style={{ flexDirection: "row", alignItems: "center", gap: 6, height: 34, paddingLeft: 11, paddingRight: 9, borderRadius: radius.control, borderCurve: "continuous", borderWidth: 1, borderColor: surfaceEdge(), backgroundColor: colors.surface }}
         >
           <Text style={{ fontSize: 13, color: colors.faint }}>{props.label}</Text>
           <Text style={{ fontSize: 14, fontWeight: "500", color: colors.text }}>{props.value}</Text>
@@ -121,6 +124,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
         </View>
       }
     >
+      <MenuPanel style={{ minWidth: 260, maxWidth: 340 }}>
       <Each of={props.options}>
         {(o) => (
           <MenuItem
@@ -128,7 +132,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
             role="menuitemradio"
             checked={o().id === props.selected}
             onSelect={() => o().id !== props.selected && props.onPick(o().id)}
-            hoverStyle={hovered()}
+            hoverStyle={menuRowHover()}
             style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 6 }}
           >
             <View style={{ width: 14, paddingTop: 3 }}>
@@ -145,21 +149,12 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
           </MenuItem>
         )}
       </Each>
+      </MenuPanel>
     </Menu>
   );
 }
 
-function Group(props: { title: string; hint?: string; children: JSX.Element }) {
-  return (
-    <View style={{ gap: 8 }}>
-      <View style={{ gap: 3, paddingHorizontal: 2 }}>
-        <Text style={{ fontSize: 15, fontWeight: "600", color: colors.text }}>{props.title}</Text>
-        {props.hint ? <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted }}>{props.hint}</Text> : null}
-      </View>
-      <View style={{ borderRadius: radius.card, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), overflow: "hidden" }}>{props.children}</View>
-    </View>
-  );
-}
+const Group = SettingsGroup;
 
 function Steps(props: { steps: string[] }) {
   return (
@@ -181,12 +176,12 @@ function Steps(props: { steps: string[] }) {
 function NotifySettings(props: { push: Push; view: SettingsView | null; save: (patch: Record<string, unknown>) => void; wide: boolean }) {
   const push = props.push;
   const { prefs, setPrefs, state } = notifyModel(push, () => props.view, props.save);
-  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: surfaceEdge() });
+  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: cardEdge() });
   return (
     <Group title={L("Notifications", "通知")} hint={systemNotifications() ? L("While Noop is running, decisions that need you appear as system notifications. Click one to jump to it.", "Noop 运行时，需要你拍板的事会发系统通知，点开直接到这一条。") : L("Decisions that need you are pushed to your phone. You can pick an option right from the notification.", "需要你拍板的事推送到手机；通知上可以直接选择选项。")}>
       <View style={{ gap: 12, paddingHorizontal: 16, paddingVertical: 14 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <Dot tone={push.info()?.subscribed ? "on" : push.info()?.permission === "denied" ? "bad" : "off"} />
+          <Indicator status={push.info()?.subscribed ? "online" : push.info()?.permission === "denied" ? "error" : "idle"} />
           <View style={{ flex: 1, gap: 2 }}>
             <Text style={{ fontSize: 15.5, fontWeight: "600", color: colors.text }}>{push.info()?.device ?? L("This device", "本设备")}</Text>
             <Text testID="push-state" style={{ fontSize: 13.5, color: colors.muted }}>{state()}</Text>
@@ -204,10 +199,10 @@ function NotifySettings(props: { push: Push; view: SettingsView | null; save: (p
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
           <If
             when={push.info()?.subscribed}
-            else={<Btn testID="push-enable" label={L("Turn on notifications", "开启通知")} icon="bell" kind="primary" busy={push.busy()} disabled={!push.canAsk()} onPress={push.enable} />}
+            else={<Button testID="push-enable" label={L("Turn on notifications", "开启通知")} icon="bell" variant="primary" loading={push.busy()} disabled={!push.canAsk()} onPress={push.enable} />}
           >
-            <Btn testID="push-test" label={L("Send test notification", "发送测试通知")} icon="bell" busy={push.busy()} onPress={push.test} />
-            <Btn testID="push-disable" label={L("Turn off on this device", "关闭本设备通知")} kind="ghost" onPress={push.disable} />
+            <Button testID="push-test" label={L("Send test notification", "发送测试通知")} icon="bell" loading={push.busy()} onPress={push.test} />
+            <Button testID="push-disable" label={L("Turn off on this device", "关闭本设备通知")} variant="ghost" onPress={push.disable} />
           </If>
         </View>
         <If when={push.note()}>
@@ -221,10 +216,10 @@ function NotifySettings(props: { push: Push; view: SettingsView | null; save: (p
             {(k) => (
               <View style={{ flexDirection: "row", alignItems: "center", gap: 12, minHeight: 36 }}>
                 <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{k()[1]}</Text>
-                <Toggle
+                <Switch
                   testID={`notify-${k()[0]}`}
                   label={k()[1]}
-                  value={prefs().kinds[k()[0]]}
+                  checked={prefs().kinds[k()[0]]}
                   onChange={(on) => setPrefs({ kinds: { ...prefs().kinds, [k()[0]]: on } })}
                 />
               </View>
@@ -259,7 +254,7 @@ export function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; 
   const { view, error, save } = props.settings;
   props.settings.load();
   const eff = () => view()?.effective;
-  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: surfaceEdge() });
+  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: cardEdge() });
   const chips: ViewStyle = { flexDirection: "row", flexWrap: "wrap", gap: 6 };
 
   const tab = props.settings.tab;
@@ -300,7 +295,7 @@ export function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; 
               <Group title={L("Members", "成员")} hint={L("Each role on the team. The model decides who does the work; autonomy decides how big a decision needs your input first.", "团队里的每个角色。模型决定由谁来干活，自主程度决定多大的事要先问你。")}>
                 <Each of={e().agents} key={(a) => a.id}>
                   {(a, i) => (
-                    <View testID={`member-${a().id}`} style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch", gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: i() === 0 ? 0 : 0.5, borderTopColor: surfaceEdge() }}>
+                    <SettingsItem testID={`member-${a().id}`} first={i() === 0} style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch" }}>
                       <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12 }}>
                         <Avatar from={a().id} />
                         <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
@@ -333,7 +328,7 @@ export function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; 
                           onPick={(l) => save(patches.autonomy(a().id, l))}
                         />
                       </View>
-                    </View>
+                    </SettingsItem>
                   )}
                 </Each>
               </Group>
@@ -343,7 +338,7 @@ export function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; 
               <Group title={L("Routines", "例行任务")} hint={L("Rules that create tasks on a schedule: on/off and when they run", "定时生成任务的规则：开关和运行时间")}>
                 <Each of={e().routines} key={(r) => r.name}>
                   {(r, i) => (
-                    <View style={{ ...row(), flexDirection: "row", alignItems: "center", gap: 12, borderTopWidth: i() === 0 ? 0 : 0.5 }}>
+                    <SettingsItem first={i() === 0} style={{ flexDirection: "row", alignItems: "center" }}>
                       <View style={{ flex: 1, gap: 3 }}>
                         <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
                           <Text style={{ fontSize: 15.5, fontWeight: "500", color: r().enabled ? colors.text : colors.faint }}>{r().name}</Text>
@@ -363,13 +358,13 @@ export function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; 
                         selected={r().every}
                         onPick={(iv) => save(patches.routine(r().name, { every: iv }))}
                       />
-                      <Toggle
+                      <Switch
                         testID={`routine-${r().name}`}
                         label={r().name}
-                        value={r().enabled}
+                        checked={r().enabled}
                         onChange={(on) => save(patches.routine(r().name, { enabled: on }))}
                       />
-                    </View>
+                    </SettingsItem>
                   )}
                 </Each>
               </Group>
@@ -414,11 +409,11 @@ export function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; 
         <Group title={L("Account", "账号与连接")} hint={L("You stay signed in on this device and reconnect automatically next time.", "登录状态保存在这台设备上，下次打开自动连接。")}>
           <View style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
             <View style={{ flex: props.wide ? 1 : undefined, flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Dot tone={props.hub.conn() === "live" ? "on" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "bad" : "wait"} />
+              <Indicator status={props.hub.conn() === "live" ? "online" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "error" : "waiting"} />
               <Text style={{ flex: 1, fontSize: 15, color: colors.text, numberOfLines: 1 }}>{props.hub.cfg.url}</Text>
             </View>
             <View style={{ flexDirection: "row", gap: 8 }}>
-              <Btn label={L("Sign out", "退出登录")} kind="danger" onPress={props.onDisconnect} testID="logout" />
+              <Button label={L("Sign out", "退出登录")} variant="danger" onPress={props.onDisconnect} testID="logout" />
             </View>
           </View>
         </Group>
@@ -461,17 +456,12 @@ function Section(props: { title?: string; hint?: string; testID?: string; childr
       <If when={props.title}>
         <Text style={{ paddingHorizontal: 32, fontSize: 13, color: colors.muted }}>{props.title}</Text>
       </If>
-      <View style={{ marginHorizontal: 16, borderRadius: radius.card, borderCurve: "continuous", borderWidth: 0.5, borderColor: surfaceEdge(), overflow: "hidden", backgroundColor: colors.surface }}>{props.children}</View>
+      <View style={{ marginHorizontal: 16, borderRadius: radius.card, borderCurve: "continuous", borderWidth: 1, borderColor: surfaceEdge(), overflow: "hidden", backgroundColor: colors.surface }}>{props.children}</View>
       <If when={props.hint}>
         <Text style={{ paddingHorizontal: 32, fontSize: 13, lineHeight: 18, color: colors.faint }}>{props.hint}</Text>
       </If>
     </View>
   );
-}
-
-/** The hairline above every row of a section but its first, inset to the text. */
-function Hairline(props: { inset?: number }) {
-  return <View style={{ position: "absolute", top: 0, left: props.inset ?? 16, right: 0, height: 0.5, backgroundColor: surfaceEdge() }} />;
 }
 
 /** A row of a section, at least 48 pt tall: a label (and a line under it), then a value, a control or a chevron. */
@@ -493,7 +483,7 @@ function CommandRows(props: { settings: Settings }) {
         label={L("/Update all machines", "/更新所有机器")}
         detail={L("Make every machine pull the latest code and restart", "让所有机器拉取最新代码并重启")}
         testID="command-row-builtin"
-        trailing={<Text style={{ fontSize: 12, color: colors.faint, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, backgroundColor: colors.raised }}>{L("Built-in", "内置")}</Text>}
+        trailing={<Badge label={L("Built-in", "内置")} />}
       />
       <Each of={saved()} key={(c) => c.name}>
         {(c) => (
@@ -505,7 +495,7 @@ function CommandRows(props: { settings: Settings }) {
             hoverStyle={hovered()}
             class="active:bg-raised"
           >
-            <Hairline />
+            <Separator top />
             <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, paddingRight: 14, paddingVertical: 11 }}>
               <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
                 <Text style={{ fontSize: 15.5, fontWeight: "500", color: colors.text, numberOfLines: 1 }}>/{c().name}</Text>
@@ -561,7 +551,7 @@ function CommandEditor(props: { settings: Settings }) {
       <View style={{ width: "100%", maxWidth: 560, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
         <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
           <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{isNew() ? L("New command", "新建指令") : L("Edit command", "编辑指令")}</Text>
-          <ToolButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
+          <IconButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
         </View>
         <View style={{ gap: 16, padding: 20 }}>
           <Field label={L("Name", "名称")} value={name()} onChange={(v) => { name.set(v); note.set(""); }} placeholder={L("e.g. daily-report", "例如：日报")} testID="command-name" autoFocus={isNew()} hint={clean() ? L(`Type /${clean()} in the message box to use it`, `在输入框里输入 /${clean()} 选用`) : L("Type / and the name in the message box to use it", "在输入框里输入 / 加名称选用")} />
@@ -580,7 +570,7 @@ function CommandEditor(props: { settings: Settings }) {
                 height: 140,
                 paddingHorizontal: 14,
                 paddingVertical: 10,
-                borderRadius: radius.control,
+                borderRadius: corner.field,
                 borderWidth: 1,
                 borderColor: focused() ? colors.accent : colors.fieldBorder,
                 backgroundColor: colors.field,
@@ -597,11 +587,11 @@ function CommandEditor(props: { settings: Settings }) {
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingBottom: 20 }}>
           <If when={!isNew()}>
-            <Btn label={L("Delete", "删除")} kind="danger" icon="trash" onPress={() => void remove()} testID="command-delete" />
+            <Button label={L("Delete", "删除")} variant="danger" icon="trash" onPress={() => void remove()} testID="command-delete" />
           </If>
           <View style={{ flex: 1 }} />
-          <Btn label={L("Cancel", "取消")} kind="ghost" onPress={close} testID="command-cancel" />
-          <Btn label={isNew() ? L("Add", "添加") : L("Save", "保存")} kind="primary" disabled={!ok()} onPress={() => void submit()} testID="command-save" />
+          <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="command-cancel" />
+          <Button label={isNew() ? L("Add", "添加") : L("Save", "保存")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="command-save" />
         </View>
       </View>
     </Dialog>
@@ -696,7 +686,7 @@ function SetRow(props: {
       style={{ minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, paddingRight: 14, paddingVertical: 10 }}
     >
       <If when={!props.first}>
-        <Hairline inset={props.inset} />
+        <Separator top inset={props.inset} />
       </If>
       {props.leading}
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
@@ -744,39 +734,7 @@ function MediaDaysChoices(props: { settings: Settings }) {
 type Choice = { id: string; label: string; detail?: string; testID: string };
 
 /** Pick one of a few: a radio set of rows, the chosen one checked. */
-function Choices(props: { label: string; choices: Choice[]; selected: string | null; onPick: (id: string) => void }) {
-  return (
-    <RadioGroup>
-      <Each of={props.choices} key={(c) => c.id}>
-        {(c, i) => (
-          <Radio
-            testID={c().testID}
-            checked={c().id === props.selected}
-            onChange={() => props.onPick(c().id)}
-            accessibilityLabel={c().label}
-            class="active:bg-raised"
-            style={{ minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, paddingRight: 16, paddingVertical: 10 }}
-          >
-            <If when={i() > 0}>
-              <Hairline />
-            </If>
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={{ fontSize: 16, color: colors.text }}>{c().label}</Text>
-              <If when={c().detail}>
-                <Text style={{ fontSize: 13, color: colors.muted }}>{c().detail}</Text>
-              </If>
-            </View>
-            <View style={{ width: 20, alignItems: "center" }}>
-              <If when={c().id === props.selected}>
-                <View testID={`choice-check-${c().testID}`}><Icon name="check" size={17} tint={colors.info} /></View>
-              </If>
-            </View>
-          </Radio>
-        )}
-      </Each>
-    </RadioGroup>
-  );
-}
+const Choices = SettingsChoices;
 
 /** A page of sections on the grouped background. */
 function Grouped(props: { testID?: string; settings?: Settings; children: JSX.Element }) {
@@ -888,7 +846,7 @@ export function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings;
       <Section title={L("Account", "账号与连接")} hint={L("You stay signed in on this device and reconnect automatically next time.", "登录状态保存在这台设备上，下次打开自动连接。")}>
         <SetRow
           first
-          leading={<Dot tone={props.hub.conn() === "live" ? "on" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "bad" : "wait"} />}
+          leading={<Indicator status={props.hub.conn() === "live" ? "online" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "error" : "waiting"} />}
           label={props.hub.cfg.url.replace(/^https?:\/\//, "")}
         />
         <SetRow label={L("Sign out", "退出登录")} tone="danger" onPress={() => void logout()} testID="logout" inset={0} />
@@ -935,10 +893,10 @@ export function PhoneNotify(props: { push: Push; settings: Settings }) {
                 first={i() === 0}
                 label={k()[1]}
                 trailing={
-                  <Toggle
+                  <Switch
                     testID={`notify-${k()[0]}`}
                     label={k()[1]}
-                    value={notify.prefs().kinds[k()[0]]}
+                    checked={notify.prefs().kinds[k()[0]]}
                     onChange={(on) => notify.setPrefs({ kinds: { ...notify.prefs().kinds, [k()[0]]: on } })}
                   />
                 }
@@ -1004,7 +962,7 @@ export function PhoneRoutine(props: { name: string; settings: Settings }) {
               <SetRow
                 first
                 label={L("Enabled", "启用")}
-                trailing={<Toggle testID={`routine-${props.name}`} label={L("Enabled", "启用")} value={r().enabled} onChange={(on) => save(patches.routine(props.name, { enabled: on }))} />}
+                trailing={<Switch testID={`routine-${props.name}`} label={L("Enabled", "启用")} checked={r().enabled} onChange={(on) => save(patches.routine(props.name, { enabled: on }))} />}
               />
             </Section>
             <Section title={L("Interval", "运行间隔")}>
@@ -1070,12 +1028,15 @@ export function RuleDoc(props: { hub: Hub; path: string; wide: boolean }) {
     else error.set(r.status === 404 ? L("This file no longer exists.", "这个文件已经不在了。") : r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器"));
   });
   return (
-    <Scroll testID="rule-doc" style={{ flex: 1, backgroundColor: colors.background }}>
+    <Scroll testID="rule-doc" style={{ flex: 1, backgroundColor: colors.background }} contentStyle={pageContent}>
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 32 : 16, paddingTop: 20, paddingBottom: Math.max(32, safeArea().bottom + 16) }}>
-        <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{props.path}</Text>
+        <PageHeader style={{ marginBottom: 8 }}>
+          <Text style={{ fontSize: 20, fontWeight: "600", color: colors.text }}>{props.path.split("/").pop()!.replace(/\.md$/, "")}</Text>
+          <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{props.path}</Text>
+        </PageHeader>
         <If when={text() !== null} else={<Text style={{ fontSize: 14, color: error() ? colors.danger : colors.faint }}>{error() || L("Loading…", "读取中…")}</Text>}>
           <If when={(text() ?? "").trim()} else={<Text style={{ fontSize: 14, color: colors.faint }}>{L("(Empty file)", "（空文件）")}</Text>}>
-            <View selectable><Rich text={text() ?? ""} /></View>
+            <Rich text={text() ?? ""} />
           </If>
         </If>
       </View>

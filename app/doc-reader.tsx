@@ -1,28 +1,32 @@
 // The report reader: a lazy chunk, loaded with the first report the chat shows (lazy.tsx).
 import { computed, Scroll, signal, Text, untracked, View } from "nsh";
 import { L } from "./i18n";
-import { alpha, colors, hovered, Icon, type IconName } from "./ui";
-import { Btn } from "./kit";
+import { isAvailable as hasWindow, titleBar } from "nsh/desktop";
+import { Button, colors, Icon, IconButton, type IconName, size } from "./ui";
+import { surfaceEdge } from "./kit";
 import { Rich } from "./markdown";
 import { docBody, type DocRef, retryDoc } from "./docs";
 
 const DOC_SCALES = [0.875, 1, 1.125, 1.25, 1.4];
-/** The reader beside the chat (a full sheet on a phone): the open report rendered with TextView, with text zoom and a wider pane. */
+/**
+ * The reader beside the chat (a full sheet on a phone): the open report rendered with TextView, with text zoom and a
+ * wider pane. Beside the chat (`wide`) it runs to the window's top edge: its header is part of the window's
+ * title bar (drags the window, and leaves room for the window buttons Linux and Windows draw at the right).
+ */
 export function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpand: () => void; onClose: () => void }) {
   const step = signal(1);
   // looked up once per report, so a re-render never fetches again by itself
   const cell = computed(() => { const src = props.doc.src; return untracked(() => docBody(src)); });
   const body = () => cell()();
   const btn = (p: { id: string; icon: IconName; label: string; on?: boolean; disabled?: boolean; onPress: () => void }) => (
-    <View testID={p.id} role="button" accessibilityLabel={p.label} accessibilityState={{ disabled: !!p.disabled }}
-      onPress={p.disabled ? undefined : p.onPress} hoverStyle={p.disabled ? undefined : hovered()}
-      style={{ width: props.wide ? 28 : 36, height: props.wide ? 28 : 36, borderRadius: 6, alignItems: "center", justifyContent: "center", cursor: p.disabled ? "default" : "pointer", opacity: p.disabled ? 0.35 : 1, backgroundColor: p.on ? alpha(colors.text, 0.07) : undefined }}>
-      <Icon name={p.icon} size={15} tint={colors.muted} />
-    </View>
+    <IconButton testID={p.id} icon={p.icon} label={p.label} size="sm" selected={p.on} disabled={p.disabled} onPress={p.onPress} />
   );
   return (
     <View testID="doc-reader" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 2, height: props.wide ? 44 : 52, paddingLeft: 14, paddingRight: 8, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }}>
+      <View
+        desktop={props.wide ? { windowDrag: true } : undefined}
+        style={{ flexDirection: "row", alignItems: "center", gap: 2, height: size.bar, paddingLeft: 14, paddingRight: (props.wide && hasWindow ? titleBar().right : 0) + 8, borderBottomWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}
+      >
         <Icon name="document" size={16} tint={colors.muted} />
         <Text testID="doc-title" style={{ flex: 1, minWidth: 0, marginLeft: 8, marginRight: 6, fontSize: 13.5, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{props.doc.name}</Text>
         {btn({ id: "doc-zoom-out", icon: "zoom-out", label: L("Smaller text", "缩小文字"), disabled: step() === 0, onPress: () => step.set(Math.max(0, step() - 1)) })}
@@ -39,7 +43,7 @@ export function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; 
             <View style={{ gap: 10, alignItems: "flex-start" }}>
               <Text testID="doc-status" style={{ fontSize: 14, color: body().error ? colors.danger : colors.faint }}>{body().error || L("Loading…", "读取中…")}</Text>
               <If when={body().error}>
-                <Btn label={L("Retry", "重试")} onPress={() => retryDoc(props.doc.src, cell())} testID="doc-retry" />
+                <Button label={L("Retry", "重试")} onPress={() => retryDoc(props.doc.src, cell())} testID="doc-retry" />
               </If>
             </View>
           }>
