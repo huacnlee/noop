@@ -8,7 +8,7 @@
  */
 import type { JSX, ViewStyle } from "nsh";
 import { createMotion, signal, Text, View } from "nsh";
-import { Input as BaseInput, Switch as BaseSwitch } from "nsh/base";
+import { Input as BaseInput, NumberInput as BaseNumberInput, Switch as BaseSwitch } from "nsh/base";
 import { Icon, type IconName } from "./icons";
 import { alpha, colors, focusRing, motion, tints } from "./theme";
 import { corner, duration, fill, font, leading, press as give, size, space, touch } from "./tokens";
@@ -73,11 +73,12 @@ export function Button(props: {
     if (props.checked) return { ...wash(fill.selected), borderColor: "transparent" };
     switch (variant()) {
       case "primary":
-        return { backgroundColor: colors.accentFill, borderColor: "transparent" };
+        return { backgroundColor: colors.accentFill, borderColor: alpha(colors.text, 0.12), boxShadow: "0 1px 2px rgba(0,0,0,0.12)" };
+      // a raised control: a hairline edge and a soft drop, on the field's fill
       case "secondary":
-        return { ...wash(fill.rest), borderColor: "transparent" };
+        return { backgroundColor: colors.field, borderColor: colors.fieldBorder, boxShadow: "0 1px 2px rgba(0,0,0,0.06)" };
       case "outline":
-        return { backgroundColor: "transparent", borderColor: colors.border };
+        return { backgroundColor: "transparent", borderColor: colors.fieldBorder, boxShadow: "0 1px 2px rgba(0,0,0,0.04)" };
       case "ghost":
         return { backgroundColor: "transparent", borderColor: "transparent" };
       case "danger":
@@ -92,7 +93,8 @@ export function Button(props: {
       case "danger":
         return { backgroundColor: alpha(colors.danger, 0.16) };
       case "secondary":
-        return wash(fill.hover);
+      case "outline":
+        return { ...wash(fill.ghostHover / 2), borderColor: alpha(colors.text, 0.28) };
       default:
         return wash(fill.ghostHover);
     }
@@ -105,7 +107,8 @@ export function Button(props: {
       case "danger":
         return { backgroundColor: alpha(colors.danger, 0.22) };
       case "secondary":
-        return wash(fill.press);
+      case "outline":
+        return { ...wash(fill.ghostPress / 2), borderColor: alpha(colors.text, 0.28), boxShadow: "none" };
       default:
         return wash(fill.ghostPress);
     }
@@ -138,7 +141,7 @@ export function Button(props: {
         borderWidth: 1,
         opacity: props.disabled && !props.checked ? DISABLED : 1,
         cursor: "default",
-        transitionProperty: "background-color, border-color, opacity, transform",
+        transitionProperty: "background-color, border-color, box-shadow, opacity, transform",
         transitionDuration: duration.settle,
         transitionTimingFunction: "ease-out",
         ...look(),
@@ -423,6 +426,57 @@ export function Input(props: {
         transitionDuration: duration.quick,
         ...props.style,
       }}
+    />
+  );
+}
+
+/**
+ * A number typed or stepped (`nsh/base`'s `NumberInput`) in the field's frame: the value in the middle, a minus and a
+ * plus at the ends, each set off by a hairline and taking the ghost fills, as gpui-component's `NumberInput`.
+ */
+export function NumberField(props: {
+  value: number;
+  onChange: (value: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  disabled?: boolean;
+  testID?: string;
+  accessibilityLabel?: string;
+}) {
+  const h = size.field;
+  const stepStyle = (left: boolean): ViewStyle => ({
+    width: touch ? 44 : 30, alignItems: "center", justifyContent: "center",
+    [left ? "borderRightWidth" : "borderLeftWidth"]: 1, borderColor: colors.line,
+    transitionProperty: "background-color", transitionDuration: duration.quick,
+  });
+  const steps = "hover:bg-[color-mix(in_srgb,var(--foreground)_8%,transparent)] active:bg-[color-mix(in_srgb,var(--foreground)_14%,transparent)] disabled:opacity-35";
+  return (
+    <BaseNumberInput
+      testID={props.testID}
+      accessibilityLabel={props.accessibilityLabel}
+      value={props.value}
+      min={props.min}
+      max={props.max}
+      step={props.step}
+      disabled={props.disabled}
+      onChange={({ value }) => value != null && props.onChange(value)}
+      hoverStyle={{ borderColor: alpha(colors.text, 0.28) }}
+      focusStyle={focusRing()}
+      style={{
+        flexDirection: "row", alignItems: "stretch", height: h, overflow: "hidden",
+        borderRadius: corner.field, borderCurve: "continuous", borderWidth: 1, borderColor: colors.fieldBorder,
+        backgroundColor: colors.field, boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+        opacity: props.disabled ? DISABLED : 1,
+        transitionProperty: "border-color", transitionDuration: duration.quick,
+      }}
+      inputStyle={{ width: 44, textAlign: "center", fontSize: font.md, color: colors.text, fontVariant: ["tabular-nums"] }}
+      decrementButtonClass={steps}
+      incrementButtonClass={steps}
+      decrementButtonStyle={stepStyle(true)}
+      incrementButtonStyle={stepStyle(false)}
+      decrementButton={<View testID={props.testID && `${props.testID}-dec`}><Icon name="minus" size={14} tint={colors.muted} /></View>}
+      incrementButton={<View testID={props.testID && `${props.testID}-inc`}><Icon name="plus" size={14} tint={colors.muted} /></View>}
     />
   );
 }

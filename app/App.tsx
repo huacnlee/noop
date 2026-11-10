@@ -92,6 +92,8 @@ import {
   SidebarRow,
   SettingsGroup,
   SettingsItem,
+  SettingsChoices,
+  NumberField,
 } from "./ui";
 import {
   answeredIds,
@@ -2329,17 +2331,16 @@ function Chip(props: { label: string; on: boolean; onPress: () => void; testID?:
 
 /** A shared stepper for the per-machine parallel limit. */
 function ParallelInput(props: { value: number; onChange: (value: number) => void }) {
-  return <NumberInput
-    testID="parallel" accessibilityLabel={L("Tasks each machine runs at once", "每台机器同时运行的任务数")} value={props.value} min={1} max={32}
-    onChange={({ value }) => { if (value != null && value >= 1 && value <= 32 && value !== props.value) props.onChange(value); }}
-    style={{ flexDirection: "row", alignItems: "center", height: touch ? 44 : 36, borderRadius: radius.control, borderCurve: "continuous", backgroundColor: colors.raised }}
-    inputStyle={{ width: 40, textAlign: "center", fontSize: 16, fontWeight: "600", color: colors.text, fontVariant: ["tabular-nums"] }}
-    decrementButtonClass="active:opacity-50 disabled:opacity-30" incrementButtonClass="active:opacity-50 disabled:opacity-30"
-    decrementButtonStyle={{ width: touch ? 44 : 36, height: touch ? 44 : 36, alignItems: "center", justifyContent: "center" }}
-    incrementButtonStyle={{ width: touch ? 44 : 36, height: touch ? 44 : 36, alignItems: "center", justifyContent: "center" }}
-    decrementButton={<View testID="parallel-dec"><Icon name="minus" size={16} tint={colors.text} /></View>}
-    incrementButton={<View testID="parallel-inc"><Icon name="plus" size={16} tint={colors.text} /></View>}
-  />;
+  return (
+    <NumberField
+      testID="parallel"
+      accessibilityLabel={L("Tasks each machine runs at once", "每台机器同时运行的任务数")}
+      value={props.value}
+      min={1}
+      max={32}
+      onChange={(value) => { if (value >= 1 && value <= 32 && value !== props.value) props.onChange(value); }}
+    />
+  );
 }
 
 /** A settings section: the gallery's Card (a title above one flat surface). */
@@ -3207,39 +3208,7 @@ function MediaDaysChoices(props: { settings: Settings }) {
 type Choice = { id: string; label: string; detail?: string; testID: string };
 
 /** Pick one of a few: a radio set of rows, the chosen one checked. */
-function Choices(props: { label: string; choices: Choice[]; selected: string | null; onPick: (id: string) => void }) {
-  return (
-    <RadioGroup>
-      <Each of={props.choices} key={(c) => c.id}>
-        {(c, i) => (
-          <Radio
-            testID={c().testID}
-            checked={c().id === props.selected}
-            onChange={() => props.onPick(c().id)}
-            accessibilityLabel={c().label}
-            class="active:bg-raised"
-            style={{ minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 16, paddingRight: 16, paddingVertical: 10 }}
-          >
-            <If when={i() > 0}>
-              <Separator top />
-            </If>
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={{ fontSize: 16, color: colors.text }}>{c().label}</Text>
-              <If when={c().detail}>
-                <Text style={{ fontSize: 13, color: colors.muted }}>{c().detail}</Text>
-              </If>
-            </View>
-            <View style={{ width: 20, alignItems: "center" }}>
-              <If when={c().id === props.selected}>
-                <View testID={`choice-check-${c().testID}`}><Icon name="check" size={17} tint={colors.info} /></View>
-              </If>
-            </View>
-          </Radio>
-        )}
-      </Each>
-    </RadioGroup>
-  );
-}
+const Choices = SettingsChoices;
 
 /** A page of sections on the grouped background. */
 function Grouped(props: { testID?: string; settings?: Settings; children: JSX.Element }) {

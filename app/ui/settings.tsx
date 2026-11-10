@@ -1,6 +1,8 @@
 /** Settings: a titled group of items, each item a row that answers the pointer. */
 import type { JSX, ViewStyle } from "nsh";
 import { Text, View } from "nsh";
+import { Radio, RadioGroup } from "nsh/base";
+import { Icon } from "./icons";
 import { alpha, colors } from "./theme";
 import { corner, duration, fill } from "./tokens";
 
@@ -38,5 +40,48 @@ export function SettingsItem(props: { first?: boolean; testID?: string; style?: 
     >
       {props.children}
     </View>
+  );
+}
+
+/** One choice of a `SettingsChoices` group. */
+export type SettingsChoice = { id: string; label: string; detail?: string; testID?: string };
+
+/**
+ * A group of exclusive choices (a language, a mode) as rows of a `SettingsGroup`: the picked one checked, each row
+ * taking the ghost hover fill.
+ */
+export function SettingsChoices(props: { label: string; choices: SettingsChoice[]; selected: string | null; onPick: (id: string) => void }) {
+  return (
+    <RadioGroup>
+      <Each of={props.choices} key={(c) => c.id}>
+        {(c, i) => (
+          <Radio
+            testID={c().testID}
+            checked={c().id === props.selected}
+            onChange={() => props.onPick(c().id)}
+            accessibilityLabel={c().label}
+            hoverStyle={{ backgroundColor: alpha(colors.text, fill.ghostHover / 2) }}
+            activeStyle={{ backgroundColor: alpha(colors.text, fill.ghostPress / 2) }}
+            style={{
+              minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 10,
+              borderTopWidth: i() === 0 ? 0 : 1, borderTopColor: colors.line,
+              transitionProperty: "background-color", transitionDuration: duration.quick,
+            }}
+          >
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={{ fontSize: 15, color: colors.text }}>{c().label}</Text>
+              <If when={c().detail}>
+                <Text style={{ fontSize: 13, color: colors.muted }}>{c().detail}</Text>
+              </If>
+            </View>
+            <View style={{ width: 20, alignItems: "center" }}>
+              <If when={c().id === props.selected}>
+                <View testID={`choice-check-${c().testID}`}><Icon name="check" size={16} tint={colors.info} /></View>
+              </If>
+            </View>
+          </Radio>
+        )}
+      </Each>
+    </RadioGroup>
   );
 }
