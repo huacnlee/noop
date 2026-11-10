@@ -83,6 +83,11 @@ import {
   statusColor,
   Switch,
   touch,
+  MenuRow,
+  MenuSep,
+  menuPopup,
+  menuRowHover,
+  SidebarRow,
 } from "./ui";
 import {
   answeredIds,
@@ -632,7 +637,7 @@ function Media(props: { hub: Hub; path: string }) {
       {/* right-click (long press on touch) copies the image itself */}
       <ContextMenu
         margin={8}
-        popupStyle={{ minWidth: 140, padding: 4, borderRadius: radius.control, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface }}
+        popupStyle={menuPopup()}
         trigger={
           <View accessibilityLabel={L("View full size", "查看大图")} onPress={() => zoomed.set(true)} style={{ cursor: "pointer" }}>
             <Image
@@ -644,14 +649,7 @@ function Media(props: { hub: Hub; path: string }) {
           </View>
         }
       >
-        <MenuItem
-          testID="copy-image"
-          onSelect={() => void copyImage(src)}
-          hoverStyle={hovered()}
-          style={{ height: 32, justifyContent: "center", paddingHorizontal: 10, borderRadius: 6 }}
-        >
-          <Text style={{ fontSize: 14, color: colors.text }}>{L("Copy image", "复制图片")}</Text>
-        </MenuItem>
+        <MenuRow testID="copy-image" icon="copy" label={L("Copy image", "复制图片")} onSelect={() => void copyImage(src)} />
       </ContextMenu>
       <Dialog
         open={zoomed()}
@@ -1803,50 +1801,6 @@ function SideEmpty(props: { text: string }) {
   return <Text style={{ fontSize: 13.5, color: colors.faint, paddingHorizontal: 20, paddingVertical: 6 }}>{props.text}</Text>;
 }
 
-/** The popup of a sidebar row's context menu. */
-const menuStyle = () => ({ minWidth: 160, padding: 4, borderRadius: radius.control, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface });
-
-/** A sidebar row: the gallery's SidebarRow, at 34 pt (44 on touch). */
-function SideRow(props: { onPress?: () => void; selected?: boolean; title?: string; menu?: JSX.Element; children: JSX.Element }) {
-  // While its context menu is open the row keeps the pressed fill, so it is clear which row the menu is about.
-  const menuOpen = signal(false);
-  const row = (
-    <View
-      onPress={props.onPress}
-      role={props.onPress ? "button" : undefined}
-      accessibilityLabel={props.title}
-      tooltip={props.title && !props.onPress ? <Tooltip label={props.title} placement="right" /> : undefined}
-      hoverStyle={props.onPress && !props.selected ? hovered() : undefined}
-      activeStyle={props.onPress ? { transform: [{ scale: 0.985 }] } : undefined}
-      style={{
-        minHeight: size.row,
-        marginVertical: 1,
-        transitionProperty: "background-color, transform",
-        transitionDuration: 180,
-        transitionTimingFunction: "ease-out",
-        minWidth: 0,
-        overflow: "hidden",
-        marginHorizontal: 10,
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 10,
-        paddingHorizontal: 10,
-        borderRadius: radius.control,
-        borderCurve: "continuous",
-        backgroundColor: props.selected || menuOpen() ? alpha(colors.text, 0.08) : "transparent",
-      }}
-    >
-      {props.children}
-    </View>
-  );
-  if (!props.menu) return row;
-  return (
-    <ContextMenu margin={8} popupStyle={menuStyle()} onOpenChange={({ open }) => menuOpen.set(open)} trigger={row}>
-      {props.menu}
-    </ContextMenu>
-  );
-}
-
 /** Ask before ending a task: cancel it, or mark it done when the owner finished it himself. */
 async function confirmEndTask(id: string, done: boolean, running: boolean): Promise<boolean> {
   const r = done
@@ -1915,14 +1869,9 @@ function Sidebar(props: {
     const running = (s()?.active ?? []).some((a) => a.id === id);
     if (await confirmEndTask(id, done, running)) await props.hub.api("POST", "/api/tasks/cancel", done ? { id, done: true } : { id }).catch(() => {});
   };
-  const itemStyle = { height: 32, justifyContent: "center" as const, paddingHorizontal: 10, borderRadius: 6 };
   const taskItems = (id: string) => [
-    <MenuItem testID={`side-done-${id}`} onSelect={() => void endTask(id, true)} hoverStyle={hovered()} style={itemStyle}>
-      <Text style={{ fontSize: 14, color: colors.text }}>{L("Mark as done", "标记完成")}</Text>
-    </MenuItem>,
-    <MenuItem testID={`side-cancel-${id}`} onSelect={() => void endTask(id, false)} hoverStyle={hovered()} style={itemStyle}>
-      <Text style={{ fontSize: 14, color: colors.danger }}>{L("Cancel task", "取消任务")}</Text>
-    </MenuItem>,
+    <MenuRow testID={`side-done-${id}`} icon="check" label={L("Mark as done", "标记完成")} onSelect={() => void endTask(id, true)} />,
+    <MenuRow testID={`side-cancel-${id}`} icon="close" danger label={L("Cancel task", "取消任务")} onSelect={() => void endTask(id, false)} />,
   ];
   const queue = () => {
     const q = s()?.tasks;
@@ -1954,10 +1903,8 @@ function Sidebar(props: {
         {/* Keep intrinsic text widths from expanding the scrollable content. */}
         <View style={{ width: "100%", minWidth: 0, overflow: "hidden", paddingBottom: 16 }}>
           <View style={{ paddingTop: 8 }}>
-            <SideRow onPress={props.onHome} selected={props.home()} title={L("Channel", "主会话")} menu={<>
-              <MenuItem testID="read-all" disabled={!props.unread()} onSelect={props.onReadAll} hoverStyle={hovered()} style={{ height: touch ? 44 : 32, justifyContent: "center", paddingHorizontal: 10, borderRadius: 6 }}>
-                <Text style={{ fontSize: 14, color: props.unread() ? colors.text : colors.faint }}>{L("Mark all as read", "全部标为已读")}</Text>
-              </MenuItem>
+            <SidebarRow onPress={props.onHome} selected={props.home()} title={L("Channel", "主会话")} menu={<>
+              <MenuRow testID="read-all" disabled={!props.unread()} label={L("Mark all as read", "全部标为已读")} onSelect={props.onReadAll} />
             </>}>
               <Icon name="chat" size={17} tint={props.home() ? colors.text : colors.muted} />
               <Text style={{ ...rowText(), fontWeight: "600" }}>{L("Channel", "主会话")}</Text>
@@ -1967,30 +1914,23 @@ function Sidebar(props: {
               <If when={props.unread()}>
                 <Count testID="channel-unread" accessibilityLabel={L(`${props.unread()} unread`, `${props.unread()} 条未读`)} value={props.unread()} />
               </If>
-            </SideRow>
-            <SideRow onPress={props.onRules} selected={props.rules()} title={L("Memory", "记忆")}>
+            </SidebarRow>
+            <SidebarRow onPress={props.onRules} selected={props.rules()} title={L("Memory", "记忆")}>
               <Icon name="scroll" size={17} tint={props.rules() ? colors.text : colors.muted} />
               <Text style={rowText()}>{L("Memory", "记忆")}</Text>
-            </SideRow>
+            </SidebarRow>
           </View>
           <SideHeading title={L("Needs your decision", "待你决定")} count={waits().length || undefined} accent />
           <Each of={waits()} key={(d) => d.id}>
             {(d) => (
-              <SideRow onPress={() => props.onPick(d().id)} title={d().id} menu={<>
-                <MenuItem
-                  testID={`side-ignore-${d().id}`}
-                  onSelect={() => props.onIgnore(d().id)}
-                  hoverStyle={hovered()}
-                  style={{ height: 32, justifyContent: "center", paddingHorizontal: 10, borderRadius: 6 }}
-                >
-                  <Text style={{ fontSize: 14, color: colors.text }}>{L("Ignore, you decide", "忽略，你来定")}</Text>
-                </MenuItem>
+              <SidebarRow onPress={() => props.onPick(d().id)} title={d().id} menu={<>
+                <MenuRow testID={`side-ignore-${d().id}`} label={L("Ignore, you decide", "忽略，你来定")} onSelect={() => props.onIgnore(d().id)} />
                 {d().task ? taskItems(d().task!) : null}
               </>}>
                 <Indicator status="waiting" />
                 <Text style={rowText()}>{d().question || d().id}</Text>
                 <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.faint }}>{d().id}</Text>
-              </SideRow>
+              </SidebarRow>
             )}
           </Each>
           <If when={!waits().length}>
@@ -2000,11 +1940,11 @@ function Sidebar(props: {
           <SideHeading title={L("In progress", "进行中")} count={s()?.active.length || undefined} />
           <Each of={s()?.active ?? []} key={(a) => a.id}>
             {(a) => (
-                              <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${a().agent}${a().host ? ` @ ${a().host}` : ""}`} menu={taskItems(a().id)}>
+                              <SidebarRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${a().agent}${a().host ? ` @ ${a().host}` : ""}`} menu={taskItems(a().id)}>
                   <Indicator status="running" />
                   <Text style={rowText()}>{a().title}</Text>
                   <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{since(a().started)}</Text>
-                </SideRow>
+                </SidebarRow>
             )}
           </Each>
           <If when={!s()?.active.length}>
@@ -2015,11 +1955,11 @@ function Sidebar(props: {
             <SideHeading testID="side-queued" open={queuedOpen} title={L("Queued", "排队")} count={(s()?.recent ?? []).filter((t) => !(s()?.active ?? []).some((a) => a.id === t.id) && isQueued(t.state)).length} />
             <Each of={queuedOpen() ? (s()?.recent ?? []).filter((t) => !(s()?.active ?? []).some((a) => a.id === t.id) && isQueued(t.state)) : []} key={(a) => a.id}>
               {(a) => (
-                                <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`} menu={taskItems(a().id)}>
+                                <SidebarRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`} menu={taskItems(a().id)}>
                   <Indicator status={TONE[a().state ?? ""] ?? "idle"} />
                   <Text style={{ ...rowText(), color: colors.muted }}>{a().title}</Text>
                   <Text style={{ maxWidth: "50%", minWidth: 0, flexShrink: 1, numberOfLines: 1, fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{a().state === "waiting" ? L("Waiting on subtasks", "等子任务") : a().state === "parked" ? L("Waiting", "等待") : a().state === "nohost" ? L(`Waiting for ${needsLabel((a() as { needs?: string }).needs)}`, `等 ${needsLabel((a() as { needs?: string }).needs)}`) : L("Queued", "排队中")}</Text>
-                </SideRow>
+                </SidebarRow>
               )}
             </Each>
           </If>
@@ -2027,11 +1967,11 @@ function Sidebar(props: {
             <SideHeading testID="side-recent" open={recentOpen} title={L("Recent", "最近")} />
             <Each of={!recentOpen() ? [] : (s()?.recent ?? []).filter((t) => !(s()?.active ?? []).some((a) => a.id === t.id) && !isQueued(t.state)).slice(0, 6)} key={(a) => a.id}>
               {(a) => (
-                <SideRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`}>
+                <SidebarRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`}>
                   <Indicator status={TONE[a().state ?? ""] ?? "idle"} />
                   <Text style={{ ...rowText(), color: colors.muted }}>{a().title}</Text>
                   <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{since(a().updated)}</Text>
-                </SideRow>
+                </SidebarRow>
               )}
             </Each>
           </If>
@@ -2040,7 +1980,7 @@ function Sidebar(props: {
             <SideHeading title={L("Channels", "Channels")} count={props.channels.list().reduce((n, c) => n + props.channels.unread(c), 0) || undefined} accent />
             <Each of={props.channels.list().filter((c) => c.status !== "archived" || c.slug === props.channel())} key={(c) => c.slug}>
               {(c) => (
-                <SideRow onPress={() => props.onChannel(c().slug)} selected={props.channel() === c().slug} title={c().goal || c().name}>
+                <SidebarRow onPress={() => props.onChannel(c().slug)} selected={props.channel() === c().slug} title={c().goal || c().name}>
                   <Text style={{ width: 17, textAlign: "right", fontSize: 15, color: colors.faint }}>#</Text>
                   <Text testID={`side-channel-${c().slug}`} style={{ ...rowText(), color: c().status === "archived" || c().stale ? colors.faint : props.channels.unread(c()) ? colors.text : colors.muted, fontWeight: props.channels.unread(c()) ? "600" : "400" }}>{c().name}</Text>
                   <If when={props.channels.unread(c())} else={
@@ -2050,19 +1990,19 @@ function Sidebar(props: {
                   }>
                     <Text testID={`side-channel-unread-${c().slug}`} style={{ fontSize: 12.5, fontWeight: "600", color: colors.accent, fontVariant: ["tabular-nums"] }}>{String(props.channels.unread(c()))}</Text>
                   </If>
-                </SideRow>
+                </SidebarRow>
               )}
             </Each>
             <If when={archivedChannels().length}>
-              <SideRow onPress={() => showArchived.set(!showArchived())} title={L("Archived channels", "已归档的 Channel")}>
+              <SidebarRow onPress={() => showArchived.set(!showArchived())} title={L("Archived channels", "已归档的 Channel")}>
                 <View style={{ width: 17, alignItems: "flex-end" }}><Icon name={showArchived() ? "chevron-down" : "chevron"} size={12} tint={colors.faint} /></View>
                 <Text testID="side-channels-archived" style={{ ...rowText(), color: colors.faint }}>{L("Archived", "已归档")}</Text>
                 <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{String(archivedChannels().length)}</Text>
-              </SideRow>
+              </SidebarRow>
               <If when={showArchived()}>
                 <Each of={archivedChannels()} key={(c) => c.slug}>
               {(c) => (
-                <SideRow onPress={() => props.onChannel(c().slug)} selected={props.channel() === c().slug} title={c().goal || c().name}>
+                <SidebarRow onPress={() => props.onChannel(c().slug)} selected={props.channel() === c().slug} title={c().goal || c().name}>
                   <Text style={{ width: 17, textAlign: "right", fontSize: 15, color: colors.faint }}>#</Text>
                   <Text testID={`side-channel-${c().slug}`} style={{ ...rowText(), color: c().status === "archived" || c().stale ? colors.faint : props.channels.unread(c()) ? colors.text : colors.muted, fontWeight: props.channels.unread(c()) ? "600" : "400" }}>{c().name}</Text>
                   <If when={props.channels.unread(c())} else={
@@ -2072,28 +2012,28 @@ function Sidebar(props: {
                   }>
                     <Text testID={`side-channel-unread-${c().slug}`} style={{ fontSize: 12.5, fontWeight: "600", color: colors.accent, fontVariant: ["tabular-nums"] }}>{String(props.channels.unread(c()))}</Text>
                   </If>
-                </SideRow>
+                </SidebarRow>
               )}
                 </Each>
               </If>
             </If>
           </If>
 
-          <SideRow onPress={props.onTasks} selected={props.tasks()} title={L("All tasks", "全部任务")}>
+          <SidebarRow onPress={props.onTasks} selected={props.tasks()} title={L("All tasks", "全部任务")}>
             <Icon name="layers" size={17} tint={colors.muted} />
             <Text style={{ ...rowText(), color: colors.muted }}>{L("All tasks", "全部任务")}</Text>
-          </SideRow>
+          </SidebarRow>
 
           <SideHeading title={L("Machines", "机器")} count={s()?.hosts.length || undefined} />
           <Each of={s()?.hosts ?? []} key={(h) => h.host}>
             {(h) => (
-              <SideRow onPress={() => props.onMachine(h().host)} selected={props.machine() === h().host} title={L(`Load ${loadOf(h())}% · Disk ${h().stats?.diskFreeGB ?? "?"} GB free · ${h().busy ?? 0} running`, `负载 ${loadOf(h())}% · 磁盘 ${h().stats?.diskFreeGB ?? "?"}GB · ${h().busy ?? 0} 个运行中`)}>
+              <SidebarRow onPress={() => props.onMachine(h().host)} selected={props.machine() === h().host} title={L(`Load ${loadOf(h())}% · Disk ${h().stats?.diskFreeGB ?? "?"} GB free · ${h().busy ?? 0} running`, `负载 ${loadOf(h())}% · 磁盘 ${h().stats?.diskFreeGB ?? "?"}GB · ${h().busy ?? 0} 个运行中`)}>
                 <Indicator status="online" />
                 <Text style={rowText()}>{h().host}</Text>
                 <If when={(h().busy ?? 0) > 0}>
                   <Text style={{ fontSize: 13, color: colors.muted, fontVariant: ["tabular-nums"] }}>{L(`${h().busy} running`, `${h().busy} 运行中`)}</Text>
                 </If>
-              </SideRow>
+              </SidebarRow>
             )}
           </Each>
           <If when={!s()?.hosts.length}>
@@ -2153,7 +2093,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
   const row = (): ViewStyle => ({ flexDirection: "row", alignItems: "center", gap: m.gap, ...(touch ? { minHeight: m.row, paddingVertical: 12 } : { height: m.row }), paddingHorizontal: m.padX, borderRadius: touch ? 12 : 7, borderCurve: "continuous" });
   const label = (text: string) => <Text style={{ flex: 1, minWidth: 0, fontSize: m.label, color: colors.text, ...(touch ? {} : { numberOfLines: 1 }) }}>{text}</Text>;
   const lead = (name: IconName) => <Icon name={name} size={m.icon} tint={colors.muted} />;
-  const sep = () => <MenuSeparator style={{ height: 1, marginVertical: touch ? 6 : 4, marginHorizontal: m.sepX, backgroundColor: alpha(colors.text, 0.14) }} />;
+  const sep = () => <MenuSep />;
   const initial = () => (account().slice(0, 1) || "?").toUpperCase();
   const avatar = (box: number) => (
     <View style={{ width: box, height: box, borderRadius: box / 2, flexShrink: 0, alignItems: "center", justifyContent: "center", backgroundColor: initialColor(initial()) }}>
@@ -2173,7 +2113,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
     </MenuItem>
   );
   const radio = (text: string, on: () => boolean, pick: () => void, testID: string) => (
-    <MenuItem testID={testID} role="menuitemradio" checked={on()} onSelect={() => !on() && pick()} hoverStyle={hovered()} activeStyle={hovered()} style={{ ...row(), ...(touch ? { backgroundColor: colors.surface, marginTop: 4 } : { minWidth: 136 }) }}>
+    <MenuItem testID={testID} role="menuitemradio" checked={on()} onSelect={() => !on() && pick()} hoverStyle={menuRowHover()} activeStyle={menuRowHover()} style={{ ...row(), ...(touch ? { backgroundColor: colors.surface, marginTop: 4 } : { minWidth: 136 }) }}>
       {label(text)}
       <View style={{ width: m.icon }}>
         <If when={on()}>
@@ -2214,16 +2154,16 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
       </View>
       <If when={!touch}>{sep()}</If>
       <View style={touch ? { backgroundColor: colors.surface, borderRadius: 12, borderCurve: "continuous" } : {}}>
-        <MenuItem testID="mark-all-read" disabled={!props.reads.main().length} onSelect={props.reads.all} hoverStyle={hovered()} activeStyle={hovered()} disabledStyle={{ opacity: 0.4 }} style={row()}>
+        <MenuItem testID="mark-all-read" disabled={!props.reads.main().length} onSelect={props.reads.all} hoverStyle={menuRowHover()} activeStyle={menuRowHover()} disabledStyle={{ opacity: 0.4 }} style={row()}>
           {lead("check")}{label(L("Mark all as read", "全部已读"))}
         </MenuItem>
-        <MenuItem testID="settings" onSelect={props.onSettings} hoverStyle={hovered()} activeStyle={hovered()} style={row()}>
+        <MenuItem testID="settings" onSelect={props.onSettings} hoverStyle={menuRowHover()} activeStyle={menuRowHover()} style={row()}>
           {lead("settings")}
           {label(L("Settings…", "设置…"))}
           <If when={touch} else={<Text style={{ fontSize: 12, color: colors.faint }}>{keymap.label("mod+,")}</Text>}><Icon name="chevron" size={14} tint={colors.faint} /></If>
         </MenuItem>
         <Submenu offset={4}
-          trigger={<View testID="menu-language" hoverStyle={hovered()} activeStyle={hovered()} style={row()}>
+          trigger={<View testID="menu-language" hoverStyle={menuRowHover()} activeStyle={menuRowHover()} style={row()}>
             {lead("globe")}
             {label(L("Language", "语言"))}
             <Text style={{ fontSize: m.value, color: colors.muted }}>{LANGS.find((l) => l.id === lang())?.label ?? "English"}</Text>
@@ -2394,7 +2334,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
             role="menuitemradio"
             checked={o().id === props.selected}
             onSelect={() => o().id !== props.selected && props.onPick(o().id)}
-            hoverStyle={hovered()}
+            hoverStyle={menuRowHover()}
             style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 6 }}
           >
             <View style={{ width: 14, paddingTop: 3 }}>
