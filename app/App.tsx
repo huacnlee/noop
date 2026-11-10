@@ -4416,7 +4416,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       <View testID="channel-swipe" pan={swipeDrawer() ? { x: drawerX } : undefined}
         onPanStart={swipeDrawer() ? () => drawerDragging.set(true) : undefined}
         onPanEnd={swipeDrawer() ? finishDrawerPan : undefined}
-        style={{ flex: 1, backgroundColor: colors.background, paddingBottom: keyboardFrame().height, transitionProperty: "padding-bottom", transitionDuration: keyboardFrame().duration }}>
+        style={{ flex: 1, backgroundColor: colors.background, paddingBottom: keyboardFrame().height }}>
           <View
             testID="composer-area"
             style={{ flex: 1 }}
@@ -4587,7 +4587,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
           {/* The composer floats over the timeline, which scrolls on under its glass. */}
           <View
             onLayout={({ bounds }) => composerHeight.set(bounds.size.height)}
-            style={{ position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: wide() ? 32 : 10, paddingTop: 4, paddingBottom: keyboardFrame().height > 0 ? 8 : Math.max(12, safeArea().bottom + 8), transitionProperty: "padding-bottom", transitionDuration: keyboardFrame().duration, pointerEvents: "box-none" }}
+            style={{ position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: wide() ? 32 : 10, paddingTop: 4, paddingBottom: keyboardFrame().height > 0 ? 8 : Math.max(12, safeArea().bottom + 8), pointerEvents: "box-none" }}
           >
             <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 8, pointerEvents: "box-none" }}>
               <If when={hub.conn() === "blocked"}>
