@@ -44,6 +44,8 @@ export function Button(props: {
   checked?: boolean;
   /** Grows to share a row with its siblings. */
   grow?: boolean;
+  /** An outline button's color: the label and edge take the accent (the main action) or danger (a destructive one). */
+  tone?: "accent" | "danger";
   onPress: () => void;
   testID?: string;
   accessibilityLabel?: string;
@@ -52,8 +54,10 @@ export function Button(props: {
   const m = () => metrics(props.size === "sm");
   const over = signal(false);
   const idle = () => props.disabled || props.loading;
+  const toned = () => (props.tone === "danger" ? colors.danger : props.tone === "accent" ? colors.accent : null);
   const fg = () => {
     if (props.checked) return colors.text;
+    if (toned()) return toned()!;
     switch (variant()) {
       case "primary":
         return colors.onAccent;
@@ -75,7 +79,7 @@ export function Button(props: {
       case "secondary":
         return { backgroundColor: colors.field, borderColor: alpha(colors.text, edge.rest), boxShadow: "0 1px 2px rgba(0,0,0,0.06)" };
       case "outline":
-        return { backgroundColor: "transparent", borderColor: alpha(colors.text, edge.rest), boxShadow: "0 1px 2px rgba(0,0,0,0.04)" };
+        return { backgroundColor: "transparent", borderColor: toned() ? alpha(toned()!, 0.45) : alpha(colors.text, edge.rest), boxShadow: "0 1px 2px rgba(0,0,0,0.04)" };
       case "ghost":
         return { backgroundColor: "transparent", borderColor: "transparent" };
       case "danger":
@@ -91,7 +95,7 @@ export function Button(props: {
         return { backgroundColor: alpha(colors.danger, 0.16) };
       case "secondary":
       case "outline":
-        return { ...wash(fill.ghostHover / 2), borderColor: alpha(colors.text, edge.hover) };
+        return toned() ? { backgroundColor: alpha(toned()!, 0.08), borderColor: alpha(toned()!, 0.7) } : { ...wash(fill.ghostHover / 2), borderColor: alpha(colors.text, edge.hover) };
       default:
         return wash(fill.ghostHover);
     }
@@ -105,7 +109,7 @@ export function Button(props: {
         return { backgroundColor: alpha(colors.danger, 0.22) };
       case "secondary":
       case "outline":
-        return { ...wash(fill.ghostPress / 2), borderColor: alpha(colors.text, edge.hover), boxShadow: "none" };
+        return toned() ? { backgroundColor: alpha(toned()!, 0.14), borderColor: alpha(toned()!, 0.7), boxShadow: "none" } : { ...wash(fill.ghostPress / 2), borderColor: alpha(colors.text, edge.hover), boxShadow: "none" };
       default:
         return wash(fill.ghostPress);
     }
