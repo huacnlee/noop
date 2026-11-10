@@ -1867,8 +1867,8 @@ function Sidebar(props: {
   const archivedChannels = () => props.channels.list().filter((c) => c.status === "archived" && c.slug !== props.channel());
   const s = () => props.hub.status();
   // the hub closes a decision on its next tick: one the channel already shows answered leaves the list now
-  // 排队 and 最近 start collapsed; the heading toggles them (owner, T-0987).
-  const queuedOpen = signal(false);
+  // 排队 starts open and 最近 collapsed; the heading toggles each (owner, T-0987; 排队 open by default, T-1097).
+  const queuedOpen = signal(true);
   const recentOpen = signal(false);
   const waits = computed(() => { const done = answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
   // the sidebar's right-click menu: end a task that can't go on without opening it
