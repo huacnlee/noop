@@ -44,7 +44,6 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
-import { ComposerEmoji, hasEmojiPicker } from "./composer-emoji";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
 import { CheckMark } from "./ui/icons";
@@ -1701,20 +1700,6 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
             placeholder={L(`Continue in ${props.id}…`, `在 ${props.id} 里继续说…`)}
             class="placeholder:text-faint"
             style={{ flex: 1, minHeight: 36, maxHeight: 160, paddingVertical: 8, fontSize: 15, lineHeight: 21, color: colors.text, borderWidth: 0, backgroundColor: "transparent" }}
-          />
-          <ComposerEmoji touch={touch}
-            onOpen={() => { if (touch) taskComposer?.blur(); }}
-            onSelect={(emoji) => {
-              const value = text();
-              const start = Math.min(taskCaret?.start ?? value.length, value.length);
-              const end = Math.min(Math.max(taskCaret?.end ?? start, start), value.length);
-              text.set(value.slice(0, start) + emoji + value.slice(end));
-              taskCaret = { start: start + emoji.length, end: start + emoji.length };
-            }}
-            onInserted={() => {
-              taskComposer?.focus();
-              if (taskCaret) taskComposer?.setSelection(taskCaret.start, taskCaret.end);
-            }}
           />
           <IconButton variant="primary" icon="arrow-up" label={L("Send", "发送")} shortcut="Enter" testID="task-send" disabled={!text().trim()} onPress={() => void say()} />
         </View>
@@ -4731,7 +4716,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                   class={platform.os === "ios" ? "placeholder:text-muted-foreground" : "placeholder:text-faint"}
                   style={{
                     height: compactComposer() ? (touch ? 44 : 36) : inputHeight(),
-                    marginLeft: compactComposer() ? (touch ? 44 : 36) - 2 + (hasEmojiPicker ? (touch ? 44 : 36) + 6 : 0) : 0,
+                    marginLeft: compactComposer() ? (touch ? 44 : 36) - 2 : 0,
                     marginRight: compactComposer() && canDictate() ? (touch ? 44 : 36) + 8 : 0,
                     minWidth: 0, fontSize: size.text, lineHeight: 24, color: colors.text,
                     paddingVertical: compactComposer() ? (touch ? 10 : 6) : 2,
@@ -4751,24 +4736,6 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     >
                       <Icon name="plus" size={touch ? 22 : 18} tint={colors.text} />
                     </View>
-                    <ComposerEmoji
-                      touch={touch}
-                      onOpen={() => {
-                        if (untracked(speech) !== "off") stopDictation(true);
-                        if (touch) composer?.blur();
-                      }}
-                      onSelect={(emoji) => {
-                        const value = draft();
-                        const start = Math.min(caret?.start ?? value.length, value.length);
-                        const end = Math.min(Math.max(caret?.end ?? start, start), value.length);
-                        draft.set(value.slice(0, start) + emoji + value.slice(end));
-                        caret = { start: start + emoji.length, end: start + emoji.length };
-                      }}
-                      onInserted={() => {
-                        composer?.focus();
-                        if (caret) composer?.setSelection(caret.start, caret.end);
-                      }}
-                    />
                     <If when={speech() !== "off"}>
                       <Text testID="dictating" style={{ fontSize: 13, color: colors.accent, numberOfLines: 1 }}>
                         {speech() === "on" ? L("Listening…", "正在听…") : L("Recognizing…", "正在识别…")}
