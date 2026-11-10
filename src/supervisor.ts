@@ -88,8 +88,11 @@ export function classify(t: Task, ctx: Ctx): Verdict | null {
   // 5. read what it waits on before blaming the platform (D-0013): quota, CI and people are their own causes
   const cause = waitCause(m);
   if (cause === "quota") {
-    if (m.wait_check && !checkUnrunnable(m.wait_check, ctx.primaryOs) && age < ctx.maxAgeHours * QUOTA_AGE_FACTOR) return null;
+    const runnable = !!m.wait_check && !checkUnrunnable(m.wait_check, ctx.primaryOs);
+    if (runnable && age < ctx.maxAgeHours * QUOTA_AGE_FACTOR) return null;
     if (!reasons.length && t.folder === "waiting") return null;
+    if (plat && m.wait_check && !runnable && capable([plat]).length && !m.supervisor_requeued) // same hand-back as below
+      return v(`platform:${plat}`, "reroute", [...reasons, L(`a ${plat} host is online, handed back to it to check`, `${plat} 主机在线，交回该主机自行检查`)], reqs(m).filter((r) => !r.startsWith("host:")).join(","));
     return v("quota", "escalate", [...reasons, m.wait_check ? L("the quota check still has not passed", "额度检查仍未通过") : L("no quota check recorded", "没有记录额度检查")]);
   }
   if (!reasons.length && t.folder === "waiting") return null; // young and cycling normally

@@ -203,3 +203,16 @@ test("supervise(): D-0013 quota tasks get no card; a quota pass resumes them and
   rmSync(flag, { force: true });
   for (const id of [...ids, "T-0305"]) for (const f of ["inbox", "waiting", "blocked"]) rmSync(P("tasks", f, `${id}.md`), { force: true });
 });
+
+test("a quota check only a Mac can run is handed back to the Mac first; an old card never resumes a task parked on a newer one", () => {
+  const q = quota("T-1", { wait_check: "bun /Users/k/x/review-account.ts check claude" });
+  expect(classify(q, ctx())!.action).toBe("reroute"); // Linux primary, Mac online
+  expect(classify({ ...q, meta: { ...q.meta, supervisor_requeued: "yes" } }, ctx())!.cause).toBe("quota");
+  writeDoc(P("decisions", "open", "D-9020.md"), { id: "D-9020", task: "T-0401", tasks: "T-0401,T-0402", supervisor_cause: "platform:os:macos", question: "q" }, "c");
+  writeDoc(P("tasks", "blocked", "T-0401.md"), { id: "T-0401", title: "a", decision: "D-9020" }, "b");
+  writeDoc(P("tasks", "blocked", "T-0402.md"), { id: "T-0402", title: "b", decision: "D-9021" }, "b"); // asked the owner something new since
+  closeDecision("D-9020", "已自动解除", "system");
+  expect(existsSync(P("tasks", "inbox", "T-0401.md"))).toBe(true);
+  expect(readDoc(P("tasks", "blocked", "T-0402.md")).meta.decision).toBe("D-9021");
+  for (const id of ["T-0401", "T-0402"]) for (const f of ["inbox", "blocked"]) rmSync(P("tasks", f, `${id}.md`), { force: true });
+});

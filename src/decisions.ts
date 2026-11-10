@@ -92,6 +92,7 @@ export function closeDecision(id: string, answer: string, by: string, note = "")
   const t = P("tasks", "blocked", `${task}.md`);
   if (existsSync(t)) {
     const { meta: tm, body: tb } = readDoc(t);
+    if (tm.decision && tm.decision !== id) continue; // parked under a newer card since: that card resumes it
     // the owner answered the question the gate raised: unlock it for that run; the agent reads the answer and
     // only acts if the answer says so (no keyword matching on the owner's words). Supervisor cards never open a gate.
     const gated = /^owner/.test(by) && !meta.supervisor_cause;
@@ -130,6 +131,7 @@ export function ignoreDecision(id: string, by: string): boolean {
   const t = P("tasks", "blocked", `${task}.md`);
   if (existsSync(t)) {
     const { meta: tm, body: tb } = readDoc(t);
+    if (tm.decision && tm.decision !== id) continue; // parked under a newer card since
     // no gate_override: skipping a card never authorises a gated action (merge, release, external message)
     writeDoc(P("tasks", "inbox", `${task}.md`), { ...tm, claimed_by: undefined, status: undefined, resumes: id },
       `${tb}\n\n## Decision ${id} (${by})\nQ: ${meta.question}\nA: **${IGNORE}** — the owner skipped this card without choosing; it is NOT a rejection and NOT a reason to stop. ` +
