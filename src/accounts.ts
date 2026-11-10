@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Cfg, L, hostName, journal, HOME_DIR } from "./core";
 import { notify } from "./notify";
+import { quotaRecovery, type Recovery } from "./quota";
 
 const HOME = join(HOME_DIR, "accounts");
 const STATE = join(HOME, "state.json");
@@ -90,35 +91,40 @@ export function classify(output: string): Failure {
   return null;
 }
 
-/** Try to read the reset time from messages like "resets at 3pm", "try again in 2h 13m". */
-function resetTime(output: string): Date {
-  const m = output.match(/\bin\s+(?=\d)(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?/i);
-  if (m && (m[1] || m[2])) return new Date(Date.now() + ((+m[1] || 0) * 60 + (+m[2] || 0) + 2) * 60_000);
-  const at = output.match(/(?:resets?|again) at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-  if (at) {
-    let h = +at[1] % 12 + (at[3]?.toLowerCase() === "pm" ? 12 : at[3] ? 0 : +at[1] >= 12 ? 12 : 0);
-    if (!at[3]) h = +at[1];
-    const d = new Date(); d.setHours(h, +(at[2] ?? 0) + 2, 0, 0);
-    if (d < new Date()) d.setDate(d.getDate() + 1);
-    return d;
-  }
-  return new Date(Date.now() + 60 * 60_000);
+/** Shared by the daemon and second-review; only this machine's account state is written. */
+export function recordQuota(a: Account, output: string, now = Date.now()): Recovery {
+  const recovery = quotaRecovery(output, now);
+  const s = load();
+  s.accounts[key(a)] = { ...s.accounts[key(a)], cooldown_until: recovery.until, cred: credStamp(a) };
+  save(s);
+  return recovery;
+}
+
+/** Read-only check for wait_check commands. A newer login invalidates the old cooldown. */
+export function accountRecovery(a: Account): { available: boolean; until?: string; reason?: string } {
+  const st = load().accounts[key(a)] ?? {};
+  if (st.cred && credStamp(a) > st.cred) return { available: true };
+  if (st.needs_login) return { available: false, reason: "auth" };
+  if (st.cooldown_until && Date.parse(st.cooldown_until) > Date.now())
+    return { available: false, reason: "quota", until: st.cooldown_until };
+  return { available: true };
 }
 
 export async function reportFailure(a: Account, kind: Failure, output: string, cfg: Cfg) {
   if (!kind) return;
+  if (kind === "quota") recordQuota(a, output);
   const s = load();
   const st = (s.accounts[key(a)] ??= {});
   const host = hostName(cfg);
   st.last_error = output.slice(-300);
   st.cred = credStamp(a);
   if (kind === "quota") {
-    st.cooldown_until = resetTime(output).toISOString();
-    journal(host, `${key(a)} hit usage limit → cooldown until ${st.cooldown_until.slice(11, 16)}Z`);
+    // recordQuota supplied the same structured recovery used by second-review.
+    journal(host, `${key(a)} hit usage limit → cooldown until ${st.cooldown_until!.slice(11, 16)}Z`);
     if (st.told !== st.cooldown_until) {
       st.told = st.cooldown_until;
       const others = (cfg.clis?.preference ?? ["claude", "codex"]).filter((c: string) => c !== a.cli && Bun.which(c) && accounts(cfg, c).some(usable));
-      const at = new Date(st.cooldown_until).toLocaleTimeString(L("en-US", "zh-CN"), { hour: "2-digit", minute: "2-digit" });
+      const at = new Date(st.cooldown_until!).toLocaleTimeString(L("en-US", "zh-CN"), { hour: "2-digit", minute: "2-digit" });
       void notify([L(`${a.cli === "claude" ? "Claude" : "Codex"} (${host}) is out of quota, back around ${at}.`, `${a.cli === "claude" ? "Claude" : "Codex"}（${host}）额度用完了，约 ${at} 恢复。`),
         others.length ? L(`Until then tasks go to ${others.join(", ")}.`, `这期间任务先交给 ${others.join("、")} 做。`) : L("No AI is available until then, tasks will queue.", "这期间没有可用的 AI，任务会排队等着。"),
         L(`To recover now: run ${a.cli === "claude" ? "claude /login" : "codex login"} on this machine to switch account; it is picked up automatically.`, `想马上恢复：在这台机器上运行 ${a.cli === "claude" ? "claude /login" : "codex login"} 换个账号，登录后会自动接着用，不用等。`)].join("\n"),
