@@ -841,7 +841,8 @@ function persona(from: string): { tint: string; mark: string } {
 }
 
 function Avatar(props: { from: string; small?: boolean; testID?: string }) {
-  const hubbed = isHub(props.from);
+  // The hub speaks as 顺风耳 (avatars.ts); the grey dot only if a hub sender ever has no avatar.
+  const hubbed = isHub(props.from) && avatarOf(props.from) === null;
   const p = persona(props.from);
   const box = props.small ? 22 : 36;
   return (
@@ -1010,10 +1011,6 @@ function MsgActions(props: { text: string; show: () => boolean; onReply?: () => 
   };
   return (
     <View style={{ flexDirection: "row", alignItems: "center", alignSelf: props.align ?? "flex-start", gap: 6, height: touch ? 36 : 24, marginLeft: props.align === "flex-end" ? 0 : -4, opacity: props.show() || copied() ? 1 : 0, transitionProperty: "opacity", transitionDuration: 120 }}>
-      <IconButton testID={`copy-${props.id}`} icon={copied() ? "check" : "copy"} label={copied() ? L("Copied", "已复制") : L("Copy", "复制")} size="sm" tooltip={false} onPress={copy} />
-      <If when={props.onReply}>
-        <IconButton testID={`reply-${props.id}`} icon="reply" label={L("Reply", "回复")} size="sm" tooltip={false} onPress={() => props.onReply?.()} />
-      </If>
       <If when={props.onToggleRead}>
         <Button
           testID={`toggle-read-${props.id}`}
@@ -1023,6 +1020,10 @@ function MsgActions(props: { text: string; show: () => boolean; onReply?: () => 
           label={props.unread?.() ? L("Mark read", "标为已读") : L("Mark unread", "标为未读")}
           onPress={() => props.onToggleRead?.()}
         />
+      </If>
+      <IconButton testID={`copy-${props.id}`} icon={copied() ? "check" : "copy"} label={copied() ? L("Copied", "已复制") : L("Copy", "复制")} size="sm" tooltip={false} onPress={copy} />
+      <If when={props.onReply}>
+        <IconButton testID={`reply-${props.id}`} icon="reply" label={L("Reply", "回复")} size="sm" tooltip={false} onPress={() => props.onReply?.()} />
       </If>
     </View>
   );
