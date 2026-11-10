@@ -16,7 +16,7 @@ export type Record = { meta: { [key: string]: string }; body: string };
 export type Card = { repo: string; key: string; prs: (PR & { review: string })[]; result: any; body: string };
 const slug = /^[\w.-]+\/[\w.-]+$/;
 const gh = (args: string[]) => {
-  const r = spawnSync("gh", args, { encoding: "utf8", timeout: 30_000, maxBuffer: 16 << 20 });
+  const r = spawnSync("gh", args, { encoding: "utf8", timeout: 5_000, maxBuffer: 16 << 20 });
   if (r.error || r.status !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed (${r.status ?? r.error?.message})`);
   return JSON.parse(r.stdout);
 };
@@ -65,6 +65,8 @@ export function cleanReview(p: PR, evidence: Evidence[]): string | undefined {
     const scope = last.match(/· scope: (base|commit|uncommitted) ([^\n]*?) · HEAD/);
     if (verdicts.length !== 1 || verdicts[0][1] !== "CLEAN" || !head || !p.headRefOid.startsWith(head)) continue;
     if (scope?.[1] !== "base" && !(scope?.[1] === "commit" && p.commitCount === 1 && p.headRefOid.startsWith(scope[2].trim()))) continue;
+    // Matching the head alone is insufficient: an incremental fix-only review is not a full-PR review.
+    if (scope?.[1] === "base" && ![p.baseRefName, `origin/${p.baseRefName}`, p.baseRefOid].includes(scope[2].trim())) continue;
     // A documented unresolved finding is not a clean hand-off, even when the reviewer printed CLEAN.
     if (/^- Not fixed:/m.test(e.text)) continue;
     return e.report;

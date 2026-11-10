@@ -11,7 +11,7 @@ const make = (number = 1, overrides: Partial<PR> = {}): PR => ({
 });
 const review = (text = "", head = sha.slice(0, 7)): Evidence => ({ task: "T-0001", report: "/hub/reports/T-0001-second-review.md",
   text: `# Log\n\n## Round 1 — codex reviews claude (2026-11-10)\n\nRepo: \`app\` · scope: base origin/main · HEAD \`${head}\`\n\nVERDICT: CLEAN\n${text}` });
-const ev = (prs: PR[]) => Object.fromEntries(prs.map((p) => [p.url, [review()]]));
+const ev = (prs: PR[]) => Object.fromEntries(prs.map((p) => [p.url, [{ ...review(), text: review().text.replace("base origin/main", `base origin/${p.baseRefName}`) }]]));
 
 test("one card per repo, parents first, ready parent included, owner approval required", () => {
   const parent = make(1, { isDraft: false });
@@ -45,6 +45,14 @@ test("latest cross-model full-PR review must be clean at this head, no unresolve
   }
   for (const [from, to] of [["codex reviews claude", "codex reviews codex"], ["scope: base origin/main", "scope: uncommitted "], ["scope: base origin/main", `scope: commit ${sha}`]]) {
     const e = review(); e.text = e.text.replace(from, to); expect(cleanReview(make(), [e])).toBeUndefined();
+  }
+  for (const base of ["main", make().baseRefOid]) {
+    const e = review(); e.text = e.text.replace("base origin/main", `base ${base}`);
+    expect(cleanReview(make(), [e])).toBeDefined();
+  }
+  for (const base of ["agent/other", "1234567890abcdef1234567890abcdef12345678", sha]) {
+    const e = review(); e.text = e.text.replace("base origin/main", `base ${base}`);
+    expect(cleanReview(make(), [e])).toBeUndefined();
   }
   const one = review(); one.text = one.text.replace("base origin/main", `commit ${sha}`);
   expect(cleanReview(make(1, { commitCount: 1 }), [one])).toBeDefined();
