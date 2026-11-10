@@ -787,21 +787,24 @@ function DocAttachment(props: { src: string; name: string }) {
 
 const DOC_SCALES = [0.875, 1, 1.125, 1.25, 1.4];
 /** The reader beside the chat (a full sheet on a phone): the open report rendered with TextView, with text zoom and a wider pane. */
+/**
+ * The report reader. Beside the chat (`wide`) it runs to the window's top edge: its header is part of the window's
+ * title bar (drags the window, and leaves room for the window buttons Linux and Windows draw at the right).
+ */
 function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpand: () => void; onClose: () => void }) {
   const step = signal(1);
   // looked up once per report, so a re-render never fetches again by itself
   const cell = computed(() => { const src = props.doc.src; return untracked(() => docBody(src)); });
   const body = () => cell()();
   const btn = (p: { id: string; icon: IconName; label: string; on?: boolean; disabled?: boolean; onPress: () => void }) => (
-    <View testID={p.id} role="button" accessibilityLabel={p.label} accessibilityState={{ disabled: !!p.disabled }}
-      onPress={p.disabled ? undefined : p.onPress} hoverStyle={p.disabled ? undefined : hovered()}
-      style={{ width: props.wide ? 28 : 36, height: props.wide ? 28 : 36, borderRadius: 6, alignItems: "center", justifyContent: "center", cursor: p.disabled ? "default" : "pointer", opacity: p.disabled ? 0.35 : 1, backgroundColor: p.on ? alpha(colors.text, 0.07) : undefined }}>
-      <Icon name={p.icon} size={15} tint={colors.muted} />
-    </View>
+    <IconButton testID={p.id} icon={p.icon} label={p.label} size="sm" selected={p.on} disabled={p.disabled} onPress={p.onPress} />
   );
   return (
     <View testID="doc-reader" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 2, height: props.wide ? 44 : 52, paddingLeft: 14, paddingRight: 8, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }}>
+      <View
+        desktop={props.wide ? { windowDrag: true } : undefined}
+        style={{ flexDirection: "row", alignItems: "center", gap: 2, height: size.bar, paddingLeft: 14, paddingRight: (props.wide && hasWindow ? titleBar().right : 0) + 8, borderBottomWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}
+      >
         <Icon name="document" size={16} tint={colors.muted} />
         <Text testID="doc-title" style={{ flex: 1, minWidth: 0, marginLeft: 8, marginRight: 6, fontSize: 13.5, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{props.doc.name}</Text>
         {btn({ id: "doc-zoom-out", icon: "zoom-out", label: L("Smaller text", "缩小文字"), disabled: step() === 0, onPress: () => step.set(Math.max(0, step() - 1)) })}
@@ -1134,8 +1137,8 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
         <If when={e.text.trim() || e.ref}>
         <View
           style={{
-            paddingHorizontal: 16,
-            paddingVertical: 11,
+            paddingHorizontal: 14,
+            paddingVertical: 7,
             borderRadius: 18,
             borderBottomRightRadius: 6,
             backgroundColor: tints.accent,
@@ -3822,6 +3825,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const readerSide = () => wide() && chatRoom() >= 860;
   const readerWidth = () => (readerWide() ? Math.round(chatRoom() * 0.62) : Math.min(460, Math.round(chatRoom() * 0.42)));
   const shownDoc = () => { const d = reading(); return d && d.at === readerAt() ? d : null; };
+  /** The reader beside a page that has one (the channel, a task), from the window's top edge. */
+  const docSide = () => !!shownDoc() && readerSide() && (top().name === "channel" || top().name === "task");
   const readerPane = () => {
     const d = shownDoc();
     if (!d) return null;
@@ -4836,8 +4841,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const withReader = (page: JSX.Element) => (
     <View style={{ flex: 1, flexDirection: "row", minWidth: 0 }}>
       {page}
+      {/* room for the reader, which `docSide` draws over the page's bar up to the window's top edge */}
       <If when={shownDoc() && readerSide()}>
-        <View testID="doc-side" style={{ width: readerWidth(), borderLeftWidth: 0.5, borderColor: colors.line }}>{readerPane()}</View>
+        <View style={{ width: readerWidth() }} />
       </If>
       <If when={shownDoc() && !readerSide()}>
         <View testID="doc-sheet" style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, paddingBottom: safeArea().bottom, backgroundColor: colors.background }}>{readerPane()}</View>
@@ -4891,7 +4897,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
         alignItems: "center",
         gap: 6,
         paddingLeft: (wide() && sidebarOpen() ? 0 : hasWindow ? titleBar().left : 0) + (wide() ? 24 : 8),
-        paddingRight: (hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
+        // the reader beside the chat takes the bar's right end and the window buttons with it
+        paddingRight: (docSide() ? readerWidth() : hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
         borderBottomWidth: 0.5,
         borderBottomColor: surfaceEdge(),
         backgroundColor: colors.background,
@@ -4998,6 +5005,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
           </NavPage>
         )}
       </NavStack>
+      <If when={docSide()}>
+        <View testID="doc-side" style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: readerWidth(), borderLeftWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}>{readerPane()}</View>
+      </If>
       <If when={!wide() && drawer()}>
         <View testID="drawer-dismiss" role="button" accessibilityLabel={L("Close sidebar", "关闭侧栏")} onPress={() => drawer.set(false)} pan={{ x: drawerX }} onPanStart={() => drawerDragging.set(true)} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.08)" }} />
       </If>
