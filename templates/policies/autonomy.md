@@ -25,12 +25,6 @@
   (`pkill -f`, `killall`, `taskkill /IM`): that also kills the owner's and other agents' processes. For desktop GUI apps use
   `noop visual start/run/shot/stop`, which tracks and stops only its own session's processes.
 
-## Toolchains and dead ends
-- Before building or testing a repo, read what your memory and the hub's agents/*/memory.md already record about it
-  (which runtime works, setup steps, what fails) and start from that instead of rediscovering it.
-- When you find a working setup or a dead end, record it once in `lessons`: the command that works, and what does not.
-- Stop after two failed attempts at the same optional step (e.g. a screenshot); say so in the summary and move on.
-
 ## GitHub usage
 - Use normal `gh` commands: `gh pr list/view/diff/checks/checkout`, `gh issue list/view`, `gh search prs/issues`, `gh run list/view`.
 - Do not loop over REST endpoints with `gh api repos/...` (hard-gated). `gh api graphql` is fine for one batched query;
