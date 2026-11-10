@@ -988,9 +988,9 @@ function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Se
                 testID={`proposal-${e.ref}-${it().n}`}
                 onPress={props.done ? undefined : () => toggle(it().n)}
                 hoverStyle={props.done ? undefined : { backgroundColor: alpha(colors.text, 0.04) }}
-                style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 8, paddingVertical: 8, borderRadius: 8, cursor: props.done ? "default" : "pointer" }}
+                style={{ flexDirection: "row", alignItems: "flex-start", gap: 12, paddingHorizontal: 8, paddingVertical: 8, borderRadius: 8, cursor: props.done ? "default" : "pointer" }}
               >
-                <View style={{ width: 20, height: 20, borderRadius: 6, borderWidth: on() ? 0 : 1.5, borderColor: colors.fieldBorder, backgroundColor: on() ? colors.accentFill : "transparent", alignItems: "center", justifyContent: "center" }}>
+                <View style={{ marginTop: 1, width: 20, height: 20, borderRadius: 6, borderWidth: on() ? 0 : 1.5, borderColor: colors.fieldBorder, backgroundColor: on() ? colors.accentFill : "transparent", alignItems: "center", justifyContent: "center" }}>
                   <If when={on()}><Icon name="check" size={14} tint={colors.onAccent} /></If>
                 </View>
                 <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
