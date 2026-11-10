@@ -89,7 +89,7 @@ test("enqueue creates native owner cards and blocked tasks; rejecting/ignoring c
   const p = make(); const c = plan([p], ev([p]), []).cards[0];
   const cfg = { owner: { github: "owner" }, routine: [{ name: "pr-closeout", kind: "pr-closeout", readonly: true }] };
   expect(() => enqueueCards([c], {})).toThrow();
-  const { P, writeDoc, readDoc, list } = require("../src/core");
+  const { P, writeDoc, readDoc } = require("../src/core");
   const { existsSync, unlinkSync } = require("node:fs");
   const { isMergeCard } = require("../src/waits");
   const { ignoreDecision } = require("../src/decisions");

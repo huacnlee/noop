@@ -109,9 +109,9 @@ export function plan(prs: PR[], evidence: { [url: string]: Evidence[] }, records
     if (!reason && busy) reason = "已有同仓库收尾任务或本批次已处理/暂缓";
     if (reason) { skipped.push({ repo, reason }); continue; }
     const approved = ordered!.map((p) => ({ ...p, review: reviews.get(p.url)! }));
-    const summary = `${repo}：按顺序合并 ${approved.map((p) => `${p.url}（${p.title}；HEAD ${p.headRefOid.slice(0, 12)}）`).join(" → ")}，然后发布一个 GPG 签名的 patch 版本，等待 Actions 并验收产物。CI 均成功，当前 HEAD 的二次 review 无剩余问题；基础分支调整后会重新验证。`;
+    const summary = `${repo}：按顺序合并 ${approved.map((p) => `${p.url}（${p.title}；HEAD ${p.headRefOid.slice(0, 12)}）`).join(" → ")}，连同必要的纯版本 PR 发布一个 GPG 签名的 patch 版本，等待 Actions 并验收产物。CI 均成功，当前 HEAD 的二次 review 无剩余问题；基础分支调整后会重新验证。`;
     const result = { status: "needs_decision", summary, question: `${repo.split("/")[1].slice(0, 20)} 合并并发 patch？`,
-      options: ["A: 合并并发 patch — 批准上述 PR 和一次 patch 发布，完成 CI 与产物验收", "B: 暂缓 — 本批次不合并、不发版；HEAD 或依赖变更后可重新提议"], recommendation: "A",
+      options: ["A: 合并并发 patch — 批准上述 PR、必要的纯版本 PR 和一次 patch 发布，完成 CI 与产物验收", "B: 暂缓 — 本批次不合并、不发版；HEAD 或依赖变更后可重新提议"], recommendation: "A",
       attachments: [...new Set(approved.map((p) => p.review))] };
     const body = `PR closeout decision task. Read policies/pr-closeout.md and memory/release-cadence.md.\n\n` +
       `Before an explicit OWNER answer approving option A for this exact snapshot: return the following result unchanged. Do not mark ready, retarget, merge, tag, push or release. Judge/precedent/ignore is not approval.\n\n` +

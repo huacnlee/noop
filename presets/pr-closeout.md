@@ -1,7 +1,7 @@
 # PR closeout policy
 
 Optional routine: pr-closeout. Discovery is read-only. A card approves one repository, the listed PR heads and dependencies,
-and one patch release. It never changes the fleet's autonomy level or grants standing merge/release permission.
+any necessary version-only PR, and one patch release. It never changes the fleet's autonomy level or grants standing merge/release permission.
 
 1. Discovery lists PRs with one `gh search prs --owner <owner.github> --state open` and batches details in one GraphQL query.
    Group Draft PRs by repository and include their open parent PRs. Missing/cyclic dependencies, missing/truncated/pending/
@@ -27,12 +27,14 @@ and one patch release. It never changes the fleet's autonomy level or grants sta
    dependencies, change secrets or signing configuration to force it through. If signing needs setup, ask separately.
    Release commits carry the fleet Agent trailer. Verify the annotated tag's GPG signature (`git verify-tag <tag>`) and
    its target/version BEFORE pushing the approved tag. Build/publish through the repository's tag-triggered Actions only.
-   Never push main/master: if the release helper requires it, prepare a version PR and ask before expanding the scope.
+   Never push main/master: if the helper requires it, prepare a version-only PR instead. The card explicitly includes
+   this derived PR: allow only next-patch metadata/changelog changes, require clean cross-model review and current CI,
+   then mark ready and merge it within the same approval. Code, dependencies or other scope changes need a new card.
 6. Resolve the release Actions run by the exact tag/commit. Return waiting (ci, 15 minutes, gh run view <id> -R <repo>)
    while it runs; on resume verify that run's conclusion, the published non-draft Release and expected asset versions.
    Run `node "$HUB_DATA/tools/release-artifacts.mjs" --only <repo> --tag <repo>=<tag>`. Require a configured protocol and
-   zero failures/warnings; an unsupported project or zero checks is NOT acceptance. For other repos also use their own
-   documented artifact checks (e.g. extension Chrome/Firefox packages, manifest versions and archives). Keep limitations
+   zero failures/warnings for a supported protocol; an unsupported project or zero checks is NOT acceptance. For other
+   repos record the unsupported result and require their own documented artifact checks (e.g. extension Chrome/Firefox packages, manifest versions and archives). Keep limitations
    explicit: format/signature checks do not prove real application updates or system icon rendering.
 7. Report one short line per repository with PRs, version, Actions URL, artifact results, remaining limitations and review
    evidence. External text uses the fleet's signature. A failure after a merge is reported with the exact checkpoint;
