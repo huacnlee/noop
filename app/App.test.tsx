@@ -368,6 +368,16 @@ describe("channel", () => {
     await app.waitFor("Task T-0005");
   });
 
+  test("an id inside a file path stays plain text; one on its own is a chip", async () => {
+    const extra = [{ id: "e30", ts: ts(40), from: "dev@linux-box", kind: "notice", text: "依据 tasks/done/T-0005.md 和 D-0294/notes，不重复 T-0005" }];
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], extra), width: 1200, height: 800, platform: "macos" });
+    await app.waitFor("text:/tasks\\/done\\/T-0005\\.md/");
+    expect(app.shows("text:/D-0294\\/notes/")).toBe(true);
+    // The chip of the id on its own (the earlier message has one too).
+    expect(app.shows("id:task-chip-T-0005 >> nth=1")).toBe(true);
+    expect(app.shows("id:task-chip-T-0005 >> nth=2")).toBe(false);
+  });
+
   test("a task page is its conversation: what was said about it, and a box that adds to it", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const said = [
@@ -607,6 +617,19 @@ describe("channel", () => {
     await app.waitFor("修复登录页");
     await app.press("label:T-0005 修复登录页");
     await app.waitFor("Task T-0005");
+  });
+
+  test("a machine page on a phone keeps a long latest step inside the screen", async () => {
+    const step = "Bash · Capture phone screenshots and compare every page with the desktop layout";
+    const host = { ...status.hosts[0], running: [{ ...status.hosts[0].running[0], activity: { at: new Date().toISOString(), step, model: "claude-opus-5-5" } }] };
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 390, height: 844, platform: "ios",
+      network: { ...hub([]), [`GET ${URL}/api/status`]: { body: { ...status, hosts: [host] } } },
+    });
+    await app.press("label:Menu");
+    await app.press("label:Load 42% · Disk 120 GB free · 1 running");
+    await app.waitFor("Running");
+    expect(app.shows("截图检查 gallery")).toBe(true);
   });
 
   test("all tasks: older ones load page by page, and any of them opens", async () => {

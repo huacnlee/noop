@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { due } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
-import { parseResult, runAgent } from "../src/runner";
+import { cliCommand, parseResult, runAgent, stripImages } from "../src/runner";
 
 test("routine schedule", () => {
   const t = new Date("2026-11-02T19:05:00"); // Monday
@@ -126,6 +126,13 @@ test("quota/auth failover: same CLI's other account, then the other CLI, else no
   expect(failoverAccount(solo, { cli: "codex", name: "zz-test-c", dir: "" }, ["codex", "claude"], all)?.cli).toBe("claude");
 });
 
+test("classify: OpenAI 'no credits remaining' is a quota wall, so codex work falls back", async () => {
+  const { classify } = await import("../src/accounts");
+  expect(classify("ERROR: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.")).toBe("quota");
+  expect(classify("Credit balance is too low")).toBe("quota");
+  expect(classify("exit 1: task failed")).toBeNull();
+});
+
 test("restart throttle: at most one voluntary restart per hour unless forced", async () => {
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -246,6 +253,55 @@ test("a result block survives a later turn from a background task notification",
   rmSync(log, { force: true });
   expect(res).toMatchObject({ status: "done", summary: "tested" });
 });
+
+test("run logs keep screenshot events but not their base64 payloads", () => {
+  const png = "iVBORw0KGgo".repeat(400);
+  const event = {
+    type: "user",
+    message: { role: "user", content: [{ tool_use_id: "t1", type: "tool_result",
+      content: [{ type: "image", source: { type: "base64", data: png, media_type: "image/png" } }] }] },
+    parent_tool_use_id: null,
+    tool_use_result: { type: "image", file: { base64: png, type: "image/png", originalSize: 3300 } },
+  };
+  const out = stripImages(JSON.stringify(event));
+  expect(out).not.toContain(png);
+  const e = JSON.parse(out);
+  expect(e.message.content[0].content[0].source).toEqual({ type: "base64", data: "[image/png, 3300 bytes omitted]", media_type: "image/png" });
+  expect(e.tool_use_result.file).toEqual({ base64: "[image/png, 3300 bytes omitted]", type: "image/png", originalSize: 3300 });
+  const text = '{"type":"assistant","message":{"content":[{"type":"text","text":"base64","note":"caf\\u00e9"}]}}'; // parsed, no image: kept byte for byte
+  expect(stripImages(text)).toBe(text);
+  const broken = '{"type":"user","source":{"type":"base64","data":"iVBOR';
+  expect(stripImages(broken)).toBe(broken);
+  expect(stripImages("plain codex output")).toBe("plain codex output");
+});
+
+test("a run log exists and grows while the agent runs, and has the usual layout at exit", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/noop-live-log-`);
+  const go = `${dir}/go`;
+  const first = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } });
+  const last = JSON.stringify({ type: "result", result: '```json\n{"status":"done","summary":"ok"}\n```' });
+  // prints one line, then waits for the test to release it before printing the result
+  const script = `const fs = require("node:fs");`
+    + `process.stdout.write(${JSON.stringify(`${first}\n`)});`
+    + `const t = setInterval(() => { if (fs.existsSync(${JSON.stringify(go)})) { clearInterval(t);`
+    + `process.stdout.write(${JSON.stringify(`${last}\n`)}); process.stderr.write("warn"); } }, 20);`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const run = runAgent("fake", "prompt", dir, cfg, log);
+    let mid = "";
+    for (let i = 0; i < 250 && !mid.endsWith(`${first}\n`); i++) { // the header holds the script, so it contains the text too
+      await Bun.sleep(20);
+      mid = existsSync(log) ? readFileSync(log, "utf8") : "";
+    }
+    expect(mid).toBe(`$ ${process.execPath} -e ${script} stream-json\n\n${first}\n`);
+    writeFileSync(go, "");
+    expect(parseResult(await run)).toMatchObject({ status: "done", summary: "ok" });
+    expect(readFileSync(log, "utf8")).toBe(`$ ${process.execPath} -e ${script} stream-json\n(exit 0)\n\n${first}\n${last}\n\n\n[stderr]\nwarn`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
 
 test("an empty completion (no text, no tool call, exit 0) is retried once instead of failing the task", async () => {
   // The provider sometimes answers with nothing at all and the CLI still exits 0; Claude Code's own
@@ -386,4 +442,17 @@ test("checkWaits: a wait that finished while the daemon was down still wakes aft
   await Bun.write(flag, "1"); // finished during the restart
   expect([...(await checkWaits(Date.now() + 999_999_999, 1000))]).toContain("T-9102");
   rmSync(flag, { force: true });
+});
+
+test("gate_override relaxes only the approvable gates", () => {
+  const cfg = { gates: { extra: ["Bash(kubectl delete:*)"] } } as unknown as Cfg;
+  const full = cliCommand("claude", cfg);
+  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)"])
+    expect(full).toContain(g);
+  const relaxed = cliCommand("claude", cfg, true);
+  expect(relaxed).not.toContain("Bash(gh pr merge:*)");
+  expect(relaxed).not.toContain("Bash(gh release create:*)");
+  expect(relaxed).not.toContain("Bash(gh api repos/:*)");
+  for (const g of ["--disallowedTools", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(kubectl delete:*)"])
+    expect(relaxed).toContain(g);
 });

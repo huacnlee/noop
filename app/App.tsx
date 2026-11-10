@@ -35,7 +35,7 @@ import {
   untracked,
   Video,
   View,
-  windowSize, token, openUrl, keyboardFrame, Picker, Speech, Clipboard, Notifications } from "nsh";
+  windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
 import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
@@ -55,8 +55,13 @@ import { createTimelineWindow } from "./timeline";
 import { CHECK_EVERY_MS, createUpdates, shellLine, type ShellInfo, type UpdateState } from "./update";
 import {
   alpha,
+  avatarIdentity,
+  avatarInitials,
   colors,
+  fill,
   focusRing,
+  iosGlass,
+  menuGlass,
   hovered,
   Icon,
   type IconName,
@@ -90,6 +95,7 @@ import {
   menuRowHover,
   SidebarRow,
   SettingsGroup,
+  cardEdge,
   SettingsItem,
   SettingsChoices,
   NumberField,
@@ -424,6 +430,31 @@ const EXTENSIONS: MarkdownExtension[] = [
   { name: "task", pattern: "\\bT-[A-Z]?\\d{4}\\b" },
   { name: "item", pattern: "\\b[DP]-[A-Z]?\\d{4}\\b" },
 ];
+/**
+ * An id inside a file path ("tasks/done/T-0930.md", "T-0930/notes") names the file, not the task: it stays plain
+ * text, so the path reads and copies whole. The patterns cannot see past the match (Rust's `regex` has no
+ * lookaround), so this looks at the text on either side of each chip.
+ */
+function pathInlines(inlines: TextViewInline[]): TextViewInline[] {
+  const out: TextViewInline[] = [];
+  const text = (t: string) => {
+    const prev = out[out.length - 1];
+    if (prev?.type === "text") out[out.length - 1] = { ...prev, text: prev.text + t };
+    else out.push({ type: "text", text: t });
+  };
+  inlines.forEach((i, k) => {
+    if (i.type === "custom" && (i.name === "task" || i.name === "item")) {
+      const prev = out[out.length - 1];
+      const next = inlines[k + 1];
+      const before = prev?.type === "text" ? prev.text : "";
+      const after = next?.type === "text" ? next.text : "";
+      if (/[\w.-]\/$/.test(before) || /^(\.\w|\/[\w.-])/.test(after)) return text(i.text ?? "");
+    }
+    if (i.type === "text") return text(i.text);
+    out.push("content" in i && Array.isArray(i.content) ? ({ ...i, content: pathInlines(i.content) } as TextViewInline) : i);
+  });
+  return out;
+}
 const GH = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)\/?$/;
 
 /** A bare GitHub PR or issue link reads as "nsh#747": still a plain link, not a chip (GFM autolinks bare URLs). */
@@ -467,7 +498,7 @@ function onceInlines(inlines: TextViewInline[], seen = new Set<string>()): TextV
 function ghBlocks(blocks: TextViewBlock[]): TextViewBlock[] {
   return blocks.map((b): TextViewBlock => {
     const x = { ...b } as Record<string, unknown>;
-    if (Array.isArray(x.content)) x.content = ghInlines(onceInlines(x.content as TextViewInline[]));
+    if (Array.isArray(x.content)) x.content = ghInlines(onceInlines(pathInlines(x.content as TextViewInline[])));
     if (Array.isArray(x.children)) x.children = ghBlocks(x.children as TextViewBlock[]);
     if (Array.isArray(x.items)) x.items = (x.items as { children: TextViewBlock[] }[]).map((it) => ({ ...it, children: ghBlocks(it.children) }));
     return x as TextViewBlock;
@@ -1198,7 +1229,7 @@ function Message(props: {
   };
   const body = (
     <View style={{ gap: 10 }}>
-      <Rich text={ask ? e.text.replace(/\n*^建议：.*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
+      <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
       <If when={e.attachments?.length}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 10 }}>
           <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
@@ -1758,8 +1789,8 @@ function MachineDetail(props: { hub: Hub; host: string; wide: boolean; onTask: (
     >
       {mark}
       <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{id}</Text>
-      <Text style={{ flex: 1, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{title}</Text>
-      <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{right}</Text>
+      <Text style={{ flex: 1, minWidth: 0, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{title}</Text>
+      <Text style={{ maxWidth: "50%", minWidth: 0, flexShrink: 1, numberOfLines: 1, fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{right}</Text>
     </View>
   );
   return (
@@ -2113,13 +2144,6 @@ function Sidebar(props: {
   );
 }
 
-/** A fixed colour per initial, so the same account always gets the same avatar colour. */
-function initialColor(ch: string): string {
-  const c = ch.toUpperCase().charCodeAt(0);
-  const index = c >= 65 && c <= 90 ? (c - 65) % 10 + 1 : 10;
-  return token(`avatar-${index}` as "avatar-1");
-}
-
 /** The sidebar account, opening the user menu (settings, appearance, language). */
 function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads }) {
   /** The signed-in account: its email, shown as the local part; the server address stays out of the UI. */
@@ -2129,22 +2153,29 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
   // A pointer gets a compact popup at the trigger; a finger gets the sheet at the bottom with rows it can hit.
   const touch = platform.os === "ios" || platform.os === "android";
   const m = touch
-    ? { row: 52, padX: 16, gap: 12, icon: 20, label: 16, value: 14, avatar: 48, name: 20, mail: 14, seg: 44, segH: 44, sepX: 12 }
+    ? { row: 52, padX: 16, gap: 12, icon: 20, label: 16, value: 14, avatar: 44, name: 20, mail: 14, seg: 44, segH: 44, sepX: 12 }
     : { row: 30, padX: 8, gap: 10, icon: 15, label: 13.5, value: 13, avatar: 30, name: 13.5, mail: 12, seg: 28, segH: 22, sepX: 8 };
-  const surface = (): ViewStyle => touch
-    // Opaque on a phone: the sheet sits over the sidebar's own rows, which would show through glass.
-    ? { backgroundColor: colors.raised, borderRadius: 24, borderCurve: "continuous", boxShadow: "0 10px 40px rgba(0,0,0,0.18)",
-        left: 12, right: 12, bottom: Math.max(12, safeArea().bottom), padding: 12 }
+  const sheet = (): ViewStyle => ({ left: 12, right: 12, bottom: Math.max(12, safeArea().bottom), padding: 12 });
+  const surface = (): ViewStyle => platform.os === "ios"
+    // iOS: the sheet is Liquid Glass (a blurred, nearly opaque fallback before iOS 26), its groups quiet fills on it.
+    ? { ...menuGlass(colors.raised, corner.sheet), ...sheet() }
+    : touch
+    // Android: opaque, as the sheet sits over the sidebar's own rows.
+    ? { backgroundColor: colors.raised, borderRadius: corner.sheet, borderCurve: "continuous", boxShadow: "0 10px 40px rgba(0,0,0,0.18)", ...sheet() }
     // No minWidth here: the language submenu takes this same style and should fit its rows; the menu gets its width from its header.
     : { ...glass(colors.surface, 12), padding: 5 };
   const row = (): ViewStyle => ({ flexDirection: "row", alignItems: "center", gap: m.gap, ...(touch ? { minHeight: m.row, paddingVertical: 12 } : { height: m.row }), paddingHorizontal: m.padX, borderRadius: touch ? 12 : 7, borderCurve: "continuous" });
   const label = (text: string) => <Text style={{ flex: 1, minWidth: 0, fontSize: m.label, color: colors.text, ...(touch ? {} : { numberOfLines: 1 }) }}>{text}</Text>;
   const lead = (name: IconName) => <Icon name={name} size={m.icon} tint={colors.muted} />;
   const sep = () => <MenuSep />;
-  const initial = () => (account().slice(0, 1) || "?").toUpperCase();
-  const avatar = (box: number) => (
-    <View style={{ width: box, height: box, borderRadius: box / 2, flexShrink: 0, alignItems: "center", justifyContent: "center", backgroundColor: initialColor(initial()) }}>
-      <Text style={{ fontSize: Math.round(box * 0.44), fontWeight: "600", color: token("avatar-foreground") }}>{initial()}</Text>
+  /** A group of rows on the sheet: a quiet fill on glass, which an opaque one would cover; the surface elsewhere. */
+  const group = () => (iosGlass ? alpha(colors.text, fill.rest) : colors.surface);
+  const initials = () => avatarInitials(account());
+  /** The account's identity: its initials on a soft tint of its own stable hue, with a hairline of the same hue. */
+  const avatar = (box: number, testID?: string) => (
+    <View testID={testID} style={{ width: box, height: box, borderRadius: box / 2, flexShrink: 0, alignItems: "center", justifyContent: "center",
+      borderWidth: 1, borderColor: avatarIdentity(account() || "?").border, backgroundColor: avatarIdentity(account() || "?").background }}>
+      <Text style={{ fontSize: Math.round(box * (initials().length > 1 ? 0.38 : 0.44)), fontWeight: "600", color: avatarIdentity(account() || "?").foreground }}>{initials()}</Text>
     </View>
   );
   /** One of the two appearances, as a segment whose raised thumb marks the current one. */
@@ -2160,7 +2191,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
     </MenuItem>
   );
   const radio = (text: string, on: () => boolean, pick: () => void, testID: string) => (
-    <MenuItem testID={testID} role="menuitemradio" checked={on()} onSelect={() => !on() && pick()} hoverStyle={menuRowHover()} activeStyle={menuRowHover()} style={{ ...row(), ...(touch ? { backgroundColor: colors.surface, marginTop: 4 } : { minWidth: 136 }) }}>
+    <MenuItem testID={testID} role="menuitemradio" checked={on()} onSelect={() => !on() && pick()} hoverStyle={menuRowHover()} activeStyle={menuRowHover()} style={{ ...row(), ...(touch ? { backgroundColor: group(), marginTop: 4 } : { minWidth: 136 }) }}>
       {label(text)}
       <View style={{ width: m.icon }}>
         <If when={on()}>
@@ -2172,6 +2203,8 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
   return (
     <Menu
       align="start"
+      // Opening the account menu (settings, theme, language) on a phone hides the keyboard first.
+      onOpenChange={(open) => { if (open) Keyboard.dismiss(); }}
       offset={6}
       margin={8}
       // On a desktop the surface rides on a `PopIn` inside the bare popup, so it comes in with a short pop each opening.
@@ -2185,7 +2218,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
           hoverStyle={hovered()}
           style={{ width: "100%", flexDirection: "row", alignItems: "center", gap: 8, minHeight: touch ? 44 : 40, paddingLeft: 8, paddingRight: 10, borderRadius: radius.control, borderCurve: "continuous" }}
         >
-          {avatar(24)}
+          {avatar(touch ? 28 : 24, "user-avatar")}
           <Text testID="user-account" style={{ flex: 1, fontSize: 13, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
           <Icon name="chevron-up" size={12} tint={colors.faint} />
         </View>
@@ -2193,7 +2226,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
     >
       <PopIn side="top" style={touch ? {} : surface()}>
       <View style={{ ...(touch ? {} : { minWidth: 254 }), flexDirection: "row", alignItems: "center", gap: touch ? 12 : 10, paddingHorizontal: m.padX, paddingTop: touch ? 12 : 6, paddingBottom: touch ? 24 : 7 }}>
-        {avatar(m.avatar)}
+        {avatar(m.avatar, "user-menu-avatar")}
         <View style={{ flex: 1, minWidth: 0, gap: touch ? 4 : 1 }}>
           <Text style={{ fontSize: m.name, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
           <If when={email()}>
@@ -2202,7 +2235,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
         </View>
       </View>
       <If when={!touch}>{sep()}</If>
-      <View style={touch ? { backgroundColor: colors.surface, borderRadius: 12, borderCurve: "continuous" } : {}}>
+      <View style={touch ? { backgroundColor: group(), borderRadius: 12, borderCurve: "continuous" } : {}}>
         <MenuItem testID="mark-all-read" disabled={!props.reads.main().length} onSelect={props.reads.all} hoverStyle={menuRowHover()} activeStyle={menuRowHover()} disabledStyle={{ opacity: 0.4 }} style={row()}>
           {lead("check")}{label(L("Mark all as read", "全部已读"))}
         </MenuItem>
@@ -2533,7 +2566,7 @@ function Steps(props: { steps: string[] }) {
 function NotifySettings(props: { push: Push; view: SettingsView | null; save: (patch: Record<string, unknown>) => void; wide: boolean }) {
   const push = props.push;
   const { prefs, setPrefs, state } = notifyModel(push, () => props.view, props.save);
-  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: surfaceEdge() });
+  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: cardEdge() });
   return (
     <Group title={L("Notifications", "通知")} hint={systemNotifications() ? L("While Noop is running, decisions that need you appear as system notifications. Click one to jump to it.", "Noop 运行时，需要你拍板的事会发系统通知，点开直接到这一条。") : L("Decisions that need you are pushed to your phone. You can pick an option right from the notification.", "需要你拍板的事推送到手机；通知上可以直接选择选项。")}>
       <View style={{ gap: 12, paddingHorizontal: 16, paddingVertical: 14 }}>
@@ -2695,7 +2728,7 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
   const { view, error, save } = props.settings;
   props.settings.load();
   const eff = () => view()?.effective;
-  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: surfaceEdge() });
+  const row = (): ViewStyle => ({ gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: cardEdge() });
   const chips: ViewStyle = { flexDirection: "row", flexWrap: "wrap", gap: 6 };
 
   const tab = props.settings.tab;
@@ -3679,7 +3712,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (wide()) return;
     const open = drawer();
     clearTimeout(drawerHideTimer);
-    if (open) drawerVisible.set(true);
+    // Opening the sidebar is leaving the composer: hide the keyboard, as native apps do.
+    if (open) { Keyboard.dismiss(); drawerVisible.set(true); }
     else drawerHideTimer = setTimeout(() => drawerVisible.set(false), reduceMotion() ? 0 : 200);
     animateDrawer(open);
   });
@@ -3700,6 +3734,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // The pages: the channel at the bottom, what the sidebar, a link or settings opened above it.
   const nav = createNavStack<Route>([CHANNEL]);
   const top = () => { const r = nav.routes(); return r[r.length - 1]; };
+  // Any page change (settings, a task, back) takes the keyboard down with the input it served.
+  let lastTop: Route | undefined;
+  effect(() => { const t = top(); if (lastTop !== undefined && t !== lastTop) Keyboard.dismiss(); lastTop = t; });
   const onChannel = () => nav.routes().length === 1;
   /** The channel the conversation is narrowed to (a Slack-like topic), or null for the main chat. Same view, same composer. */
   const scope = signal<string | null>(null);
@@ -4416,9 +4453,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const channelPage = () => (
     <View style={{ flex: 1, flexDirection: "row", minWidth: 0 }}>
       <View testID="channel-swipe" pan={swipeDrawer() ? { x: drawerX } : undefined}
-        onPanStart={swipeDrawer() ? () => drawerDragging.set(true) : undefined}
+        onPanStart={swipeDrawer() ? () => { Keyboard.dismiss(); drawerDragging.set(true); } : undefined}
         onPanEnd={swipeDrawer() ? finishDrawerPan : undefined}
-        style={{ flex: 1, backgroundColor: colors.background, paddingBottom: keyboardFrame().height, transitionProperty: "padding-bottom", transitionDuration: keyboardFrame().duration }}>
+        style={{ flex: 1, backgroundColor: colors.background, paddingBottom: keyboardFrame().height }}>
           <View
             testID="composer-area"
             style={{ flex: 1 }}
@@ -4589,7 +4626,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
           {/* The composer floats over the timeline, which scrolls on under its glass. */}
           <View
             onLayout={({ bounds }) => composerHeight.set(bounds.size.height)}
-            style={{ position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: wide() ? 32 : 10, paddingTop: 4, paddingBottom: keyboardFrame().height > 0 ? 8 : Math.max(12, safeArea().bottom + 8), transitionProperty: "padding-bottom", transitionDuration: keyboardFrame().duration, pointerEvents: "box-none" }}
+            style={{ position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: wide() ? 32 : 10, paddingTop: 4, paddingBottom: keyboardFrame().height > 0 ? 8 : Math.max(12, safeArea().bottom + 8), pointerEvents: "box-none" }}
           >
             <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 8, pointerEvents: "box-none" }}>
               <If when={hub.conn() === "blocked"}>
@@ -4933,7 +4970,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
         <View onTouchStartCapture={() => { if (platform.os === "macos" && focused()) composer?.blur(); }} style={{ width: size.sidebar, paddingTop: sidebarInset }}>{sidebar(false)}</View>
       </If>
       <If when={!wide()}>
-        <View testID="drawer" pan={drawer() ? { x: drawerX } : undefined} onPanStart={() => drawerDragging.set(true)} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: drawerWidth(), paddingTop: touch ? safeArea().top : 0, visibility: drawerVisible() || drawerDragging() ? "visible" : "hidden", pointerEvents: drawer() ? "auto" : "none" }}>{sidebar(true)}</View>
+        <View testID="drawer" pan={drawer() ? { x: drawerX } : undefined} onPanStart={() => { Keyboard.dismiss(); drawerDragging.set(true); }} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: drawerWidth(), paddingTop: touch ? safeArea().top : 0, visibility: drawerVisible() || drawerDragging() ? "visible" : "hidden", pointerEvents: drawer() ? "auto" : "none" }}>{sidebar(true)}</View>
       </If>
       <View style={{ flex: 1, minWidth: 0, backgroundColor: colors.background, borderTopLeftRadius: wide() && sidebarOpen() ? 20 : 0, borderBottomLeftRadius: wide() && sidebarOpen() ? 20 : 0, borderCurve: "continuous", borderLeftWidth: !wide() && (drawer() || drawerDragging()) ? 1 : 0, borderLeftColor: colors.line, overflow: "hidden", translate: [wide() ? 0 : drawerTranslate(), 0], boxShadow: wide() && sidebarOpen() ? "-3px 0 18px rgba(0,0,0,0.08)" : undefined }}>
       <NavStack state={nav} testID="pages" style={{ flex: 1, minWidth: 0 }}>
@@ -4962,7 +4999,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
         <View testID="doc-side" style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: readerWidth(), borderLeftWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}>{readerPane()}</View>
       </If>
       <If when={!wide() && drawer()}>
-        <View testID="drawer-dismiss" role="button" accessibilityLabel={L("Close sidebar", "关闭侧栏")} onPress={() => drawer.set(false)} pan={{ x: drawerX }} onPanStart={() => drawerDragging.set(true)} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.08)" }} />
+        <View testID="drawer-dismiss" role="button" accessibilityLabel={L("Close sidebar", "关闭侧栏")} onPress={() => drawer.set(false)} pan={{ x: drawerX }} onPanStart={() => { Keyboard.dismiss(); drawerDragging.set(true); }} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.08)" }} />
       </If>
       </View>
 

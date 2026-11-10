@@ -456,7 +456,7 @@ export function NumberField(props: {
     [left ? "borderRightWidth" : "borderLeftWidth"]: 1, borderColor: colors.line,
     transitionProperty: "background-color", transitionDuration: duration.quick,
   });
-  const steps = "hover:bg-[color-mix(in_srgb,var(--foreground)_8%,transparent)] active:bg-[color-mix(in_srgb,var(--foreground)_14%,transparent)] disabled:opacity-35";
+  const steps = "hover:bg-foreground/8 active:bg-foreground/14 disabled:opacity-35";
   return (
     <BaseNumberInput
       testID={props.testID}

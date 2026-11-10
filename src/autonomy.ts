@@ -1,7 +1,7 @@
 // Graduated autonomy. Start conservative ("onboarding"): self-generated work needs owner approval,
 // the judge only shadows. Graduation is proposed by the architect from metrics, decided by the owner.
 import { existsSync, unlinkSync } from "node:fs";
-import { type Cfg, P, journal, list, nextId, now, readDoc, writeDoc } from "./core";
+import { type Cfg, L, P, journal, list, nextId, now, readDoc, writeDoc } from "./core";
 import { notify } from "./notify";
 
 export type Level = "onboarding" | "assisted" | "autonomous";
@@ -24,7 +24,6 @@ export function needsApproval(cfg: Cfg, source: string): boolean {
 }
 
 const QUEUED = ["inbox", "active", "waiting", "blocked"];
-const PARKED_COPY_MS = 6 * 3600_000;
 const isRoutine = (m: Record<string, string>, name: string) => (m.source ?? "").replace(/^approved:/, "") === `routine:${name}`;
 
 /** Id of a copy of this routine that is queued or running (so a new run would be redundant), else "".
@@ -33,11 +32,24 @@ export function routineQueued(name: string, host?: string): string {
   for (const s of QUEUED) for (const p of list(P("tasks", s), /^T-.*\.md$/)) {
     const m = readDoc(p).meta;
     if (!isRoutine(m, name) || (host && m.host !== host)) continue;
-    // an old copy parked on something slow (the owner clicking merge) must not starve the routine's other work
-    if ((s === "waiting" || s === "blocked") && Date.now() - Date.parse(m.created ?? "") > PARKED_COPY_MS) continue;
+    // a copy parked on something slow (CI, the owner clicking merge) has finished its pass: the next run must still
+    // pick up new PRs/issues instead of the backlog piling up behind it
+    if (s === "waiting" || s === "blocked") continue;
     return m.id;
   }
   return "";
+}
+
+/** A routine skipped behind a copy no online host can run (parked in the inbox) for 30+ minutes: tell the owner once per copy.
+ *  The skips only reach the journal and the stall supervisor only sees waiting/blocked tasks, so such a copy silences the routine. */
+export function noteStuckRoutine(cfg: Cfg, name: string, id: string, state: Record<string, string>) {
+  const key = `${name}#stuck`, f = P("tasks", "inbox", `${id}.md`);
+  if (state[key] === id || !existsSync(f)) return; // running, waiting and card tasks are progress, not a stuck copy
+  const m = readDoc(f).meta;
+  const mins = Math.floor((Date.now() - Date.parse(m.parked ?? "")) / 60_000);
+  if (!(mins >= 30)) return; // not parked (NaN), or parked only briefly
+  state[key] = id;
+  void notify(`例行任务 ${name} 已经 ${mins} 分钟没有新的一轮：上一次的 ${id} 在等一台满足 ${m.requires} 的在线主机，之后每轮都被跳过。`, cfg, { kind: "notice", ref: id });
 }
 
 /** A newer run of a routine replaces its older unapproved copies: move them to rejected with a note. */
@@ -87,10 +99,10 @@ export async function proposeBatch(cfg: Cfg, host: string) {
   });
   writeDoc(P("decisions", "open", `${id}.md`), {
     id, kind: "proposals", created: now(), notified: now(), host, items: itemIds.join(","),
-    question: "要做哪几项？",
-  }, `## 待确认\n${lines.join("\n")}\n`);
-  await notify([`*${id}* 想做这几件事，请确认：`, ...lines,
-    `回复 \`${id} 1,3\`、\`${id} all\`（全做）或 \`${id} none\`（都不做）`].join("\n"), cfg,
+    question: L("Which of these should go ahead?", "要做哪几项？"),
+  }, L(`## To confirm\n${lines.join("\n")}\n`, `## 待确认\n${lines.join("\n")}\n`));
+  await notify([L(`*${id}* would like to do the following, please confirm:`, `*${id}* 想做这几件事，请确认：`), ...lines,
+    L(`Reply \`${id} 1,3\`, \`${id} all\` (do all) or \`${id} none\` (do none)`, `回复 \`${id} 1,3\`、\`${id} all\`（全做）或 \`${id} none\`（都不做）`)].join("\n"), cfg,
     { kind: "proposals", ref: id, options: ["all", "none", ...lines.map((_, i) => String(i + 1))] });
   journal(host, `${id} asked owner to approve ${items.length} proposed tasks`);
 }

@@ -72,7 +72,7 @@ test("routine dedupe: newer run supersedes proposed copy, queued copy blocks", (
   expect(A.routineQueued("other")).toBe("");
 });
 
-test("routine dedupe: a long-parked copy stops blocking, a fresh one still does", () => {
+test("routine dedupe: parked (waiting/blocked) copies never block the next run", () => {
   const park = (dir: string, id: string, hours: number) =>
     writeDoc(P("tasks", dir, `${id}.md`), { id, source: "routine:parked", created: new Date(Date.now() - hours * 3600_000).toISOString() }, "");
   park("waiting", "T-0101", 7);
@@ -82,7 +82,33 @@ test("routine dedupe: a long-parked copy stops blocking, a fresh one still does"
   expect(A.routineQueued("parked")).toBe("T-0103");
   unlinkSync(P("tasks", "active", "T-0103.md"));
   park("waiting", "T-0104", 1);
-  expect(A.routineQueued("parked")).toBe("T-0104");
+  expect(A.routineQueued("parked")).toBe("");
+});
+
+test("a routine stuck behind a copy no host can run for 30+ minutes notifies the owner once per copy", async () => {
+  const st: Record<string, string> = {};
+  const parked = (id: string, min: number) =>
+    writeDoc(P("tasks", "inbox", `${id}.md`), { id, source: "routine:uptime-watch", created: ago(min + 1), requires: "cli:aws", parked: ago(min) }, "");
+  parked("T-0901", 9);
+  A.noteStuckRoutine(cfg, "uptime-watch", "T-0901", st);
+  expect(sent).toEqual([]); // parked only briefly: skipping it is normal
+  // healthy or deliberate: queued for a free slot, running, waiting on CI or the owner, asking a card
+  task("inbox", "T-0903", "routine:uptime-watch", ago(120));
+  for (const [dir, id] of [["active", "T-0904"], ["waiting", "T-0905"], ["blocked", "T-0906"]]) task(dir, id, "routine:uptime-watch", ago(120));
+  for (const id of ["T-0903", "T-0904", "T-0905", "T-0906"]) A.noteStuckRoutine(cfg, "uptime-watch", id, st);
+  await Bun.sleep(0);
+  expect(sent).toEqual([]);
+  parked("T-0901", 44);
+  A.noteStuckRoutine(cfg, "uptime-watch", "T-0901", st);
+  A.noteStuckRoutine(cfg, "uptime-watch", "T-0901", st);
+  await Bun.sleep(0);
+  expect(sent.length).toBe(1);
+  expect(sent[0]).toContain("uptime-watch");
+  expect(sent[0]).toContain("cli:aws");
+  parked("T-0902", 40); // a different stuck copy is news again
+  A.noteStuckRoutine(cfg, "uptime-watch", "T-0902", st);
+  await Bun.sleep(0);
+  expect(sent.length).toBe(2);
 });
 
 test("read-only routines skip approval at onboarding; others and followups stay gated", () => {
