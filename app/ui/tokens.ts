@@ -28,9 +28,16 @@ export const size = {
   column: 880,
 };
 
-/** Type steps (points), each with its line height: a label never sets its own. */
-export const font = { key: 12, badge: 12, xs: 12, sm: 14, md: 16, lg: 17 } as const;
-export const leading = { key: 16, badge: 16, xs: 16, sm: 20, md: 22, lg: 24 } as const;
+/**
+ * Type steps (points), each with its line height: a label never sets its own. On a touch screen they follow iOS's
+ * Dynamic Type defaults: xs Footnote 13, sm Subheadline 15, md Body 17.
+ */
+export const font = touch
+  ? ({ key: 12, badge: 12, xs: 13, sm: 15, md: 17, lg: 20 } as const)
+  : ({ key: 12, badge: 12, xs: 12, sm: 14, md: 16, lg: 17 } as const);
+export const leading = touch
+  ? ({ key: 16, badge: 16, xs: 18, sm: 20, md: 22, lg: 25 } as const)
+  : ({ key: 16, badge: 16, xs: 16, sm: 20, md: 22, lg: 24 } as const);
 
 /** What moves with a control's size: its height, side padding, gaps, glyph and type. Shared by every control. */
 export const controlMetrics = (sm: boolean) =>
