@@ -684,8 +684,8 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
     for (const t of todo) {
       const v = r[t.meta.id];
       if (!v || !existsSync(t.p)) continue;
-      // the planner may only add what the fleet has: a guessed os:linux on a macOS-only fleet parks the task for good
-      const req = [...new Set([...(t.meta.requires ?? "").split(","), ...fleetCanMeet(String(v.requires ?? ""))].map((x) => x.trim()).filter(Boolean))].join(",");
+      // the planner may only add what one machine can meet together with the task's own: a guessed os:linux on a macOS-only fleet parks the task for good
+      const req = [...new Set([...(t.meta.requires ?? "").split(","), ...fleetCanMeet(t.meta, String(v.requires ?? ""))].map((x) => x.trim()).filter(Boolean))].join(",");
       const pinned = t.meta.cli && t.meta.cli !== "auto";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
       writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req, ...(pinned ? {} : { cli: v.cli === "codex" ? "codex" : "claude" }),
