@@ -12,7 +12,7 @@ if [[ "$TARGET" == linux ]]; then
   packages+=(libgtk-4-1 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 xvfb xauth)
 fi
 missing=()
-for package in "${packages[@]}"; do
+for package in ${packages[@]+"${packages[@]}"}; do
   if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then
     missing+=("$package")
   fi
