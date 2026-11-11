@@ -3,7 +3,7 @@ import { computed, Scroll, signal, Text, untracked, View } from "nsh";
 import { L } from "./i18n";
 import { isAvailable as hasWindow, titleBar } from "nsh/desktop";
 import { Button, colors, Icon, IconButton, type IconName, size } from "./ui";
-import { surfaceEdge } from "./kit";
+import { releaseKeyboard, surfaceEdge } from "./kit";
 import { Rich } from "./rich-text";
 import { docBody, type DocRef, retryDoc } from "./docs";
 
@@ -37,7 +37,7 @@ export function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; 
         </If>
         {btn({ id: "doc-close", icon: "close", label: L("Close reader", "关闭阅读栏"), onPress: props.onClose })}
       </View>
-      <Scroll style={{ flex: 1 }}>
+      <Scroll style={{ flex: 1 }} onTouchStartCapture={releaseKeyboard}>
         <View selectable style={{ width: "100%", maxWidth: 760, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 28 : 20, paddingTop: 28, paddingBottom: 48 }}>
           <If when={body().text !== null} else={
             <View style={{ gap: 10, alignItems: "flex-start" }}>

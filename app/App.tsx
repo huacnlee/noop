@@ -40,7 +40,7 @@ import { Toast, ToastStack, Button as BaseButton, ContextMenu, Menu, MenuItem, S
 import { isAvailable as hasWindow, titleBar, currentWindow } from "nsh/desktop";
 import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, installAndRestart, restartToPackage, runningPackage } from "nsh/updater";
 import { SettingsToast } from "./settings-toast";
-import { Avatar, displayName, Field, linkColor, MONO, pickLang, STATE_OF, surfaceEdge, systemHeader } from "./kit";
+import { Avatar, displayName, Field, linkColor, MONO, pickLang, releaseKeyboard, STATE_OF, surfaceEdge, systemHeader } from "./kit";
 import { createHub, type Hub, hostCall, ipBlocked, KEYS, loadConfig, type Boot, type Config } from "./connection";
 import { bindMarkdown, chipText, firstLine, reposIn, Rich } from "./rich-text";
 import { clearDocCache, type DocRef, reading, readerAt } from "./docs";
@@ -89,6 +89,7 @@ import {
   MenuPanel,
   PopIn,
   menuBox,
+  menuEnter,
   menuRowHover,
   SidebarRow,
   PageHeader,
@@ -218,7 +219,7 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
       {/* right-click (long press on touch) copies the image itself */}
       <ContextMenu
         margin={8}
-        popupStyle={menuBox()}
+        popupStyle={menuBox()} popupStartingStyle={menuEnter()}
         trigger={
           <View accessibilityLabel={L("View full size", "查看大图")} onPress={() => zoomed.set(true)} style={{ cursor: "pointer" }}>
             <Image
@@ -273,7 +274,6 @@ function DocAttachment(props: { src: string; name: string }) {
     </View>
   );
 }
-
 
 // ---------------------------------------------------------------- timeline
 
@@ -1016,6 +1016,7 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
       ref={(r) => { page = r; }}
       scrollEventThrottle={100}
       onScroll={(ev) => { const passed = ev.offset.y > TASK_HEAD; if (passed !== untracked(headPassed)) headPassed.set(passed); }}
+      onTouchStartCapture={releaseKeyboard}
       style={{ flex: 1 }}
       contentStyle={pageContent}
     >
@@ -1548,8 +1549,9 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
       onOpenChange={(open) => { if (open) Keyboard.dismiss(); }}
       offset={6}
       margin={8}
-      // On a desktop the surface rides on a `PopIn` inside the bare popup, so it comes in with a short pop each opening.
-      popupStyle={touch ? surface() : menuBox()}
+      // On a desktop the popup box carries the glass and its shadow, which a surface inside it would have clipped.
+      popupStyle={touch ? surface() : menuBox(surface())}
+      popupStartingStyle={touch ? undefined : menuEnter("top")}
       backdropClass="bg-scrim"
       trigger={
         <View
@@ -1565,7 +1567,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
         </View>
       }
     >
-      <PopIn side="top" style={touch ? {} : surface()}>
+      <View>
       <View style={{ ...(touch ? {} : { minWidth: 254 }), flexDirection: "row", alignItems: "center", gap: touch ? 12 : 10, paddingHorizontal: m.padX, paddingTop: touch ? 12 : 6, paddingBottom: touch ? 24 : 7 }}>
         {avatar(m.avatar, "user-menu-avatar")}
         <View style={{ flex: 1, minWidth: 0, gap: touch ? 4 : 1 }}>
@@ -1593,7 +1595,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
             <Icon name="chevron" size={touch ? 14 : 12} tint={colors.faint} />
           </View>}
           back={<View testID="menu-language-back" activeStyle={hovered()} style={row()}><Icon name="back" size={m.icon} tint={colors.muted} />{label(L("Back", "返回"))}</View>}>
-          <PopIn side="right" style={touch ? {} : surface()}>
+          <PopIn side="right">
             <Each of={LANGS}>{(l) => radio(l().label, () => lang() === l().id, () => pickLang(l().id), `menu-lang-${l().id}`)}</Each>
           </PopIn>
         </Submenu>
@@ -1606,7 +1608,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
           {appearance(true, L("Dark", "深色"), "moon")}
         </View>
       </View>
-      </PopIn>
+      </View>
     </Menu>
   );
 }

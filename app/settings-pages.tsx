@@ -9,7 +9,7 @@ import * as nshUpdater from "nsh/updater";
 import { L, lang, LANGS } from "./i18n";
 import {
   alpha, Badge, Button, cardEdge, colors, corner, focusRing, hovered, Icon, IconButton, Indicator, isDark, MenuPanel, menuBox,
-  menuRowHover, NumberField, PageHeader, pageContent, radius, Separator, SettingsChoices, SettingsGroup, SettingsItem, size,
+  menuEnter, menuRowHover, NumberField, PageHeader, pageContent, radius, Separator, SettingsChoices, SettingsGroup, SettingsItem, size,
   Spinner, Switch, tints, touch,
 } from "./ui";
 import {
@@ -109,7 +109,7 @@ function Dropdown(props: { label: string; value: string; options: DropdownOption
       align="end"
       offset={6}
       margin={8}
-      popupStyle={menuBox()}
+      popupStyle={menuBox()} popupStartingStyle={menuEnter()}
       trigger={
         <View
           role="button"

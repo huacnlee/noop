@@ -1,7 +1,7 @@
 // The app's small shared pieces: names, the avatar, task states, a text field. Imported by the
 // chat (App.tsx) and by the interfaces loaded later (settings, the report reader, ...), never importing either.
 import { alpha, colors, corner, statusColor } from "./ui";
-import { Image, platform, signal, Storage, Text, token, View } from "nsh";
+import { Image, Keyboard, platform, signal, Storage, Text, token, View } from "nsh";
 import { Input } from "nsh/base";
 import { L, lang, LANG_KEY } from "./i18n";
 import { agentDisplayName, avatarOf } from "./avatars";
@@ -13,6 +13,13 @@ export const displayName = (from: string): string => agentDisplayName(from, lang
 /** iOS and Android draw the pages' headers (title, back, swipe back); the desktops and the web show the app's. */
 export const systemHeader = platform.os === "ios" || platform.os === "android";
 export const MONO = "monospace";
+
+/**
+ * macOS sends Copy to the input that has the keyboard, so with a box still focused, text selected on the page above it
+ * cannot be copied (NSH before #1410). A press on a page with no input of its own (a task's conversation, the reader)
+ * gives the keyboard back to the window, as the main timeline does for its composer.
+ */
+export const releaseKeyboard = () => { if (platform.os === "macos") Keyboard.dismiss(); };
 
 export function pickLang(id: string) {
   if (id !== "en" && id !== "zh") return;
