@@ -4,6 +4,7 @@ import { TextView, type MarkdownExtension, type TextViewBlock, type TextViewCust
 import { L } from "./i18n";
 import { alpha, colors, corner, size } from "./ui";
 import { linkColor, MONO, STATE_OF } from "./kit";
+import { hubMarkdown } from "./markdown";
 
 /** Opens a task's page from a T-0000 in any text (set by the channel). */
 let taskLink: (id: string) => void = () => {};
@@ -154,18 +155,6 @@ function linkRepoRefs(text: string, context = ""): string {
   ); }).join("");
 }
 
-/** Hub text keeps its line breaks: single newlines become hard breaks, outside code fences. */
-function hubMarkdown(text: string): string {
-  return text
-    .split(/(^```[\s\S]*?^```)/m)
-    .map((part, i) => (i % 2 ? part : part
-      // single newlines are hard breaks, except around list items (a "\\" there shows up literally)
-      .replace(/([^\n])\n(?!\n|\s*(?:[-*+]|\d+[.)])\s)/g, (m0, c, off, all) => /^\s*(?:[-*+]|\d+[.)])\s/.test(all.slice(all.lastIndexOf("\n", off) + 1, off + 1)) ? `${c}\n` : `${c}\\\n`)
-      // Bare URLs stop at CJK / full-width punctuation and spaces ("pull/1：让" links pull/1 only).
-      .replace(/(?<![(<\[`])\bhttps?:\/\/[^\s<>()\[\]`\u3000-\u303f\uff00-\uffef\u2018-\u201f\u4e00-\u9fff]+[^\s<>()\[\]`.,;:!?'"\u3000-\u303f\uff00-\uffef\u2018-\u201f\u4e00-\u9fff]/g, "<$&>")))
-    .join("");
-}
-
 /** Texts inside a pressable chip: a pointer, not the I-beam selectable texts force (per view on Linux). */
 export const chipText = { cursor: "pointer", userSelect: "none" } as const;
 /** A message's first line, without markdown marks, for a one-line quote. */
@@ -199,13 +188,14 @@ function Custom(props: { node: TextViewCustomNode; small: boolean }) {
 }
 
 /** Selectable message Markdown. */
-export function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?: string; scale?: number }) {
+export function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?: string; scale?: number; report?: boolean }) {
   const small = !!(props.muted || props.quiet);
   const k = () => props.scale ?? 1;
   const fontSize = () => (props.quiet ? 13 : props.muted ? size.small : size.text) * k();
   const lineHeight = () => (props.quiet ? 19 : small ? 21 : size.line) * k();
   const doc = () => {
-    const d = TextView.parse(hubMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, EXTENSIONS);
+    // Reports preserve identifiers as text; chat-only chips can replace a heading prefix with an invisible attachment.
+    const d = TextView.parse(hubMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, props.report ? [] : EXTENSIONS);
     return { ...d, blocks: ghBlocks(d.blocks) };
   };
   return (

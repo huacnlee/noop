@@ -47,7 +47,7 @@ export function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; 
               </If>
             </View>
           }>
-            <Rich text={body().text ?? ""} scale={DOC_SCALES[step()]} />
+            <Rich text={body().text ?? ""} scale={DOC_SCALES[step()]} report />
           </If>
         </View>
       </Scroll>
