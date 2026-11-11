@@ -38,7 +38,8 @@ import {
   windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
-import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
+import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuButton, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type MenuButtonItem, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
+import { SegmentedControl } from "nsh/mobile";
 import { isAvailable as hasWindow, titleBar, currentWindow } from "nsh/desktop";
 import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, installAndRestart, restartToPackage, runningPackage } from "nsh/updater";
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
@@ -60,8 +61,6 @@ import {
   avatarInitials,
   colors,
   focusRing,
-  iosGlass,
-  menuGlass,
   hovered,
   Icon,
   type IconName,
@@ -2159,19 +2158,13 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
   const account = () => email().split("@")[0] ?? "";
   // A pointer gets a compact popup at the trigger; a finger gets the sheet at the bottom with rows it can hit.
   const touch = platform.os === "ios" || platform.os === "android";
-  /**
-   * iOS drops the custom account card and grouped fills: plain rows and separators on the bare glass. It is still NSH's
-   * drawn Menu: NSH shows a system menu (`Menu.popup`) only on the desktops, and has no UIMenu for a view on iOS.
-   */
+  /** iOS shows the system's own pull-down menu (`MenuButton`'s UIMenu) instead of the drawn one below. */
   const ios = platform.os === "ios";
   const m = touch
     ? { row: 52, padX: 16, gap: 12, icon: 20, label: 16, value: 14, avatar: 44, name: 20, mail: 14, seg: 44, segH: 44, sepX: 12 }
     : { row: 30, padX: 8, gap: 10, icon: 15, label: 13.5, value: 13, avatar: 30, name: 13.5, mail: 12, seg: 28, segH: 22, sepX: 8 };
   const sheet = (): ViewStyle => ({ left: 12, right: 12, bottom: Math.max(12, safeArea().bottom), padding: 12 });
-  const surface = (): ViewStyle => platform.os === "ios"
-    // iOS: the sheet is Liquid Glass (a blurred, nearly opaque fallback before iOS 26), its groups quiet fills on it.
-    ? { ...menuGlass(colors.raised, corner.sheet), ...sheet() }
-    : touch
+  const surface = (): ViewStyle => touch
     // Android: opaque, as the sheet sits over the sidebar's own rows.
     ? { backgroundColor: colors.raised, borderRadius: corner.sheet, borderCurve: "continuous", boxShadow: "0 10px 40px rgba(0,0,0,0.18)", ...sheet() }
     // No minWidth here: the language submenu takes this same style and should fit its rows; the menu gets its width from its header.
@@ -2180,8 +2173,8 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
   const label = (text: string) => <Text style={{ flex: 1, minWidth: 0, fontSize: m.label, color: colors.text, ...(touch ? {} : { numberOfLines: 1 }) }}>{text}</Text>;
   const lead = (name: IconName) => <Icon name={name} size={m.icon} tint={colors.muted} />;
   const sep = () => <MenuSep />;
-  /** A group of rows on the sheet: none on iOS, whose rows sit on the glass as a menu's do; the surface on Android. */
-  const group = () => (ios ? "transparent" : colors.surface);
+  /** A group of rows on Android's sheet. */
+  const group = () => colors.surface;
   const initials = () => avatarInitials(account());
   /** The account's identity: its initials on a soft tint of its own stable hue, with a hairline of the same hue. */
   const avatar = (box: number, testID?: string) => (
@@ -2190,14 +2183,8 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
       <Text style={{ fontSize: Math.round(box * (initials().length > 1 ? 0.38 : 0.44)), fontWeight: "600", color: avatarIdentity(account() || "?").foreground }}>{initials()}</Text>
     </View>
   );
-  /**
-   * The current appearance's segment: on iOS 26 the system's Liquid Glass material (no fill, which iOS draws over the
-   * glass, and no shadow: the glass has its own edge); a raised field elsewhere. NSH has no UISegmentedControl, so the
-   * control itself is drawn rows; only its thumb is the native material.
-   */
-  const selectedSegment = (): ViewStyle => iosGlass
-    ? { backgroundColor: "transparent", glassEffect: "regular", backdropFilter: "blur(20px)" }
-    : { backgroundColor: colors.field, boxShadow: "0 1px 2px rgba(0,0,0,0.14)" };
+  /** The current appearance's segment: a raised field (iOS shows the system menu's checks instead). */
+  const selectedSegment = (): ViewStyle => ({ backgroundColor: colors.field, boxShadow: "0 1px 2px rgba(0,0,0,0.14)" });
   /** One of the two appearances, as a segment whose raised thumb marks the current one. */
   const appearance = (dark: boolean, title: string, icon: IconName) => (
     <MenuItem testID={dark ? "theme-dark" : "theme-light"} accessibilityLabel={title}
@@ -2220,6 +2207,36 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
       </View>
     </MenuItem>
   );
+  const menuLabel = () => L("Account menu", "用户菜单");
+  const triggerStyle = (): ViewStyle => ({ width: "100%", flexDirection: "row", alignItems: "center", gap: 8, minHeight: touch ? 44 : 40, paddingLeft: 8, paddingRight: 10, borderRadius: radius.control, borderCurve: "continuous" });
+  const triggerContent = () => <>
+    {avatar(touch ? 28 : 24, "user-avatar")}
+    <Text testID="user-account" style={{ flex: 1, fontSize: 13, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
+    <Icon name="chevron-up" size={12} tint={colors.faint} />
+  </>;
+  if (ios) {
+    /** The system menu's rows, as data: the same actions, language and appearance as the drawn menu's. */
+    const items = (): MenuButtonItem[] => [
+      { id: "mark-all-read", label: L("Mark all as read", "全部已读"), icon: "checkmark.circle", disabled: !props.reads.main().length },
+      { id: "settings", label: L("Settings…", "设置…"), icon: "gearshape" },
+      { id: "", label: L("Language", "语言"), icon: "globe", items: LANGS.map((l) => ({ id: `lang:${l.id}`, label: l.label, checked: lang() === l.id })) },
+      { id: "", label: L("Appearance", "外观"), inline: true, items: [
+        { id: "theme-light", label: L("Light", "浅色"), icon: "sun.max", checked: !isDark() },
+        { id: "theme-dark", label: L("Dark", "深色"), icon: "moon", checked: isDark() },
+      ] },
+    ];
+    const select = (id: string) => {
+      if (id === "mark-all-read") props.reads.all();
+      else if (id === "settings") props.onSettings();
+      else if (id.startsWith("lang:")) pickLang(id.slice("lang:".length));
+      else if ((id === "theme-dark") !== isDark() && id.startsWith("theme-")) toggleTheme();
+    };
+    return (
+      <MenuButton testID="user-menu" accessibilityLabel={menuLabel()} title={email()} items={items()} onSelect={({ id }) => select(id)} style={triggerStyle()}>
+        {triggerContent()}
+      </MenuButton>
+    );
+  }
   return (
     <Menu
       align="start"
@@ -2232,22 +2249,14 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
       popupStartingStyle={touch ? undefined : menuEnter("top")}
       backdropClass="bg-scrim"
       trigger={
-        <View
-          role="button"
-          testID="user-menu"
-          accessibilityLabel={L("Account menu", "用户菜单")}
-          hoverStyle={hovered()}
-          style={{ width: "100%", flexDirection: "row", alignItems: "center", gap: 8, minHeight: touch ? 44 : 40, paddingLeft: 8, paddingRight: 10, borderRadius: radius.control, borderCurve: "continuous" }}
-        >
-          {avatar(touch ? 28 : 24, "user-avatar")}
-          <Text testID="user-account" style={{ flex: 1, fontSize: 13, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
-          <Icon name="chevron-up" size={12} tint={colors.faint} />
+        <View role="button" testID="user-menu" accessibilityLabel={menuLabel()} hoverStyle={hovered()} style={triggerStyle()}>
+          {triggerContent()}
         </View>
       }
     >
       <View>
-      <View style={{ ...(touch ? {} : { minWidth: 254 }), flexDirection: "row", alignItems: "center", gap: touch ? 12 : 10, paddingHorizontal: m.padX, paddingTop: touch ? 12 : 6, paddingBottom: ios ? 12 : touch ? 24 : 7 }}>
-        <If when={!ios}>{avatar(m.avatar, "user-menu-avatar")}</If>
+      <View style={{ ...(touch ? {} : { minWidth: 254 }), flexDirection: "row", alignItems: "center", gap: touch ? 12 : 10, paddingHorizontal: m.padX, paddingTop: touch ? 12 : 6, paddingBottom: touch ? 24 : 7 }}>
+        {avatar(m.avatar, "user-menu-avatar")}
         <View style={{ flex: 1, minWidth: 0, gap: touch ? 4 : 1 }}>
           <Text style={{ fontSize: m.name, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
           <If when={email()}>
@@ -2255,7 +2264,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
           </If>
         </View>
       </View>
-      <If when={!touch || ios}>{sep()}</If>
+      <If when={!touch}>{sep()}</If>
       <View style={touch ? { backgroundColor: group(), borderRadius: 12, borderCurve: "continuous" } : {}}>
         <MenuItem testID="mark-all-read" disabled={!props.reads.main().length} onSelect={props.reads.all} hoverStyle={menuRowHover()} activeStyle={menuRowHover()} disabledStyle={{ opacity: 0.4 }} style={row()}>
           {lead("check")}{label(L("Mark all as read", "全部已读"))}
@@ -2278,8 +2287,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
           </PopIn>
         </Submenu>
       </View>
-      <If when={ios}>{sep()}</If>
-      <View style={touch ? { gap: 8, paddingTop: ios ? 8 : 16, paddingHorizontal: 4 } : { ...row(), height: 34 }}>
+      <View style={touch ? { gap: 8, paddingTop: 16, paddingHorizontal: 4 } : { ...row(), height: 34 }}>
         <If when={!touch}>{lead(isDark() ? "moon" : "sun")}</If>
         <Text style={{ ...(touch ? { paddingHorizontal: 12 } : { flex: 1 }), fontSize: touch ? 14 : m.label, color: touch ? colors.muted : colors.text }}>{L("Appearance", "外观")}</Text>
         <View style={{ flexDirection: "row", gap: touch ? 4 : 2, padding: touch ? 4 : 2, borderRadius: touch ? 12 : 8, borderCurve: "continuous", backgroundColor: alpha(colors.text, 0.07) }}>
@@ -3312,6 +3320,17 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       <Section title={L("Language", "语言")}>
         <LangChoices />
       </Section>
+      <If when={platform.os === "ios"}>
+        {/* iOS: the system's segmented control (Liquid Glass on iOS 26); the account menu has the same choice as checks. */}
+        <Section title={L("Appearance", "外观")}>
+          <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+            <SegmentedControl testID="settings-appearance"
+              items={[{ title: L("Light", "浅色") }, { title: L("Dark", "深色") }]}
+              selectedIndex={isDark() ? 1 : 0}
+              onChange={({ index }) => { if ((index === 1) !== isDark()) toggleTheme(); }} />
+          </View>
+        </Section>
+      </If>
       <Section title={L("Memory", "记忆")} hint={L("The rules the team works by, your preferences, member profiles and past decisions. Read-only.", "团队做事依据的规则、你的偏好、成员档案和决策先例。只读。")}>
         <SetRow first label={L("Rules & memory", "规则与记忆")} chevron onPress={() => props.onOpen({ name: "rules" })} testID="settings-rules" />
       </Section>
