@@ -20,7 +20,7 @@ import {
 import { shellLine, type ShellInfo } from "./update";
 import { CLIENT_VERSION } from "./version";
 import { Avatar, displayName, Field, MONO, pickLang, surfaceEdge } from "./kit";
-import { Rich } from "./markdown";
+import { Rich } from "./rich-text";
 import type { Hub } from "./connection";
 import { type Push, systemNotifications } from "./push";
 import { type Settings, SETTINGS_TABS, type SettingsTab } from "./settings-state";

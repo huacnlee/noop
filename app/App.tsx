@@ -42,7 +42,7 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 import { SettingsToast } from "./settings-toast";
 import { Avatar, displayName, Field, linkColor, MONO, pickLang, STATE_OF, surfaceEdge, systemHeader } from "./kit";
 import { createHub, type Hub, hostCall, ipBlocked, KEYS, loadConfig, type Boot, type Config } from "./connection";
-import { bindMarkdown, chipText, firstLine, reposIn, Rich } from "./markdown";
+import { bindMarkdown, chipText, firstLine, reposIn, Rich } from "./rich-text";
 import { clearDocCache, type DocRef, reading, readerAt } from "./docs";
 import { clearNotification, closeNotification, createPush, setBadge, showing, systemNotifications } from "./push";
 import { createSettings } from "./settings-state";

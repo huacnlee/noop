@@ -4,7 +4,7 @@ import { L } from "./i18n";
 import { isAvailable as hasWindow, titleBar } from "nsh/desktop";
 import { Button, colors, Icon, IconButton, type IconName, size } from "./ui";
 import { surfaceEdge } from "./kit";
-import { Rich } from "./markdown";
+import { Rich } from "./rich-text";
 import { docBody, type DocRef, retryDoc } from "./docs";
 
 const DOC_SCALES = [0.875, 1, 1.125, 1.25, 1.4];
