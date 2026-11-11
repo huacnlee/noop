@@ -18,15 +18,28 @@ for package in ${packages[@]+"${packages[@]}"}; do
   fi
 done
 if (( ${#missing[@]} )); then
-  # Hosted runners' mirror lists can select an unavailable Azure endpoint.
-  # Use Ubuntu's canonical HTTPS archive directly, preserving suites and keys.
+  # Probe signed Ubuntu archives before apt's per-suite retries. Some runners
+  # cannot resolve Ubuntu's domains even while other HTTPS hosts work.
   if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+    . /etc/os-release
+    archive=''
+    for candidate in https://archive.ubuntu.com/ubuntu https://mirrors.edge.kernel.org/ubuntu; do
+      if curl --fail --silent --show-error --location --connect-timeout 5 --max-time 10 \
+        --output /dev/null "$candidate/dists/$VERSION_CODENAME/InRelease"; then
+        archive="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$archive" ]]; then
+      echo 'No Ubuntu archive reachable; refusing to use stale package indexes.' >&2
+      exit 1
+    fi
     for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
       [[ -f "$source" ]] || continue
+      # Keep suites and Signed-By unchanged: apt still verifies Ubuntu signatures.
       sudo sed -i -E \
-        -e 's|mirror\+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-        -e 's|mirror\+file:/etc/apt/apt-mirrors-security.txt|https://security.ubuntu.com/ubuntu|g' \
-        -e 's|http[s]?://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e "s|mirror\+file:/etc/apt/apt-mirrors(-security)?.txt|$archive|g" \
+        -e "s@http[s]?://(azure.archive|archive|security).ubuntu.com/ubuntu@$archive@g" \
         "$source"
     done
   fi
