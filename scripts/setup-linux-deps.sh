@@ -44,5 +44,13 @@ if (( ${#missing[@]} )); then
     done
   fi
   sudo apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-  sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends "${missing[@]}"
+  # Rebuild the package view from the refreshed indexes rather than reusing a
+  # runner image's binary cache after switching archive URLs.
+  if ! sudo apt-get -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= \
+    -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+    install -y --no-install-recommends "${missing[@]}"; then
+    apt-cache -o Dir::Cache::pkgcache= policy "${missing[@]}"
+    apt-get indextargets --format '$(IDENTIFIER) $(ARCHITECTURE) $(COMPONENT) $(FILENAME)'
+    exit 1
+  fi
 fi
