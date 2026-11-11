@@ -9,9 +9,10 @@ import * as nshUpdater from "nsh/updater";
 import { L, lang, LANGS } from "./i18n";
 import {
   alpha, Badge, Button, cardEdge, colors, corner, focusRing, hovered, Icon, IconButton, Indicator, isDark, MenuPanel, menuBox,
-  menuEnter, menuRowHover, NumberField, PageHeader, pageContent, radius, Separator, SettingsChoices, SettingsGroup, SettingsItem, size,
+  menuEnter, menuRowHover, PageHeader, pageContent, radius, Separator, SettingsChoices, SettingsGroup, SettingsItem, size,
   Spinner, Switch, tints, touch,
 } from "./ui";
+import { NumberField } from "./ui/number-field";
 import {
   autonomyLabel, BUILTIN_COMMANDS, cliKey, cliLabel, type Command, type DataFile, everyLabel, groupRules, intervalsWith,
   MEDIA_DAYS, mediaDaysOf, NOTIFY_KINDS, notifyPatch, type NotifyPrefs, notifyPrefsOf, patches, QUIET_PRESETS, quietKey,
