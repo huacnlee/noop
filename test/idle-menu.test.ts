@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { DATA, P, list, readDoc, writeDoc } from "../src/core";
 import { maybeProposeNext } from "../src/cli";
 
-const dirs = ["tasks/inbox", "tasks/active", "decisions/open", "journal"];
+const dirs = ["tasks/inbox", "tasks/active", "tasks/blocked", "decisions/open", "journal"];
 const cfg = { idle: { after_minutes: 20, cooldown_minutes: 180 } };
 const now = Date.now();
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
@@ -44,6 +44,20 @@ test("cooldown expiry refreshes the latest menu by time, ignoring newer non-menu
     expect(task.body).toContain("An earlier menu D-F0004 is still unanswered");
     expect(task.body).not.toContain("An earlier menu D-F0014");
   } finally { clock.mockRestore(); }
+});
+
+test("a menu refreshed in place restarts the cooldown instead of spawning a duplicate task", () => {
+  writeDoc(P("decisions/open", "D-F0005.md"), { id: "D-F0005", kind: "menu", created: ago(200), refreshed: ago(30) }, "pending");
+  maybeProposeNext(cfg, "test", state());
+  expect(tasks()).toEqual([]);
+});
+
+test("one unanswered menu at a time: a menu task parked on the open card is not re-asked", () => {
+  menu("D-F0006", 400);
+  writeDoc(P("tasks/blocked/T-F0009.md"), { id: "T-F0009", kind: "menu", decision: "D-F0006", status: "needs_decision" }, "menu");
+  maybeProposeNext(cfg, "test", state());
+  expect(tasks()).toEqual([]);
+  rmSync(P("tasks/blocked/T-F0009.md"), { force: true });
 });
 
 test("without pending menus the existing 15-minute generation guard still applies", () => {

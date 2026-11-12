@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { P, list, readDoc, writeDoc } from "../src/core";
-import { sweepPlatform, alreadyAsked, cardFor, checkUnrunnable, classify, groupByCause, supervise, type Ctx, type Task } from "../src/supervisor";
+import { sweepPlatform, alreadyAsked, cardFor, checkUnrunnable, classify, decisionState, groupByCause, resolveCard, supervise, type Ctx, type Task } from "../src/supervisor";
 import { closeDecision, ignoreDecision } from "../src/decisions";
 
 const H = 3_600_000;
@@ -93,6 +93,20 @@ test("supervise(): one card per cause, never twice; answering resumes every task
   }
   expect(supervise(cfg, "lb").cards).toBe(0);
   expect(readFileSync(P("journal", `${new Date().toLocaleDateString("sv-SE")}.md`), "utf8")).toContain("supervisor ran");
+});
+
+test("a task parked on a superseded card follows merged_into instead of waiting on a dead card", () => {
+  mkdirSync(P("decisions", "open"), { recursive: true }); mkdirSync(P("decisions", "closed"), { recursive: true });
+  writeDoc(P("decisions", "open", "D-8101.md"), { id: "D-8101", kind: "menu", status: "superseded", merged_into: "D-8102" }, "old");
+  writeDoc(P("decisions", "open", "D-8102.md"), { id: "D-8102", kind: "menu" }, "live");
+  writeDoc(P("decisions", "closed", "D-8103.md"), { id: "D-8103", status: "superseded", superseded_by: "D-8102" }, "old");
+  expect(decisionState("D-8101")).toBe("open");  // the live card, not the dead one in open/
+  expect(decisionState("D-8103")).toBe("open");  // a superseded card in closed/ is not an answer
+  expect(resolveCard("D-8101")?.id).toBe("D-8102"); // the note names the card whose answer actually exists
+  expect(decisionState("D-8104")).toBeUndefined();
+  closeDecision("D-8102", "1", "owner(chat)");
+  expect(decisionState("D-8101")).toBe("closed");
+  for (const id of ["D-8101", "D-8102", "D-8103"]) for (const f of ["open", "closed"]) rmSync(P("decisions", f, `${id}.md`), { force: true });
 });
 
 test("closeDecision on a supervisor card never sets gate_override", () => {

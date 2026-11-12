@@ -561,12 +561,20 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
-  // Re-offer after the latest unanswered menu's cooldown, regardless of filename order.
+  // Re-offer after the latest unanswered menu's cooldown, regardless of filename order. Measured from the last
+  // refresh, not creation: refreshing an unanswered menu in place is the SAME question, and counting from `created`
+  // spawned a duplicate menu task every cycle (T-0008 11:26, T-0009 12:03, T-0010 15:10 on 2026-11-12).
   const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta)
     .filter((m) => m.kind === "menu")
-    .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
+    .sort((a, b) => Date.parse(b.refreshed || b.created) - Date.parse(a.refreshed || a.created))[0];
   const cooldown = (cfg.idle?.cooldown_minutes ?? 180) * 60_000;
-  if (pendingMenu && Date.now() - Date.parse(pendingMenu.created) < cooldown) return;
+  if (pendingMenu && Date.now() - Date.parse(pendingMenu.refreshed || pendingMenu.created) < cooldown) return;
+  // One unanswered menu at a time: a menu task still parked on `pendingMenu` IS the question the owner has not
+  // answered, so another task would only re-ask it. Six such tasks piled up in 25 hours on 2026-11-12 (T-0001,
+  // T-0004, T-0006, T-0008, T-0009, T-0010), all blocked on 8 cards the owner never answered. Answering or
+  // skipping the card resumes the parked task and frees the slot.
+  if (pendingMenu && ["blocked", "waiting"].some((f) => list(P("tasks", f), /^T-.*\.md$/)
+    .some((p) => { const m = readDoc(p).meta; return m.kind === "menu" && m.decision === pendingMenu.id; }))) return;
   if (state.last_menu && Date.now() - Date.parse(state.last_menu) < 15 * 60_000) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
 Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,

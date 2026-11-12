@@ -122,8 +122,22 @@ export function cardFor(cause: string, items: { id: string; title: string; reaso
 }
 
 // ------------------------------------------------------------------ IO: one supervisor pass over the hub
-const decisionState = (id: string) => existsSync(P("decisions", "open", `${id}.md`)) ? "open" as const
-  : existsSync(P("decisions", "closed", `${id}.md`)) ? "closed" as const : undefined;
+/** State of the card a task is parked on. `status: superseded` is NOT an answer: follow `merged_into` /
+ *  `superseded_by` to the live card, otherwise a task merged onto a new card waits on a dead one forever
+ *  (2026-11-12: T-0001/T-0004/T-0006 parked on superseded D-0005, D-0002/D-0005/D-0007 kept in open/). */
+export const resolveCard = (id: string, depth = 0): { id: string; state: "open" | "closed" } | undefined => {
+  const inOpen = P("decisions", "open", `${id}.md`);
+  const inClosed = P("decisions", "closed", `${id}.md`);
+  const path = existsSync(inOpen) ? inOpen : existsSync(inClosed) ? inClosed : "";
+  if (!path) return undefined;
+  const meta = readDoc(path).meta;
+  if (meta.status === "superseded") {
+    const next = (meta.merged_into || meta.superseded_by || "").split(/[,，\s]+/)[0];
+    return next && depth < 5 ? resolveCard(next, depth + 1) : undefined; // 5 links covers any merge chain; stops a cycle
+  }
+  return { id, state: path === inOpen ? "open" : "closed" };
+};
+export const decisionState = (id: string) => resolveCard(id)?.state;
 
 export function supervise(cfg: Cfg, host: string, t = Date.now()) {
   const s = cfg.supervisor ?? {};
@@ -152,7 +166,9 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
       writeDoc(task.path, { ...meta, host: "any", requires: v.requires || undefined }, body ?? "");
       journal(host, L(`🧭 supervisor: ${meta.id} unpinned from a retired host`, `🧭 supervisor: ${meta.id} 去掉已停用主机的绑定`)); counts.reroute++;
     } else if (v.action === "resume") {
-      back({ resumed: "yes", resumes: meta.decision }, `${v.reasons.join("; ")}. Read ${meta.decision}'s answer in decisions/closed and continue accordingly.`);
+      const answered = resolveCard(meta.decision!)?.id ?? meta.decision; // a merged card's answer lives on the live one
+      back({ resumed: "yes", resumes: answered }, `${v.reasons.join("; ")}. Read ${answered}'s answer in decisions/closed and continue accordingly.` +
+        (answered === meta.decision ? "" : ` (${meta.decision} was superseded by ${answered}.)`));
       journal(host, L(`🧭 supervisor: ${meta.id} resumed (${v.reasons.join("; ")})`, `🧭 supervisor: ${meta.id} 继续（${v.reasons.join("；")}）`)); counts.resume++;
     } else if (v.action === "requeue") {
       back({ supervisor_requeued: "yes", resumed: "yes" }, `No waiting_on was recorded. Re-decide: finish what you can, or return "waiting" with a concrete waiting_on and wait_check.`);
@@ -180,6 +196,9 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
     journal(host, `🧭 supervisor: ${CAUSE_LABEL(cause)} → ${did}（${fresh.join(", ")}）`); counts.cards++;
     cards.push({ supervisor_cause: cause, tasks: fresh.join(",") });
   }
-  journal(host, `🧭 supervisor ran: ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, cards ${counts.cards}`);
+  // Only when something happened: 53 no-op "rerouted 0, resumed 0, requeued 0, cards 0" lines in two days
+  // (journal/2026-11-1{2,3}.md) is noise the owner sees and learns nothing from.
+  if (counts.reroute + counts.resume + counts.requeue + counts.cards)
+    journal(host, `🧭 supervisor ran: ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, cards ${counts.cards}`);
   return counts;
 }
