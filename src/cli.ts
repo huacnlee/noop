@@ -30,7 +30,7 @@ import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
-import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 
@@ -672,7 +672,7 @@ async function planNow(cfg: Cfg, host: string) {
   const todo = list(P("tasks", "inbox"), /^T-.*\.md$/).map((p) => ({ p, ...readDoc(p) })).filter((t) => !t.meta.planned).slice(0, 12);
   if (!todo.length) return;
   const hosts = onlineHosts(cfg).map((h) => `- ${h.host}: ${h.caps.join(",")}`).join("\n");
-  // the owner's per-member CLI policy (settings › 成员 → clis.agents): the planner suggests, it may not override it
+  // the owner's per-member CLI policy (Settings → Members → clis.agents): the planner suggests, it may not override it
   const fixed = new Map<string, string[]>();
   for (const t of todo) {
     const a = t.meta.agent || "lead", per = cfg.clis?.agents?.[a];
@@ -696,7 +696,7 @@ ${hosts || "(unknown)"}
 Tasks:
 ${todo.map((t) => `- ${t.meta.id} [agent ${t.meta.agent}${t.meta.requires ? `, already requires ${t.meta.requires}` : ""}]: ${t.meta.title} — ${t.body.slice(0, 500).replace(/\s+/g, " ")}`).join("\n")}
 
-Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude", "difficulty": "normal", "channels": []}, ...}`,
+Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude" or omitted, "difficulty": "normal", "channels": []}, ...}`,
     cfg, P("logs", "runs", `plan-${Date.now()}.log`));
   if (!r || typeof r !== "object") return; // planner unavailable: tasks run unplanned after plan_wait_minutes
   await locked(async () => {
@@ -709,12 +709,12 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
       const per = fixed.get(t.meta.agent || "lead");
       const hint = v.cli === "codex" || v.cli === "claude" ? v.cli : "";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
-      // cli_hint, not cli: a planner suggestion must not look like the owner pinning this task to one CLI
       writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req,
-        ...(pinned || per || !hint ? {} : { cli_hint: hint }),
+        ...cliHintPatch(t.meta, per, v.cli),
         ...(v.difficulty === "hard" ? { difficulty: "hard" } : {}), planned: now() }, t.body);
-      // the log shows what will actually run, not the planner's raw answer (which the owner's policy may overrule)
-      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${allowedClis(readDoc(t.p).meta, cfg).join(" → ")}`);
+      // what will actually run — plus the planner's raw answer when the owner's policy overruled it, so it stays traceable
+      const run = allowedClis(readDoc(t.p).meta, cfg);
+      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${run.join(" → ")}${hint && hint !== run[0] ? ` (planner said ${hint})` : ""}`);
     }
     await _commitPush(`[${host}] plan ${todo.length} tasks`);
   });

@@ -220,18 +220,27 @@ export const which = (bin: string) => Bun.which(bin) !== null;
 
 /** Which CLI runs a task, strongest first:
  *  1. a CLI pinned on the task itself (`noop add --cli …`, a routine's `cli`): the owner naming one for this task;
- *  2. the owner's per-member config (settings › 成员 → `clis.agents`): policy for that agent, not a suggestion;
+ *  2. the owner's per-member config (Settings → Members → `clis.agents`): policy for that agent, not a suggestion;
  *  3. `cli_hint`, what the planner (an AI call, see planInbox) suggested for this task — a hint, so it may not
  *     override policy. It used to be written into `cli`, which made every planned task look owner-pinned;
  *  4. otherwise either CLI, Claude first.
  *  The per-member config is checked before the hint on purpose: an owner who sets a member to codex-only in the app
- *  must not have that silently undone by the planner picking Claude for a "hard" task (T-0032). */
+ *  must not have that silently undone by the planner picking Claude for a task it calls "hard". */
 export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
   if (meta.cli && meta.cli !== "auto") return [meta.cli];
-  const per = cfg.clis?.agents?.[meta.agent || "lead"] as string[] | undefined;
-  if (per?.length) return per;
+  const per = cfg.clis?.agents?.[meta.agent || "lead"];
+  if (Array.isArray(per) && per.length) return per;
   if (meta.cli_hint === "claude" || meta.cli_hint === "codex") return [meta.cli_hint];
   return ["claude", "codex"];
+}
+
+/** What the planner may write back about the CLI: only a `cli_hint`, and only when the task is not pinned and its
+ *  agent has no per-member policy — either of those would overrule the suggestion anyway. */
+export function cliHintPatch(meta: Record<string, string>, per: unknown, suggestion: unknown): Record<string, string> {
+  const pinned = meta.cli && meta.cli !== "auto";
+  const hint = suggestion === "claude" || suggestion === "codex" ? suggestion : "";
+  if (pinned || (Array.isArray(per) && per.length) || !hint) return {};
+  return { cli_hint: hint };
 }
 
 export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null {
