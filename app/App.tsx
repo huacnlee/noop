@@ -2232,9 +2232,11 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
       else if ((id === "theme-dark") !== isDark() && id.startsWith("theme-")) toggleTheme();
     };
     return (
-      <MenuButton testID="user-menu" accessibilityLabel={menuLabel()} title={email()} items={items()} onSelect={({ id }) => select(id)} style={triggerStyle()}>
-        {triggerContent()}
-      </MenuButton>
+      <View onTouchStartCapture={() => Keyboard.dismiss()} style={{ width: "100%" }}>
+        <MenuButton testID="user-menu" accessibilityLabel={menuLabel()} title={email()} items={items()} onSelect={({ id }) => select(id)} style={triggerStyle()}>
+          {triggerContent()}
+        </MenuButton>
+      </View>
     );
   }
   return (
