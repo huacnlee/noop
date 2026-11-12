@@ -456,3 +456,34 @@ test("gate_override relaxes only the approvable gates", () => {
   for (const g of ["--disallowedTools", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(kubectl delete:*)"])
     expect(relaxed).toContain(g);
 });
+
+test("a model-emitted followup without a title cannot abort the run", async () => {
+  const { asText, newTask, readDoc, P } = await import("../src/core");
+  const { followupsOf } = await import("../src/cli");
+  // what the model actually sent when the daemon died: no title, only a body
+  const res = parseResult('```json\n{"status":"delegated","summary":"ok","followups":[{"body":"no title here"},{"title":"real work","agent":"lead"},"a bare string",null,{"title":42}]}\n```');
+  expect(followupsOf(res, 8).map((f) => f.title)).toEqual(["real work", "a bare string", "42"]);
+  expect(followupsOf({ status: "done", summary: "" }, 8)).toEqual([]); // no followups at all
+  expect(followupsOf({ status: "delegated", summary: "", followups: "nope" as any }, 8)).toEqual([]);
+  expect(followupsOf(res, 1).map((f) => f.title)).toEqual(["real work"]); // the depth cap still applies
+  // and the boundary itself no longer throws when a title is missing or not a string
+  for (const title of [undefined, null, 7, { a: 1 }]) expect(newTask(title as any, "")).toMatch(/^T-/);
+  expect(readDoc(P("tasks", "inbox", `${newTask("kept", "")}.md`)).meta.title).toBe("kept");
+  expect(asText({ a: 1 })).toBe('{"a":1}');
+});
+
+test("lessons sent as a bare string are kept, not fatal", async () => {
+  const { readIf, remember, P } = await import("../src/core");
+  const dir = P("agents", "crashguard-test", "memory.md");
+  rmSync(dir, { force: true });
+  expect(() => remember("crashguard-test", "one lesson" as any, "T-1")).not.toThrow();
+  expect(readIf(dir)).toContain("- one lesson _(T-1");
+  rmSync(dir, { force: true });
+  remember("crashguard-test", ["first", "", 5 as any], "T-2");
+  expect(readIf(dir)).toContain("- first _(T-2");
+  expect(readIf(dir)).toContain("- 5 _(T-2");
+  expect(readIf(dir)).not.toContain("-  _("); // blanks dropped
+  rmSync(dir, { force: true });
+  expect(() => remember("crashguard-test", undefined, "T-3")).not.toThrow();
+  expect(() => remember("crashguard-test", { length: 2 } as any, "T-4")).not.toThrow(); // no write, no crash
+});

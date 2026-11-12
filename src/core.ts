@@ -113,11 +113,16 @@ export function readDoc(path: string): Doc {
   return { meta, body: m[2] };
 }
 
+/** Model output is untrusted: a field the spec says is a string can arrive as a number, object or nothing at all.
+ *  Coerce at the door so one malformed field cannot abort a whole run (it used to take the daemon down). */
+export const asText = (v: unknown): string =>
+  typeof v === "string" ? v : v === undefined || v === null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+
 export function writeDoc(path: string, meta: Record<string, string | undefined>, body: string) {
   mkdirSync(dirname(path), { recursive: true });
   const head = Object.entries(meta).filter(([, v]) => v !== undefined)
     .map(([k, v]) => `${k}: ${String(v).replace(/\n/g, " ")}`).join("\n");
-  writeFileSync(path, `---\n${head}\n---\n${body.trimEnd()}\n`);
+  writeFileSync(path, `---\n${head}\n---\n${asText(body).trimEnd()}\n`);
 }
 
 export const list = (dir: string, re = /\.md$/) =>
@@ -204,6 +209,8 @@ export let approvalGate: (source: string) => boolean = () => false;
 export const setApprovalGate = (fn: (source: string) => boolean) => { approvalGate = fn; };
 
 export function newTask(title: string, body = "", o: TaskOpts = {}): string {
+  title = asText(title);
+  body = asText(body);
   const id = nextId("T", P("tasks"));
   // work the owner asked for (directly or via a delegated parent) never needs re-approval
   const folder = o.extra?.origin !== "owner" && approvalGate(o.source ?? "owner") ? "proposed" : "inbox";
@@ -353,10 +360,13 @@ export function journal(host: string, line: string) {
 }
 
 export function remember(agent: string, lessons: string[] | undefined, source: string) {
-  if (!lessons?.length) return;
+  // a single lesson the model sent as a bare string (not the array the spec asks for) is still a lesson
+  const list = (Array.isArray(lessons) ? lessons : typeof lessons === "string" ? [lessons] : [])
+    .map(asText).map((l) => l.trim()).filter(Boolean);
+  if (!list.length) return;
   const f = P("agents", agent, "memory.md");
   if (!existsSync(f)) { mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, `# ${agent} memory\n\n`); }
-  appendFileSync(f, lessons.map((l) => `- ${l} _(${source}, ${today()})_\n`).join(""));
+  appendFileSync(f, list.map((l) => `- ${l} _(${source}, ${today()})_\n`).join(""));
 }
 
 export const readIf = (p: string, tail = 12000) => (existsSync(p) ? readFileSync(p, "utf8").slice(-tail) : "");

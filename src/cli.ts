@@ -5,12 +5,12 @@ import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {
-  type Cfg, P, ROOT, _commitPush, _pull, agentName, chooseCli, claim, commitPush, heartbeat, hostCaps, hostName, journal,
+  type Cfg, P, ROOT, _commitPush, _pull, agentName, asText, chooseCli, claim, commitPush, heartbeat, hostCaps, hostName, journal,
   list, loadConfig, locked, newTask, now, onlineHosts, pickTask, pull, readDoc, remember, writeDoc,
 } from "./core";
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
-import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
+import { STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
@@ -209,7 +209,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   const delegated = res.status === "delegated" && (res.followups?.length ?? 0) > 0;
   const children: string[] = [];
   const chans = [...new Set([...(meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(res.channels)])].join(",") || undefined;
-  for (const f of (res.followups ?? []).slice(0, depth > maxDepth ? 0 : 8)) {
+  for (const f of followupsOf(res, depth > maxDepth ? 0 : 8)) {
     const id = newTask(f.title, f.body ?? "", { agent: f.agent ?? agent, priority: f.priority ?? meta.priority, repo: f.repo, requires: f.requires, host: f.host,
       source: `followup:${meta.id}`, extra: { depth: String(depth), ...((f as any).difficulty === "hard" ? { difficulty: "hard" } : {}), ...(ownerWork ? { origin: "owner" } : {}), ...(delegated ? { parent: meta.id } : {}), ...(meta.origin_channel ? { origin_channel: meta.origin_channel } : {}), ...(chans ? { channels: resolveChannels(chans.split(",")).join(",") } : {}) } });
     children.push(id);
@@ -261,6 +261,18 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   await _commitPush(`[${host}] ${res.status} ${meta.id}: ${meta.title}`);
   });
 }
+
+/** The followups this run may spawn: the array the result spec asks for, minus entries with no usable title.
+ *  The model writes this JSON, so an entry can be a bare string, `null`, or a body with no title at all — spawning it
+ *  would write a task whose title is undefined (and used to abort the whole run inside writeDoc). */
+export const followupsOf = (res: ReturnType<typeof parseResult>, limit: number): NonNullable<Result["followups"]> => {
+  const raw = res.followups;
+  return (Array.isArray(raw) ? raw : [])
+    .map((f: any) => (typeof f === "string" ? { title: f } : f && typeof f === "object" ? f : null))
+    .filter((f: any): f is NonNullable<Result["followups"]>[number] => asText(f?.title).trim() !== "")
+    .slice(0, limit)
+    .map((f) => ({ ...f, title: asText(f.title).trim() }));
+};
 
 const FOLLOW_UP = "## Owner follow-up";
 
