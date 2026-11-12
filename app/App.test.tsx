@@ -1418,6 +1418,23 @@ describe("notifications", () => {
     await app.waitUntil(() => app.host.calls().some((c) => c.name === "clearNotifications" && (c.data as { ref: string }).ref === "D-0001"));
   });
 
+  test("a card the hub has already closed leaves the badge, though its ask stays in the feed", async () => {
+    // D-0001 answered from the chat: the brain's answer_decision posts a notice, not an owner message naming the id, so
+    // the feed still reads it pending while the hub has no card open. Counting the feed kept the badge on "1" for days
+    // (D-0004); what counts is the hub's open list, the one the sidebar shows.
+    const app = await open("./App.tsx", {
+      storage: { ...STORAGE, "hub.notifyAsked": "1" },
+      host: { handlers: browser(device()) },
+      network: { ...server(newLog()), [`GET ${URL}/api/status`]: { body: { ...status, decisions: [] } } },
+      width: 1200, height: 800, platform: "macos",
+    });
+    await app.waitFor("text:/要不要升级依赖/"); // the ask is on screen: the feed did load
+    await app.waitUntil(() => {
+      const badge = app.host.calls().filter((c) => c.name === "setBadge");
+      return badge.length > 0 && (badge[badge.length - 1].data as { count: number }).count === 0;
+    });
+  });
+
   test("mark a message unread, the channel's unread count, and mark all as read", async () => {
     const app = await open("./App.tsx", {
       storage: { ...STORAGE, "hub.lastSeen": events[0].ts, "hub.notifyAsked": "1" },

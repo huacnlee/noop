@@ -46,6 +46,7 @@ import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
+import { badgeCount } from "./badge";
 import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc } from "./files";
 import { hubMarkdown } from "./markdown";
@@ -3940,6 +3941,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     return out;
   });
   const pending = computed(() => hub.events().filter((e) => isAsk(e) && !answered().has(e.ref!)));
+  /** The badge and the tray count the hub's open cards, as the sidebar does (see badge.ts). */
+  const waitingCount = computed(() => badgeCount(hub.status(), answered(), pending().length));
   /** The pending ask the keys act on: the one picked (J / K, the sidebar), else the newest. */
   const target = computed(() => {
     const p = pending();
@@ -4316,7 +4319,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   }
   // The app's badge and the page's title count the decisions waiting. iOS needs the permission, so it follows that too.
   effect(() => {
-    const n = pending().length;
+    const n = waitingCount();
     push.info();
     if (hub.loaded()) setBadge(n);
   });
@@ -4410,7 +4413,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     else show({ name: "team" });
   };
   // The tray menu counts the decisions waiting and opens the one the keys act on, or the team settings.
-  effect(() => props.onTray?.({ pending: pending().length, review: () => { const ref = untracked(target); if (ref) pick(ref); }, settings: openTeam }));
+  effect(() => props.onTray?.({ pending: waitingCount(), review: () => { const ref = untracked(target); if (ref) pick(ref); }, settings: openTeam }));
   cleanup(() => props.onTray?.(null));
 
   // Shortcuts. Single keys never fire while typing (`notEditing`).
