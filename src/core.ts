@@ -218,12 +218,19 @@ export function newTask(title: string, body = "", o: TaskOpts = {}): string {
 
 export const which = (bin: string) => Bun.which(bin) !== null;
 
-/** Which CLI runs a task: the owner's per-agent config wins, else what the planner (an AI call, see planInbox) chose.
- *  Unplanned tasks may use either, Claude first. */
+/** Which CLI runs a task, strongest first:
+ *  1. a CLI pinned on the task itself (`noop add --cli …`, a routine's `cli`): the owner naming one for this task;
+ *  2. the owner's per-member config (settings › 成员 → `clis.agents`): policy for that agent, not a suggestion;
+ *  3. `cli_hint`, what the planner (an AI call, see planInbox) suggested for this task — a hint, so it may not
+ *     override policy. It used to be written into `cli`, which made every planned task look owner-pinned;
+ *  4. otherwise either CLI, Claude first.
+ *  The per-member config is checked before the hint on purpose: an owner who sets a member to codex-only in the app
+ *  must not have that silently undone by the planner picking Claude for a "hard" task (T-0032). */
 export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
   if (meta.cli && meta.cli !== "auto") return [meta.cli];
   const per = cfg.clis?.agents?.[meta.agent || "lead"] as string[] | undefined;
-  if (per) return per;
+  if (per?.length) return per;
+  if (meta.cli_hint === "claude" || meta.cli_hint === "codex") return [meta.cli_hint];
   return ["claude", "codex"];
 }
 
