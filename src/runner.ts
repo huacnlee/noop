@@ -283,10 +283,12 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
 export function parseResult(out: string): Result {
   const blocks = [...out.matchAll(/```json\s*(\{[\s\S]*?\})\s*```/g)].map((m) => m[1]).reverse();
   for (const b of blocks) {
-    try {
-      const r = JSON.parse(b);
-      if (r.status) return r;
-    } catch {}
+    for (const text of [b, escapeRawControlChars(b)]) {
+      try {
+        const r = JSON.parse(text);
+        if (r.status) return r;
+      } catch {}
+    }
   }
   // codex (and others) sometimes end the reply with a bare JSON object instead of a fenced block
   const bare = out.match(/\{[\s\S]*\}/);
@@ -297,6 +299,21 @@ export function parseResult(out: string): Result {
     } catch {}
   }
   return { status: "failed", summary: `agent returned no result block. tail: ${out.slice(-300)}` };
+}
+
+/** Models occasionally put a literal line break inside a JSON string. Keep the text, make the block parseable. */
+function escapeRawControlChars(json: string): string {
+  let out = "", inString = false, escaped = false;
+  for (const c of json) {
+    if (escaped) { out += c; escaped = false; continue; }
+    if (c === "\\") { out += c; escaped = true; continue; }
+    if (c === '"') { out += c; inString = !inString; continue; }
+    if (inString && c === "\n") out += "\\n";
+    else if (inString && c === "\r") out += "\\r";
+    else if (inString && c === "\t") out += "\\t";
+    else out += c;
+  }
+  return out;
 }
 
 /** The models that route each owner message, fastest first: a choice made within seconds, not a judgement.

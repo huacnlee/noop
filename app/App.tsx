@@ -60,7 +60,7 @@ import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
 import { badgeCount } from "./badge";
 import { CheckMark } from "./ui/icons";
-import { attachmentName, isDoc } from "./files";
+import { attachmentName, isDoc, isImage } from "./files";
 import { parseHubMarkdown } from "./markdown";
 import { messageTags, taskTagId } from "./message-tags";
 import { type Channel, channelDigest, sortChannels } from "./channels";
@@ -670,12 +670,14 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
   const frame: ViewStyle = { borderRadius: radius.inset, backgroundColor: colors.inset };
   if (isDoc(props.path)) return <DocAttachment src={src} name={attachmentName(props.path)} />;
   if (isVideo(props.path)) return <Video src={src} controls paused style={{ ...frame, borderWidth: 1, borderColor: colors.border, width: "100%", maxWidth: 480, aspectRatio: 16 / 9 }} />;
+  // a log, a patch, a pptx: the image decoder can only fail on it, which reads as an expired image
+  if (!isImage(props.path)) return <FileAttachment src={src} name={attachmentName(props.path)} />;
   // a thumbnail that keeps the timeline readable; press it to see the full image
   const THUMB = 240;
   const size = () => (ratio() >= 1 ? { width: THUMB, height: THUMB / ratio() } : { width: THUMB * ratio(), height: THUMB });
   const gone = signal(false); // past the media retention (or otherwise unavailable)
   // the message's images, which the zoomed view pages through in a loop
-  const images = () => (props.siblings ?? [props.path]).filter((p) => !isDoc(p) && !isVideo(p));
+  const images = () => (props.siblings ?? [props.path]).filter(isImage);
   return (
     <If
       when={!gone()}
@@ -712,6 +714,35 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
         <ImagePager hub={props.hub} paths={images()} start={Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
       </Dialog>
     </If>
+  );
+}
+
+/**
+ * An attachment the client cannot show inline (a log, a patch, a pptx, a pdf): a card that opens the authenticated file
+ * itself, instead of handing it to the image decoder and reporting the load as an expired image.
+ */
+function FileAttachment(props: { src: string; name: string }) {
+  const ext = () => (props.name.match(/\.(\w{1,5})$/)?.[1] ?? "FILE").toUpperCase();
+  return (
+    <View
+      testID="file-attachment"
+      role="button"
+      accessibilityLabel={L(`Open ${props.name}`, `打开 ${props.name}`)}
+      onPress={() => void openUrl(props.src).catch(() => {})}
+      hoverStyle={hovered()}
+      style={{
+        flexDirection: "row", alignItems: "center", gap: 10, width: 344, maxWidth: "100%", padding: 12,
+        borderRadius: radius.inset, borderCurve: "continuous", borderWidth: 1, cursor: "pointer",
+        borderColor: colors.border, backgroundColor: colors.background,
+      }}
+    >
+      <View style={{ width: 40, height: 44, flexShrink: 0, borderRadius: 8, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", gap: 3 }}>
+        <Icon name="document" size={18} tint={colors.muted} />
+        <Text style={{ fontFamily: MONO, fontSize: 8, fontWeight: "600", letterSpacing: 0.5, color: colors.faint }}>{ext()}</Text>
+      </View>
+      <Text style={{ flex: 1, minWidth: 0, fontSize: 14, lineHeight: 19, fontWeight: "600", color: colors.text, numberOfLines: 2 }}>{props.name}</Text>
+      <Icon name="download" size={14} tint={colors.faint} />
+    </View>
   );
 }
 

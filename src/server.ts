@@ -398,13 +398,16 @@ export async function handleOwnerMessage(
   const id = m?.[1] ?? (reply_to && /^[DLP]-[A-Z]?\d{4}$/.test(reply_to) ? reply_to : null);
   // a reply to an agent's message about a task (or a message on its page): it goes to that task, whatever came just before
   const replyTask = !id && reply_to && /^T-\d{4,}$/.test(reply_to) ? reply_to : undefined;
-  if (id) {
-    inbound.push({ id, answer: (m ? m[2] : text).trim(), source: "chat" });
+  const answer = (m ? m[2] : text).trim();
+  // a proposals card takes item numbers, all or none; words ("just the docs one", "1 no 2 yes") go to the brain, which sees the items
+  const words = !!ownerTask && !!id?.startsWith("P-") && !/^(all|none)\b|^[\d\s,，]+$/i.test(answer);
+  if (id && !words) {
+    inbound.push({ id, answer, source: "chat" });
     if (id.startsWith("D-")) lastAnswer = { id, at: Date.now() };
   } else if (ownerTask) {
     // everything else goes to the chat brain: it answers, looks things up, and creates or adjusts work through the tools
-    const answered = !noAmend && !replyTask && lastAnswer && Date.now() - lastAnswer.at < AMEND_MS ? lastAnswer.id : undefined;
-    await ownerTask(text, { reply: replyTask, answered, sentAt: att.sentAt, thread: !!(att.thread && replyTask), ...(att.channel ? { channel: att.channel } : {}) });
+    const answered = !words && !noAmend && !replyTask && lastAnswer && Date.now() - lastAnswer.at < AMEND_MS ? lastAnswer.id : undefined;
+    await ownerTask(words ? `${id} ${answer}` : text, { reply: replyTask, answered, sentAt: att.sentAt, thread: !!(att.thread && replyTask), ...(att.channel ? { channel: att.channel } : {}) });
   }
 }
 

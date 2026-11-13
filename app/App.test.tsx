@@ -936,6 +936,26 @@ describe("images", () => {
     };
   }
 
+  test("a log or a report file is a file card that opens it, not an expired image", async () => {
+    const files = {
+      id: "f1", ts: ts(8), from: "lead@mac", kind: "notice", text: "收口完成",
+      attachments: ["/media/1794484440777-report.md", "/media/1794484440793-verify.log"],
+    };
+    // the app's nsh.json grants openUrl only for https, as the real hub is; a secure hub keeps the press recordable
+    const secure = URL.replace("http:", "https:");
+    const network = Object.fromEntries(
+      Object.entries({ ...hub([], [files]), [`GET ${URL}/media/*`]: { body: "# report" } }).map(([key, value]) => [key.replace(URL, secure), value]),
+    );
+    const app = await open("./App.tsx", { ...desk, storage: { ...STORAGE, "hub.url": secure }, network });
+    await app.waitFor("id:file-attachment");
+    expect(app.count("id:file-attachment")).toBe(1);
+    expect(app.shows("text:verify.log")).toBe(true);
+    expect(app.shows("id:media-gone")).toBe(false);
+    await app.press("id:file-attachment");
+    await app.waitUntil(() => app.openedUrls().length === 1);
+    expect(app.openedUrls()).toEqual([`${secure}/media/1794484440793-verify.log?token=tok`]);
+  });
+
   test("a zoomed image pages through its message's images in a loop", async () => {
     const shots = { id: "i1", ts: ts(8), from: "lead@mac", kind: "notice", text: "截图", attachments: ["/media/1-a.png", "/media/2-b.png"] };
     const app = await open("./App.tsx", { ...desk, network: { ...hub([], [shots]) } });
