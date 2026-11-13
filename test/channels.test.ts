@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { DATA, P, writeDoc } from "../src/core";
 import { channelPrompt, channels, createChannel, resolveChannels, updateChannel } from "../src/channels";
@@ -7,6 +7,8 @@ import { channelsView, slugify, writeOp } from "../cloud/src/tools";
 
 const reset = () => { rmSync(P("channels"), { recursive: true, force: true }); rmSync(P("tasks"), { recursive: true, force: true }); rmSync(P("decisions"), { recursive: true, force: true }); };
 const store = () => localStore({ acts: {}, status: () => ({}), feed: () => [], root: DATA });
+
+afterEach(() => setSystemTime());
 
 test("slugs: ascii names become kebab-case, CJK-only names get a stable id", () => {
   expect(slugify("NSH i18n")).toBe("nsh-i18n");
@@ -37,6 +39,7 @@ test("owner edits: goal and archive; unknown slugs are refused", () => {
 });
 
 test("view: a channel lists its tasks and their cards newest first, and is stale after 7 quiet days", () => {
+  setSystemTime(new Date("2026-11-08T00:00:00Z"));
   reset();
   createChannel("Omamail", "omamail");
   createChannel("Omasend", "omasend");
