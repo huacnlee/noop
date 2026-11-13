@@ -711,7 +711,7 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
         backdropClass="bg-scrim"
         style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
       >
-        <ImagePager urls={images().map((p) => mediaUrl(props.hub.cfg.url, props.hub.cfg.token, p))} start={Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
+        <ImagePager urls={images().map((p) => mediaUrl(props.hub.cfg.url, props.hub.cfg.token, p))} start={() => Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
       </Dialog>
     </If>
   );
@@ -751,8 +751,10 @@ function FileAttachment(props: { src: string; name: string }) {
  * last back to the first; a press on the image closes it. A message's attachments and the composer's own thumbnails
  * both open it, so it takes ready URLs rather than hub paths.
  */
-function ImagePager(props: { urls: string[]; start: number; onClose: () => void }) {
-  const index = signal(props.start);
+function ImagePager(props: { urls: string[]; start: () => number; onClose: () => void }) {
+  const index = signal(props.start());
+  // the viewer stays mounted between openings: follow the image the caller last pressed
+  effect(() => index.set(props.start()));
   const many = props.urls.length > 1;
   const side = (left: boolean): ViewStyle => ({
     position: "absolute", top: "50%", marginTop: -20, [left ? "left" : "right"]: 8, width: 40, height: 40, borderRadius: 20,
@@ -4879,7 +4881,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                       backdropClass="bg-scrim"
                       style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
                     >
-                      <ImagePager urls={attachments().map((a) => a.preview)} start={viewingIndex()} onClose={() => viewing.set(null)} />
+                      <ImagePager urls={attachments().map((a) => a.preview)} start={viewingIndex} onClose={() => viewing.set(null)} />
                     </Dialog>
                   </>
                 </If>

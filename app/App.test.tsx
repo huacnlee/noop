@@ -1106,6 +1106,11 @@ describe("images", () => {
     await app.press("label:Close image >> nth=0");
     await app.waitUntil(() => !app.shows("text:1 / 2"));
     expect(app.count("id:attachment")).toBe(2);
+    // reopening on the second picture starts there, not back at the first
+    await app.press("label:View icon.png >> nth=1");
+    await app.waitFor("text:2 / 2");
+    await app.press("label:Close image >> nth=0");
+    await app.waitUntil(() => !app.shows("text:2 / 2"));
     // the close button still removes the attachment
     await app.press("label:Remove icon.png >> nth=1");
     expect(app.count("id:attachment")).toBe(1);
