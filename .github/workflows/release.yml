@@ -24,8 +24,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # NSH v0.5.0, pinned to the released commit for every client runtime and OTA package.
-  NSH_REF: f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1
+  # Includes the native iOS controls from longbridge/nsh#1736.
+  # Keep every client runtime and OTA package on the same commit.
+  NSH_REF: 2b71c1855870de1f960ce05635cdc997d7a008dc
 
 defaults:
   run:

@@ -169,14 +169,22 @@ describe("login", () => {
     expect(log.logouts).toBe(1);
     expect(app.storage()["hub.token"]).toBe(undefined);
   });
-  for (const platform of ["ios", "android"] as const) {
+  test("the iOS account menu leaves its menu content to UIKit", async () => {
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 390, height: 844, platform: "ios" });
+    await app.press("label:Menu");
+    await app.waitFor("id:user-menu");
+    // This headless host has no UIKit button to activate. Verify only the
+    // app composition here; native opening and selection need an iOS host.
+    // NSH engine tests cover MenuButton native properties and selection events.
+    expect(app.shows("id:theme-dark")).toBe(false);
+    expect(app.shows("id:user-menu-avatar")).toBe(false);
+  });
+  for (const platform of ["android"] as const) {
     test(`the mobile account menu on ${platform} switches appearance and language`, async () => {
-      const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: platform === "android" ? 1200 : 390, height: 844, platform });
-      if (platform === "ios") await app.press("label:Menu");
+      const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 844, platform });
       await app.press("id:user-menu");
       await app.waitFor("id:theme-dark");
-      // iOS shows an ordinary menu: plain rows on the glass, no account card
-      expect(app.shows("id:user-menu-avatar")).toBe(platform !== "ios");
+      expect(app.shows("id:user-menu-avatar")).toBe(true);
       await app.press("id:theme-dark");
       expect(app.storage()["hub.theme"]).toBe("dark");
       await app.press("id:theme-light");
@@ -190,7 +198,7 @@ describe("login", () => {
       await app.waitUntil(() => !app.shows("id:menu-lang-zh"));
       await app.press("id:user-menu");
       await app.press("id:settings");
-      await app.waitFor(platform === "ios" ? "id:logout" : "id:settings-tab-account");
+      await app.waitFor("id:settings-tab-account");
     });
   }
   test("the sidebar user menu switches appearance and language and opens settings", async () => {
@@ -1662,6 +1670,8 @@ describe("phones", () => {
       await app.press("id:settings-top");
       await app.waitFor("id:phone-settings");
       for (const t of ["Notifications", "Members", "Routines", "Parallelism", "Account", "Sign out"]) expect(app.shows(`id:phone-settings >> text:${t}`)).toBe(true);
+      // iOS has the system's segmented control for the appearance (NSH's SegmentedControl); Android has no such section.
+      expect(app.shows("id:phone-settings >> text:Appearance")).toBe(platform === "ios");
       // A member pushes its page: models and autonomy as radio rows.
       await app.press("id:member-reporter");
       await app.waitFor("id:phone-member");

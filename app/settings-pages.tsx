@@ -1,5 +1,6 @@
 // The settings pages, wide and on phones, and the team's rules and memory: a lazy chunk, loaded the first time one
 // shows (lazy.tsx). NumberField's NumberInput comes with it, and on the web its part of the runtime.
+import { SegmentedControl } from "nsh/mobile";
 import { cleanup, openUrl, platform, safeArea, Scroll, signal, Text, View, type ViewStyle } from "nsh";
 import type { JSX } from "nsh";
 import { AlertDialog, Dialog, Input, Menu, MenuItem } from "nsh/base";
@@ -8,7 +9,7 @@ import { runningPackage } from "nsh/updater";
 import * as nshUpdater from "nsh/updater";
 import { L, lang, LANGS } from "./i18n";
 import {
-  alpha, Badge, Button, cardEdge, colors, corner, focusRing, hovered, Icon, IconButton, Indicator, isDark, MenuPanel, menuBox,
+  alpha, Badge, Button, cardEdge, colors, corner, focusRing, hovered, Icon, IconButton, Indicator, isDark, toggleTheme, MenuPanel, menuBox,
   menuEnter, menuRowHover, PageHeader, pageContent, radius, Separator, SettingsChoices, SettingsGroup, SettingsItem, size,
   Spinner, Switch, tints, touch,
 } from "./ui";
@@ -786,6 +787,17 @@ export function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings;
       <Section title={L("Language", "语言")}>
         <LangChoices />
       </Section>
+      <If when={platform.os === "ios"}>
+        {/* iOS: the system's segmented control (Liquid Glass on iOS 26); the account menu has the same choice as checks. */}
+        <Section title={L("Appearance", "外观")}>
+          <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+            <SegmentedControl testID="settings-appearance"
+              items={[{ title: L("Light", "浅色") }, { title: L("Dark", "深色") }]}
+              selectedIndex={isDark() ? 1 : 0}
+              onChange={({ index }) => { if ((index === 1) !== isDark()) toggleTheme(); }} />
+          </View>
+        </Section>
+      </If>
       <Section title={L("Memory", "记忆")} hint={L("The rules the team works by, your preferences, member profiles and past decisions. Read-only.", "团队做事依据的规则、你的偏好、成员档案和决策先例。只读。")}>
         <SetRow first label={L("Rules & memory", "规则与记忆")} chevron onPress={() => props.onOpen({ name: "rules" })} testID="settings-rules" />
       </Section>
