@@ -80,6 +80,7 @@ import {
   Indicator,
   type IndicatorStatus,
   Input as TextField,
+  SearchField,
   Kbd,
   Separator,
   size,
@@ -1516,14 +1517,19 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
   const error = signal("");
   const loading = signal(false);
   const query = signal("");
+  const searched = signal(""); // the query the shown results are for
+  const searching = signal(false); // a first page is on its way (the field's spinner), not a "Load more"
   let asked = 0; // the newest request; an older answer that lands late is dropped
   async function load(reset: boolean) {
     const mine = ++asked;
     loading.set(true);
     const offset = reset ? 0 : untracked(tasks).length;
-    const r = await props.hub.api("GET", `/api/tasks?limit=${HISTORY_PAGE}&offset=${offset}&q=${encodeURIComponent(untracked(query).trim())}`);
+    const q = reset ? untracked(query).trim() : untracked(searched);
+    if (reset) { searched.set(q); searching.set(true); }
+    const r = await props.hub.api("GET", `/api/tasks?limit=${HISTORY_PAGE}&offset=${offset}&q=${encodeURIComponent(q)}`);
     if (mine !== asked) return;
     loading.set(false);
+    searching.set(false);
     if (!r.ok) { error.set(r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器")); return; }
     error.set("");
     const page = (r.data.tasks as TaskInfo[] | undefined) ?? [];
@@ -1534,20 +1540,27 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
   return (
     <Scroll testID="task-history" style={{ flex: 1 }}>
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 32 : 16, paddingVertical: 20 }}>
-        {/* searched on the button or Enter, not on every keystroke: each search reads every task on the server */}
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <TextField
-            testID="task-search"
-            value={query()}
-            onChange={query.set}
-            onSubmit={() => void load(true)}
-            placeholder={L("Search by ID, title or member", "搜索编号、标题或成员")}
-            style={{ flex: 1 }}
-          />
-          <Button testID="task-search-button" label={L("Search", "搜索")} variant="secondary" disabled={loading()} onPress={() => void load(true)} />
-        </View>
+        {/* searched on Return, not on every keystroke: each search reads every task on the server */}
+        <SearchField
+          testID="task-search"
+          value={query()}
+          onChange={query.set}
+          onSubmit={() => void load(true)}
+          onClear={() => { query.set(""); if (searched()) void load(true); }}
+          placeholder={L("Search by ID, title or member", "搜索编号、标题或成员")}
+          clearLabel={L("Clear search", "清除搜索")}
+          loading={searching()}
+          hint={query().trim() !== searched()}
+        />
         <If when={error()}><Text style={{ fontSize: 14, color: colors.danger }}>{error()}</Text></If>
-        <If when={total() === 0 && !loading()}><Text style={{ fontSize: 14, color: colors.faint }}>{L("No matching tasks", "没有符合的任务")}</Text></If>
+        <If when={searched() && total() !== null && !error()}>
+          <Text style={{ fontSize: 13, color: colors.faint }}>
+            {total() === 0
+              ? L(`No tasks match “${searched()}”`, `没有与“${searched()}”匹配的任务`)
+              : L(`${total()} ${total() === 1 ? "task matches" : "tasks match"} “${searched()}”`, `${total()} 个任务与“${searched()}”匹配`)}
+          </Text>
+        </If>
+        <If when={!searched() && total() === 0 && !loading()}><Text style={{ fontSize: 14, color: colors.faint }}>{L("No tasks yet", "还没有任务")}</Text></If>
         <Each of={groupByDay(tasks(), (t) => t.updated ?? "")} key={(g) => g.key}>
           {(g) => (
         <View>
