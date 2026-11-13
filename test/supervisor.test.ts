@@ -137,3 +137,10 @@ test("macOS host online + wait_check unrunnable on the primary: hand back to the
   expect(classify(task(m), ctx())!.action).toBe("reroute");
   expect(classify(task({ ...m, supervisor_requeued: "yes" }), ctx())!.action).toBe("escalate");
 });
+
+import { trackedPrs } from "../src/supervisor";
+test("trackedPrs reads PR urls from spec and repo #N from title, not from run logs", () => {
+  const body = "PR: https://github.com/huacnlee/noop/pull/182 (branch x)\n\n## Run 2026\nsee https://github.com/longbridge/nsh/pull/9";
+  expect(trackedPrs({ title: "Noop #182：验收并合并", repo: "huacnlee/noop" }, body)).toEqual(["huacnlee/noop#182"]);
+  expect(trackedPrs({ title: "NSH #1846：放大后变糊" }, "no pr yet")).toEqual([]);
+});

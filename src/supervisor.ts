@@ -122,6 +122,24 @@ export function cardFor(cause: string, items: { id: string; title: string; reaso
   };
 }
 
+/** PRs a waiting task exists to land: full PR URLs in its spec (body before the first run log) or waiting_on, plus
+    "<Repo> #N" in its title when the task has a repo. Pure: unit-tested. */
+export function trackedPrs(m: Meta, body = ""): string[] {
+  const spec = `${m.title ?? ""}\n${body.split("\n## Run ")[0]}\n${m.waiting_on ?? ""}`;
+  const out = new Set<string>();
+  for (const x of spec.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g)) out.add(`${x[1]}#${x[2]}`);
+  const repo = m.repo?.match(/^[\w.-]+\/[\w.-]+$/)?.[0];
+  const t = repo && (m.title ?? "").match(/#(\d+)/);
+  if (t) out.add(`${repo}#${t[1]}`);
+  return [...out];
+}
+
+/** Every tracked PR merged → the task's goal is met (often by the owner merging while it waited for verification). */
+function prState(ref: string): string {
+  const [repo, n] = ref.split("#");
+  try { return Bun.spawnSync(["gh", "pr", "view", n, "-R", repo, "--json", "state", "-q", ".state"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; }
+}
+
 // ------------------------------------------------------------------ IO: one supervisor pass over the hub
 const decisionState = (id: string) => existsSync(P("decisions", "open", `${id}.md`)) ? "open" as const
   : existsSync(P("decisions", "closed", `${id}.md`)) ? "closed" as const : undefined;
@@ -136,7 +154,18 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
   const tasks: (Task & { path: string })[] = (["waiting", "blocked"] as const).flatMap((folder) =>
     list(P("tasks", folder), /^T-.*\.md$/).map((path) => ({ path, folder, ...readDoc(path) })));
   const verdicts: Verdict[] = [];
-  const counts = { reroute: 0, resume: 0, requeue: 0, cards: 0 };
+  const counts = { reroute: 0, resume: 0, requeue: 0, cards: 0, merged: 0 };
+  let merged = 0;
+  for (const task of [...tasks]) { // the PR already landed: close the task instead of waiting for an event that never comes
+    if (task.meta.children || (task.folder === "blocked" && ctx.decision(task.meta.decision ?? "") === "open")) continue;
+    const prs = trackedPrs(task.meta, task.body);
+    if (!prs.length || !prs.every((r) => prState(r) === "MERGED")) continue;
+    writeDoc(P("tasks", "done", `${task.meta.id}.md`), { ...task.meta, status: "done", finished: now(), wake_at: undefined, wait_kind: undefined, claimed_by: undefined },
+      `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} merged while this task waited; closed as done.\n`);
+    unlinkSync(task.path);
+    tasks.splice(tasks.indexOf(task), 1);
+    journal(host, L(`🧭 supervisor: ${task.meta.id} closed, ${prs.join(", ")} already merged`, `🧭 supervisor: ${task.meta.id} 收尾，${prs.join("、")} 已合并`)); merged++;
+  }
   for (const task of tasks) {
     const v = classify(task, ctx);
     if (!v) continue;
@@ -181,6 +210,7 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
     journal(host, `🧭 supervisor: ${CAUSE_LABEL(cause)} → ${did}（${fresh.join(", ")}）`); counts.cards++;
     cards.push({ supervisor_cause: cause, tasks: fresh.join(",") });
   }
-  journal(host, `🧭 supervisor ran: ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, cards ${counts.cards}`);
+  counts.merged = merged;
+  journal(host, `🧭 supervisor ran: closed ${merged} with merged PRs, ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, cards ${counts.cards}`);
   return counts;
 }
