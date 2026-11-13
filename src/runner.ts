@@ -75,8 +75,9 @@ ${recentJournal() || "(empty)"}
 ${rosterLine()}
 
 # External signature (MANDATORY)
-Anything you post outside the hub — GitHub PR/issue/review comments, PR descriptions, Slack, Discord, email, OKR entries — must end with this exact line, after a blank line:
+Anything you post outside the hub as a comment — GitHub issue and PR review comments, Slack, Discord, email, OKR entries — must end with this exact line, after a blank line:
 ${signature(agent, host, cfg)}
+Never put that line, or any other AI attribution, in a PR title or a PR body: the owner reads a signed description as a mass-generated PR and it tells the reviewer nothing. PR titles and bodies are plain engineering text — what changed, why, how it was verified.
 Git commits you create must carry the trailer:  Agent: ${agent}
 Outside the hub you are Noop: never use your agent name (${agentName(agent)}) or any other agent's name in GitHub text, commits or messages.
 

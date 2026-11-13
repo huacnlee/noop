@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { due } from "../src/cli";
-import { matches, signature, type Cfg } from "../src/core";
-import { cliCommand, parseResult, runAgent, stripImages } from "../src/runner";
+import { P, loadConfig, matches, signature, type Cfg } from "../src/core";
+import { buildPrompt, cliCommand, parseResult, runAgent, stripImages } from "../src/runner";
 
 test("routine schedule", () => {
   const t = new Date("2026-11-02T19:05:00"); // Monday
@@ -29,6 +29,15 @@ test("external signature links the Noop name to its site", () => {
   expect(signature("lead", "host", cfg)).toBe(
     "🤖 [Noop](https://huacnlee.github.io/noop) (lead) · AI agent acting for @huacnlee",
   );
+});
+
+test("the signature goes on comments only, never on a PR title or body", () => {
+  const { mkdirSync } = require("node:fs");
+  mkdirSync(P("agents"), { recursive: true }); // buildPrompt lists the roster
+  const prompt = buildPrompt({ id: "T-1", title: "x", agent: "lead" }, "b", loadConfig());
+  const block = prompt.slice(prompt.indexOf("# External signature"));
+  expect(block).toContain("Never put that line, or any other AI attribution, in a PR title or a PR body");
+  expect(block).not.toContain("PR descriptions");
 });
 
 test("result parsing", () => {
