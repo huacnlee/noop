@@ -24,9 +24,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Includes the native iOS controls from longbridge/nsh#1736.
-  # Keep every client runtime and OTA package on the same commit.
-  NSH_REF: 2b71c1855870de1f960ce05635cdc997d7a008dc
+  # `nightly` builds against the commit of the current NSH nightly release and reuses its prebuilt CLI and runtimes,
+  # so a release does not compile NSH. Pin a commit only when Noop needs NSH changes the nightly does not have yet.
+  # Every job resolves it the same way, so all client runtimes and the OTA package share one commit.
+  NSH_REF: nightly
 
 defaults:
   run:
