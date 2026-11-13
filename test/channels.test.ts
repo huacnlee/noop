@@ -38,8 +38,10 @@ test("owner edits: goal and archive; unknown slugs are refused", () => {
 
 test("view: a channel lists its tasks and their cards newest first, and is stale after 7 quiet days", () => {
   reset();
-  createChannel("Omamail", "omamail");
-  createChannel("Omasend", "omasend");
+  // Keep creation times on the same fixed timeline as the tasks and view clock.
+  for (const name of ["Omamail", "Omasend"]) {
+    writeDoc(P("channels", `${slugify(name)}.md`), { name, goal: name.toLowerCase(), status: "active", created: "2026-11-07T00:00:00Z" }, "");
+  }
   writeDoc(P("tasks", "done", "T-0001.md"), { id: "T-0001", title: "review omamail #1", channels: "omamail,gone", created: "2026-11-07T01:00:00Z", finished: "2026-11-07T02:00:00Z" }, "x");
   writeDoc(P("tasks", "blocked", "T-0002.md"), { id: "T-0002", title: "merge omamail #2?", channels: "omamail", created: "2026-11-07T03:00:00Z" }, "x");
   writeDoc(P("decisions", "open", "D-0001.md"), { id: "D-0001", task: "T-0002", question: "合并 #2 吗？", created: "2026-11-07T04:00:00Z" }, "x");
