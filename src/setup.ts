@@ -1,6 +1,6 @@
 // hub init / install / update — out-of-the-box setup and self-update.
 import { $ } from "bun";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { CODE, DATA, HOME_DIR, P } from "./core";
@@ -95,11 +95,21 @@ function writeLocalConfig(me: string) {
 
 // ------------------------------------------------------------------ self-update
 const REJECTED = () => join(HOME_DIR, "update-rejected"); // machine-local: a release this host already refused
+const BLOCKED = () => join(HOME_DIR, "update-blocked"); // machine-local: the last reason an update could not be applied
 
 /** A release whose tests failed here is not tried again until origin moves on — otherwise every check
  *  re-installs the same bad code and wakes the medic again. An explicit `hub update` still retries. */
 export function updateRejected(up: string, file = REJECTED()): boolean {
   try { return readFileSync(file, "utf8").trim() === up; } catch { return false; }
+}
+
+/** Report a blocked update once per distinct state: an uncommitted file (the medic is told to keep its fix applied
+ *  locally) used to freeze self-update for days without a journal line or a medic call. Returns the text when this
+ *  state is new, null when it was already reported; the caller journals the returned line. */
+export function updateBlocked(detail: string, file = BLOCKED()): string | null {
+  try { if (readFileSync(file, "utf8").trim() === detail) return null; } catch {}
+  try { mkdirSync(HOME_DIR, { recursive: true }); writeFileSync(file, detail); } catch {}
+  return detail;
 }
 
 /** Fast-forward framework code if origin has new commits that pass tests. Returns true if updated. */
@@ -108,19 +118,35 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
   if ((opts.busy ?? 0) > 0 && !opts.force) return false;
   const g = (...a: string[]) => $`git ${a}`.cwd(CODE).quiet().nothrow();
   if (!existsSync(join(CODE, ".git"))) return false;
-  if ((await g("status", "--porcelain", "--untracked-files=no")).stdout.toString().trim()) return false; // local edits → skip
   await g("fetch", "-q", "origin");
   const head = (await g("rev-parse", "HEAD")).stdout.toString().trim();
   const up = (await g("rev-parse", "@{u}")).stdout.toString().trim();
   if (!up || head === up) return false;
   if (!opts.force && updateRejected(up)) return false; // already failed its tests here; wait for the next release
+  const reportBlocked = async (detail: string) => {
+    if (!updateBlocked(detail)) return;
+    try {
+      const { loadConfig, hostName, journal } = await import("./core");
+      journal(hostName(loadConfig()), `⏸ self-update blocked — ${detail}. Commit, revert or merge the change to resume.`);
+    } catch {} // a CLI run without a hub still must not fail on the notice
+  };
+  const dirty = (await g("status", "--porcelain", "--untracked-files=no")).stdout.toString().trim();
+  if (dirty) { // local edits → skip (they would be lost), but never silently
+    await reportBlocked(`local edits: ${dirty.split("\n").map((l) => l.slice(3)).join(", ")} (HEAD ${head.slice(0, 7)}, origin ${up.slice(0, 7)})`);
+    return false;
+  }
   // upstream history may have been rewritten (e.g. scrubbed); with no local edits, follow it — tests below still guard the switch
+  let applied;
   if ((await g("merge-base", "--is-ancestor", "HEAD", "@{u}")).exitCode !== 0) {
     // diverged: follow upstream only when it already has every local commit's change (a rewrite); unpushed work stays
     if ((await g("cherry", "@{u}", "HEAD")).stdout.toString().split("\n").some((l) => l.startsWith("+"))) return false;
-    await g("reset", "--hard", "-q", "@{u}");
+    applied = await g("reset", "--hard", "-q", "@{u}");
   }
-  else await g("merge", "--ff-only", "-q", "@{u}");
+  else applied = await g("merge", "--ff-only", "-q", "@{u}");
+  if (applied.exitCode !== 0) { // never test, report and restart on code that was not actually switched
+    await reportBlocked(`git could not move to ${up.slice(0, 7)}: ${(applied.stderr.toString() || applied.stdout.toString()).trim().slice(-300)}`);
+    return false;
+  }
   const deps = await $`bun install --frozen-lockfile`.cwd(CODE).quiet().nothrow();
   // A sleeping Mac can exhaust test timeouts during maintenance wakes. Keep it awake only for validation
   // (-s also prevents system sleep on AC); caffeinate releases its assertions and preserves the test exit code.
@@ -147,6 +173,7 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
       await cloudDeploy(c);
     }
   }
+  try { unlinkSync(BLOCKED()); } catch {} // the next block is a new event, not a repeat of this one
   console.log(`self-updated ${head.slice(0, 7)} → ${up.slice(0, 7)}`);
   return true;
 }

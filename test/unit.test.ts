@@ -159,6 +159,16 @@ test("selfUpdate defers while tasks run on this host", async () => {
   expect(await selfUpdate({ busy: 2 })).toBe(false);
 });
 
+test("a blocked self-update is reported once per distinct state", async () => {
+  const { join } = await import("node:path");
+  const { updateBlocked } = await import("../src/setup");
+  const f = join(mkdtempSync(join(tmpdir(), "noop-blocked-")), "update-blocked");
+  const dirty = "local edits: src/accounts.ts (HEAD aaaa, origin bbbb)";
+  expect(updateBlocked(dirty, f)).toBe(dirty); // first sighting → the caller journals it
+  expect(updateBlocked(dirty, f)).toBeNull(); // same state every 30 min → one line, not a flood
+  expect(updateBlocked("local edits: src/accounts.ts, src/cli.ts (HEAD aaaa, origin bbbb)", f)).not.toBeNull(); // a new edit is news
+});
+
 test("a release whose tests failed here is not installed again until origin moves on", async () => {
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
