@@ -38,8 +38,9 @@ test("owner edits: goal and archive; unknown slugs are refused", () => {
 
 test("view: a channel lists its tasks and their cards newest first, and is stale after 7 quiet days", () => {
   reset();
-  createChannel("Omamail", "omamail");
-  createChannel("Omasend", "omasend");
+  // 频道的 created 也必须钉在固定日期：createChannel 用真实当前时间，2026-11-13 之后最后一个断言就会过期
+  writeDoc(P("channels", "omamail.md"), { name: "Omamail", goal: "omamail", created: "2026-11-07T00:00:00Z" }, "");
+  writeDoc(P("channels", "omasend.md"), { name: "Omasend", goal: "omasend", created: "2026-11-07T00:00:00Z" }, "");
   writeDoc(P("tasks", "done", "T-0001.md"), { id: "T-0001", title: "review omamail #1", channels: "omamail,gone", created: "2026-11-07T01:00:00Z", finished: "2026-11-07T02:00:00Z" }, "x");
   writeDoc(P("tasks", "blocked", "T-0002.md"), { id: "T-0002", title: "merge omamail #2?", channels: "omamail", created: "2026-11-07T03:00:00Z" }, "x");
   writeDoc(P("decisions", "open", "D-0001.md"), { id: "D-0001", task: "T-0002", question: "合并 #2 吗？", created: "2026-11-07T04:00:00Z" }, "x");
