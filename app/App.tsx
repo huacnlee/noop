@@ -711,7 +711,7 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
         backdropClass="bg-scrim"
         style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
       >
-        <ImagePager hub={props.hub} paths={images()} start={Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
+        <ImagePager urls={images().map((p) => mediaUrl(props.hub.cfg.url, props.hub.cfg.token, p))} start={Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
       </Dialog>
     </If>
   );
@@ -747,24 +747,25 @@ function FileAttachment(props: { src: string; name: string }) {
 }
 
 /**
- * A message's images full size, paged in a loop (NSH's `Carousel`): swipe, the arrow keys or the side buttons move
- * on, past the last back to the first; a press on the image closes it.
+ * Images full size, paged in a loop (NSH's `Carousel`): swipe, the arrow keys or the side buttons move on, past the
+ * last back to the first; a press on the image closes it. A message's attachments and the composer's own thumbnails
+ * both open it, so it takes ready URLs rather than hub paths.
  */
-function ImagePager(props: { hub: Hub; paths: string[]; start: number; onClose: () => void }) {
+function ImagePager(props: { urls: string[]; start: number; onClose: () => void }) {
   const index = signal(props.start);
-  const many = props.paths.length > 1;
+  const many = props.urls.length > 1;
   const side = (left: boolean): ViewStyle => ({
     position: "absolute", top: "50%", marginTop: -20, [left ? "left" : "right"]: 8, width: 40, height: 40, borderRadius: 20,
     alignItems: "center", justifyContent: "center", backgroundColor: alpha("#000000", 0.45), cursor: "pointer",
   });
   return (
-    <Carousel index={index()} looping onChange={({ index: i }) => index.set(i)} accessibilityLabel={L("Images", "图片")} style={{ flex: 1 }}>
+    <Carousel testID="image-viewer" index={index()} looping onChange={({ index: i }) => index.set(i)} accessibilityLabel={L("Images", "图片")} style={{ flex: 1 }}>
       <CarouselContent style={{ flex: 1 }}>
-        <Each of={props.paths}>
+        <Each of={props.urls}>
           {(p, i) => (
-            <CarouselItem accessibilityLabel={`${i() + 1} / ${props.paths.length}`} style={{ width: "100%", height: "100%" }}>
+            <CarouselItem accessibilityLabel={`${i() + 1} / ${props.urls.length}`} style={{ width: "100%", height: "100%" }}>
               <View accessibilityLabel={L("Close image", "关闭大图")} onPress={props.onClose} style={{ flex: 1, alignItems: "center", justifyContent: "center", cursor: "zoom-out" }}>
-                <Image src={mediaUrl(props.hub.cfg.url, props.hub.cfg.token, p())} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                <Image src={p()} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
               </View>
             </CarouselItem>
           )}
@@ -774,7 +775,7 @@ function ImagePager(props: { hub: Hub; paths: string[]; start: number; onClose: 
         <CarouselPrevious testID="image-prev" accessibilityLabel={L("Previous image", "上一张")} style={side(true)}><Icon name="back" size={18} tint="#ffffff" /></CarouselPrevious>
         <CarouselNext testID="image-next" accessibilityLabel={L("Next image", "下一张")} style={side(false)}><Icon name="chevron" size={18} tint="#ffffff" /></CarouselNext>
         <View style={{ position: "absolute", bottom: 8, alignSelf: "center", paddingHorizontal: 10, height: 24, borderRadius: 12, justifyContent: "center", backgroundColor: alpha("#000000", 0.45) }}>
-          <Text style={{ fontSize: 12, color: "#ffffff", fontVariant: ["tabular-nums"] }}>{`${index() + 1} / ${props.paths.length}`}</Text>
+          <Text style={{ fontSize: 12, color: "#ffffff", fontVariant: ["tabular-nums"] }}>{`${index() + 1} / ${props.urls.length}`}</Text>
         </View>
       </If>
     </Carousel>
@@ -4204,6 +4205,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     draft.set("");
     replyTo.set(null);
     attachments.set([]);
+    viewing.set(null);
     attachNote.set(null);
     inputHeight.set(28);
     send(v, r, undefined, files);
@@ -4211,6 +4213,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
 
   // Images the owner attaches: pasted, dropped on the window, or picked.
   const attachments = signal<Attachment[]>([]);
+  /** The thumbnail whose full-size view is open; it pages through every attached image. */
+  const viewing = signal<string | null>(null);
+  const viewingIndex = () => Math.max(0, attachments().findIndex((a) => a.id === viewing()));
   const attachNote = signal<string | null>(null);
   // A file drag over the window: null when none, else the offered files (empty until the shell reports them).
   const dropping = signal<string[] | null>(null);
@@ -4228,6 +4233,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   function unattach(id: string) {
     const a = attachments().find((x) => x.id === id);
     if (a) URL.revokeObjectURL(a.preview);
+    if (viewing() === id) viewing.set(null);
     attachments.update((list) => list.filter((x) => x.id !== id));
     attachNote.set(null);
   }
@@ -4831,33 +4837,51 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                   )}
                 </If>
                 <If when={attachments().length}>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 2 }}>
-                    <Each of={attachments()} key={(a) => a.id}>
-                      {(a) => (
-                        <View testID="attachment" accessibilityLabel={a().name} style={{ width: 64, height: 64 }}>
-                          <Image
-                            src={a().preview}
-                            style={{ width: 64, height: 64, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }}
-                          />
-                          <View
-                            testID="remove-attachment"
-                            role="button"
-                            accessibilityLabel={L(`Remove ${a().name}`, `移除 ${a().name}`)}
-                            tooltip={touch ? undefined : <Tooltip label={L("Remove", "移除")} />}
-                            onPress={() => unattach(a().id)}
-                            hoverStyle={{ opacity: 0.85 }}
-                            style={{
-                              position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: 11,
-                              alignItems: "center", justifyContent: "center",
-                              backgroundColor: colors.text,
-                            }}
-                          >
-                            <Icon name="close" size={10} tint={colors.background} />
+                  <>
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 2 }}>
+                      <Each of={attachments()} key={(a) => a.id}>
+                        {(a) => (
+                          <View testID="attachment" style={{ width: 64, height: 64 }}>
+                            <View
+                              role="button"
+                              accessibilityLabel={L(`View ${a().name}`, `查看 ${a().name}`)}
+                              onPress={() => viewing.set(a().id)}
+                              style={{ width: 64, height: 64, cursor: "pointer" }}
+                            >
+                              <Image
+                                src={a().preview}
+                                style={{ width: 64, height: 64, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }}
+                              />
+                            </View>
+                            <View
+                              testID="remove-attachment"
+                              role="button"
+                              accessibilityLabel={L(`Remove ${a().name}`, `移除 ${a().name}`)}
+                              tooltip={touch ? undefined : <Tooltip label={L("Remove", "移除")} />}
+                              onPress={() => unattach(a().id)}
+                              hoverStyle={{ opacity: 0.85 }}
+                              style={{
+                                position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: 11,
+                                alignItems: "center", justifyContent: "center",
+                                backgroundColor: colors.text,
+                              }}
+                            >
+                              <Icon name="close" size={10} tint={colors.background} />
+                            </View>
                           </View>
-                        </View>
-                      )}
-                    </Each>
-                  </View>
+                        )}
+                      </Each>
+                    </View>
+                    <Dialog
+                      open={viewing() != null}
+                      animation="fade"
+                      onOpenChange={({ open }) => !open && viewing.set(null)}
+                      backdropClass="bg-scrim"
+                      style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
+                    >
+                      <ImagePager urls={attachments().map((a) => a.preview)} start={viewingIndex()} onClose={() => viewing.set(null)} />
+                    </Dialog>
+                  </>
                 </If>
                 <If when={attachNote()}>
                   {(note) => <Text testID="attach-note" style={{ fontSize: 13, color: colors.danger }}>{note()}</Text>}
