@@ -134,7 +134,7 @@ export function trackedPrs(m: Meta, body = ""): string[] {
   return [...out];
 }
 
-/** Every tracked PR merged → the task's goal is met (often by the owner merging while it waited for verification). */
+/** A merge is a wake-up event, not proof that all acceptance criteria are met. */
 function prState(ref: string): string {
   const [repo, n] = ref.split("#");
   try { return Bun.spawnSync(["gh", "pr", "view", n, "-R", repo, "--json", "state", "-q", ".state"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; }
@@ -144,7 +144,7 @@ function prState(ref: string): string {
 const decisionState = (id: string) => existsSync(P("decisions", "open", `${id}.md`)) ? "open" as const
   : existsSync(P("decisions", "closed", `${id}.md`)) ? "closed" as const : undefined;
 
-export function supervise(cfg: Cfg, host: string, t = Date.now()) {
+export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = prState) {
   const s = cfg.supervisor ?? {};
   const retired: string[] = s.retired_hosts ?? cfg.fleet?.retired_hosts ?? [];
   const ctx: Ctx = {
@@ -156,15 +156,16 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
   const verdicts: Verdict[] = [];
   const counts = { reroute: 0, resume: 0, requeue: 0, cards: 0, merged: 0 };
   let merged = 0;
-  for (const task of [...tasks]) { // the PR already landed: close the task instead of waiting for an event that never comes
-    if (task.meta.children || (task.folder === "blocked" && ctx.decision(task.meta.decision ?? "") === "open")) continue;
+  for (const task of [...tasks]) { // Wake once per merged PR set, preserving any unfinished acceptance work.
+    if (task.meta.children || ctx.decision(task.meta.decision ?? "") === "open") continue;
     const prs = trackedPrs(task.meta, task.body);
-    if (!prs.length || !prs.every((r) => prState(r) === "MERGED")) continue;
-    writeDoc(P("tasks", "done", `${task.meta.id}.md`), { ...task.meta, status: "done", finished: now(), wake_at: undefined, wait_kind: undefined, claimed_by: undefined },
-      `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} merged while this task waited; closed as done.\n`);
+    const signature = prs.slice().sort().join(",");
+    if (!prs.length || task.meta.supervisor_merged_prs === signature || !prs.every((r) => readPrState(r) === "MERGED")) continue;
+    writeDoc(P("tasks", "inbox", `${task.meta.id}.md`), { ...task.meta, status: undefined, finished: undefined, resumed: "yes", supervisor_merged_prs: signature, wake_at: undefined, wait_kind: undefined, claimed_by: undefined },
+      `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} merged while this task waited. Check remaining acceptance criteria and follow-ups; return done if the goal is met, otherwise continue the unfinished work. Do not wait for these PRs to merge again.\n`);
     unlinkSync(task.path);
     tasks.splice(tasks.indexOf(task), 1);
-    journal(host, L(`🧭 supervisor: ${task.meta.id} closed, ${prs.join(", ")} already merged`, `🧭 supervisor: ${task.meta.id} 收尾，${prs.join("、")} 已合并`)); merged++;
+    journal(host, L(`🧭 supervisor: ${task.meta.id} resumed, ${prs.join(", ")} already merged`, `🧭 supervisor: ${task.meta.id} 唤醒核对收尾，${prs.join("、")} 已合并`)); merged++;
   }
   for (const task of tasks) {
     const v = classify(task, ctx);
@@ -211,6 +212,6 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
     cards.push({ supervisor_cause: cause, tasks: fresh.join(",") });
   }
   counts.merged = merged;
-  journal(host, `🧭 supervisor ran: closed ${merged} with merged PRs, ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, cards ${counts.cards}`);
+  journal(host, `🧭 supervisor ran: resumed ${merged} with merged PRs, ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, cards ${counts.cards}`);
   return counts;
 }

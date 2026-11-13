@@ -144,3 +144,29 @@ test("trackedPrs reads PR urls from spec and repo #N from title, not from run lo
   expect(trackedPrs({ title: "Noop #182：验收并合并", repo: "huacnlee/noop" }, body)).toEqual(["huacnlee/noop#182"]);
   expect(trackedPrs({ title: "NSH #1846：放大后变糊" }, "no pr yet")).toEqual([]);
 });
+
+
+test("merged PRs wake a task once for acceptance checks instead of completing it", () => {
+  const id = "T-9406-test";
+  const waiting = P("tasks", "waiting", `${id}.md`);
+  const inbox = P("tasks", "inbox", `${id}.md`);
+  const done = P("tasks", "done", `${id}.md`);
+  try {
+    writeDoc(waiting, { id, title: "Verify screenshot", waiting_on: "Need screenshot", wait_kind: "human", created: new Date(NOW).toISOString() }, "PR: https://github.com/huacnlee/noop/pull/182");
+    supervise({}, "test", NOW, () => "OPEN");
+    expect(existsSync(waiting)).toBe(true);
+    supervise({}, "test", NOW, () => "MERGED");
+    expect(existsSync(waiting)).toBe(false);
+    expect(existsSync(done)).toBe(false);
+    const resumed = readDoc(inbox);
+    expect(resumed.meta.resumed).toBe("yes");
+    expect(resumed.body).toContain("Check remaining acceptance criteria");
+    rmSync(inbox);
+    writeDoc(waiting, { ...resumed.meta, waiting_on: "Need screenshot" }, resumed.body!);
+    supervise({}, "test", NOW, () => { throw new Error("Must not recheck a handled merge"); });
+    expect(existsSync(waiting)).toBe(true);
+    expect(existsSync(inbox)).toBe(false);
+  } finally {
+    for (const path of [waiting, inbox, done]) rmSync(path, { force: true });
+  }
+});
