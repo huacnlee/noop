@@ -38,13 +38,23 @@ import {
   windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
-import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuButton, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type MenuButtonItem, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
-import { SegmentedControl } from "nsh/mobile";
+import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
+// MenuButton and SegmentedControl through the namespaces: runtimes before NSH's native iOS controls (longbridge/nsh#1736)
+// lack these exports, and a missing named import would fail to link. Without them iOS keeps the drawn menu and choices.
+import * as nshBase from "nsh/base";
+import * as nshMobile from "nsh/mobile";
 import { isAvailable as hasWindow, titleBar, currentWindow } from "nsh/desktop";
 import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, installAndRestart, restartToPackage, runningPackage } from "nsh/updater";
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
+
+/** One row of the system menu `MenuButton` shows: an action, a submenu (`items`) or an inline group (`inline`). */
+type MenuButtonItem = { id: string; label: string; icon?: string; disabled?: boolean; checked?: boolean; inline?: boolean; items?: MenuButtonItem[] };
+type MenuButtonProps = { testID?: string; accessibilityLabel?: string; title?: string; items: MenuButtonItem[]; onSelect: (event: { id: string }) => void; style?: ViewStyle; children?: JSX.Element };
+type SegmentedControlProps = { testID?: string; items: { title: string }[]; selectedIndex: number; onChange: (event: { index: number }) => void };
+const MenuButton = (nshBase as { MenuButton?: (props: MenuButtonProps) => JSX.Element }).MenuButton;
+const SegmentedControl = (nshMobile as { SegmentedControl?: (props: SegmentedControlProps) => JSX.Element }).SegmentedControl;
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
 import { CheckMark } from "./ui/icons";
@@ -2214,7 +2224,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
     <Text testID="user-account" style={{ flex: 1, fontSize: 13, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
     <Icon name="chevron-up" size={12} tint={colors.faint} />
   </>;
-  if (ios) {
+  if (ios && MenuButton) {
     /** The system menu's rows, as data: the same actions, language and appearance as the drawn menu's. */
     const items = (): MenuButtonItem[] => [
       { id: "mark-all-read", label: L("Mark all as read", "全部已读"), icon: "checkmark.circle", disabled: !props.reads.main().length },
@@ -3325,12 +3335,18 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       <If when={platform.os === "ios"}>
         {/* iOS: the system's segmented control (Liquid Glass on iOS 26); the account menu has the same choice as checks. */}
         <Section title={L("Appearance", "外观")}>
-          <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
-            <SegmentedControl testID="settings-appearance"
-              items={[{ title: L("Light", "浅色") }, { title: L("Dark", "深色") }]}
-              selectedIndex={isDark() ? 1 : 0}
-              onChange={({ index }) => { if ((index === 1) !== isDark()) toggleTheme(); }} />
-          </View>
+          {SegmentedControl
+            ? <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+                <SegmentedControl testID="settings-appearance"
+                  items={[{ title: L("Light", "浅色") }, { title: L("Dark", "深色") }]}
+                  selectedIndex={isDark() ? 1 : 0}
+                  onChange={({ index }) => { if ((index === 1) !== isDark()) toggleTheme(); }} />
+              </View>
+            // A runtime without the native control: the same choice as rows, like the language above.
+            : <Choices label={L("Appearance", "外观")}
+                choices={[{ id: "light", label: L("Light", "浅色"), testID: "settings-appearance-light" }, { id: "dark", label: L("Dark", "深色"), testID: "settings-appearance-dark" }]}
+                selected={isDark() ? "dark" : "light"}
+                onPick={(id) => { if ((id === "dark") !== isDark()) toggleTheme(); }} />}
         </Section>
       </If>
       <Section title={L("Memory", "记忆")} hint={L("The rules the team works by, your preferences, member profiles and past decisions. Read-only.", "团队做事依据的规则、你的偏好、成员档案和决策先例。只读。")}>
