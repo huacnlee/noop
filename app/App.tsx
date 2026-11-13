@@ -2,6 +2,7 @@
 // Design: the NSH gallery's (~/work/nsh/examples/gallery): its theme tokens (theme.json is the
 // gallery's), its shared UI layer (nsh-gallery-ui: palette, icons, tooltips, scroll bars), its
 // sidebar + toolbar layout; sized up for reading a chat all day (16 pt text, 40 pt controls).
+import { ReaderSheet } from "./ui/reader-sheet";
 import { L, lang, LANG_KEY, LANGS } from "./i18n";
 
 /** A sender's name in the current language (agents localized, others without the @host). */
@@ -57,9 +58,11 @@ const MenuButton = (nshBase as { MenuButton?: (props: MenuButtonProps) => JSX.El
 const SegmentedControl = (nshMobile as { SegmentedControl?: (props: SegmentedControlProps) => JSX.Element }).SegmentedControl;
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
+import { badgeCount } from "./badge";
 import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc } from "./files";
 import { parseHubMarkdown } from "./markdown";
+import { messageTags, taskTagId } from "./message-tags";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
 import { setupTray, type TrayChat } from "./tray";
@@ -621,14 +624,18 @@ function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?:
   const doc = () => {
     // Reports preserve identifiers as text; chat-only chips can replace a heading prefix with an invisible attachment.
     const d = parseHubMarkdown(linkRepoRefs(props.text, props.context), props.report, props.report ? [] : EXTENSIONS);
-    return { ...d, blocks: ghBlocks(d.blocks) };
+    return messageTags({ ...d, blocks: ghBlocks(d.blocks) }, platform.os);
   };
   return (
     <View style={{ gap: 6 }}>
       <TextView
         document={doc()}
         selectable
-        onLinkPress={({ url }) => { if (/^(https?|mailto):/i.test(url)) void openUrl(url).catch(() => {}); }}
+        onLinkPress={({ url }) => {
+          const task = taskTagId(url);
+          if (task) taskLink(task);
+          else if (/^(https?|mailto):/i.test(url)) void openUrl(url).catch(() => {});
+        }}
         renderCustom={(node) => <Custom node={node} small={small} />}
         styles={{
           root: { gap: 8 * k(), fontSize: fontSize(), lineHeight: lineHeight(), color: small ? colors.muted : colors.text },
@@ -831,7 +838,7 @@ function DocAttachment(props: { src: string; name: string }) {
 const releaseKeyboard = () => { if (platform.os === "macos") Keyboard.dismiss(); };
 
 const DOC_SCALES = [0.875, 1, 1.125, 1.25, 1.4];
-/** The reader beside the chat (a full sheet on a phone): the open report rendered with TextView, with text zoom and a wider pane. */
+/** The report sheet, with independent text zoom and panel maximization. */
 /**
  * The report reader. Beside the chat (`wide`) it runs to the window's top edge: its header is part of the window's
  * title bar (drags the window, and leaves room for the window buttons Linux and Windows draw at the right).
@@ -856,7 +863,7 @@ function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpan
         <Text testID="doc-scale" style={{ width: 36, textAlign: "center", fontSize: 11.5, fontVariant: ["tabular-nums"], color: colors.faint }}>{`${Math.round(DOC_SCALES[step()] * 100)}%`}</Text>
         {btn({ id: "doc-zoom-in", icon: "zoom-in", label: L("Larger text", "放大文字"), disabled: step() === DOC_SCALES.length - 1, onPress: () => step.set(Math.min(DOC_SCALES.length - 1, step() + 1)) })}
         <If when={props.wide}>
-          {btn({ id: "doc-expand", icon: props.expanded ? "minimize" : "maximize", label: props.expanded ? L("Narrow reader", "收窄阅读栏") : L("Widen reader", "加宽阅读栏"), on: props.expanded, onPress: props.onExpand })}
+          {btn({ id: "doc-expand", icon: props.expanded ? "minimize" : "maximize", label: props.expanded ? L("Restore reader", "还原阅读栏") : L("Maximize reader", "放大阅读栏"), on: props.expanded, onPress: props.onExpand })}
         </If>
         {btn({ id: "doc-close", icon: "close", label: L("Close reader", "关闭阅读栏"), onPress: props.onClose })}
       </View>
@@ -3693,6 +3700,7 @@ const SHORTCUTS = (): [string, string][] => [
   [`R  ·  ${keymap.label("alt+r")}`, L("Reply to the current decision (other instructions)", "回复当前决策（其他指示）")],
   [`G  ·  ${keymap.label("alt+g")}`, L("Back to bottom", "回到底部")],
   ["Esc", L("Cancel reply / leave the message box / close", "取消回复 / 离开输入框 / 关闭")],
+  [`${keymap.label("mod+alt+left")} / ${keymap.label("mod+alt+right")}`, L("Resize report reader", "调整阅读栏宽度")],
   [keymap.label("mod+,"), L("Team settings", "团队设置")],
   [keymap.label("mod+b"), L("Show / hide sidebar", "显示 / 隐藏侧栏")],
   [keymap.label("mod+shift+l"), L("Toggle light / dark", "切换浅色 / 深色")],
@@ -3897,13 +3905,12 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // a different hub or a sign-out starts with no reports kept from the last one
   cleanup(clearDocCache);
   const readerWide = signal(false);
-  /** Room for the chat beside the reader; below it the reader covers the chat like a sheet. */
+  const resizedReaderWidth = signal<number | null>(null);
+  /** The sheet covers only the conversation, keeping the navigation sidebar accessible. */
   const chatRoom = () => windowSize().width - (wide() && sidebarOpen() ? size.sidebar : 0);
   const readerSide = () => wide() && chatRoom() >= 860;
-  const readerWidth = () => (readerWide() ? Math.round(chatRoom() * 0.62) : Math.min(460, Math.round(chatRoom() * 0.42)));
+  const readerWidth = () => Math.min(chatRoom(), resizedReaderWidth() ?? Math.max(360, Math.min(460, Math.round(chatRoom() * 0.42))));
   const shownDoc = () => { const d = reading(); return d && d.at === readerAt() ? d : null; };
-  /** The reader beside a page that has one (the channel, a task), from the window's top edge. */
-  const docSide = () => !!shownDoc() && readerSide() && (top().name === "channel" || top().name === "task");
   /**
    * When the conversation was entered: reports already there stay closed (their cards and the header's button open
    * them). On a desktop a report that arrives later, while the reader has room beside the chat, opens by itself; on a
@@ -3922,7 +3929,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const readerPane = () => {
     const d = shownDoc();
     if (!d) return null;
-    return <DocPane doc={d} wide={readerSide()} expanded={readerWide()} onExpand={() => { if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut")); readerWide.set(!readerWide()); }} onClose={() => reading.set(null)} />;
+    return <DocPane doc={d} wide={!touch} expanded={readerWide()} onExpand={() => { if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut")); readerWide.set(!readerWide()); }} onClose={() => reading.set(null)} />;
   };
   const visibleMessages = signal<HubEvent[]>([]);
   effect(() => {
@@ -3990,6 +3997,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     return out;
   });
   const pending = computed(() => hub.events().filter((e) => isAsk(e) && !answered().has(e.ref!)));
+  /** The badge and the tray count the hub's open cards, as the sidebar does (see badge.ts). */
+  const waitingCount = computed(() => badgeCount(hub.status(), answered(), pending().length));
   /** The pending ask the keys act on: the one picked (J / K, the sidebar), else the newest. */
   const target = computed(() => {
     const p = pending();
@@ -4366,7 +4375,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   }
   // The app's badge and the page's title count the decisions waiting. iOS needs the permission, so it follows that too.
   effect(() => {
-    const n = pending().length;
+    const n = waitingCount();
     push.info();
     if (hub.loaded()) setBadge(n);
   });
@@ -4460,7 +4469,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     else show({ name: "team" });
   };
   // The tray menu counts the decisions waiting and opens the one the keys act on, or the team settings.
-  effect(() => props.onTray?.({ pending: pending().length, review: () => { const ref = untracked(target); if (ref) pick(ref); }, settings: openTeam }));
+  effect(() => props.onTray?.({ pending: waitingCount(), review: () => { const ref = untracked(target); if (ref) pick(ref); }, settings: openTeam }));
   cleanup(() => props.onTray?.(null));
 
   // Shortcuts. Single keys never fire while typing (`notEditing`).
@@ -4912,20 +4921,6 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       </View>
     </View>
   );
-  /** Any page with report cards (the channel, a task) gets the same reader beside it, or over it on a phone. */
-  const withReader = (page: JSX.Element) => (
-    <View style={{ flex: 1, flexDirection: "row", minWidth: 0 }}>
-      {page}
-      {/* room for the reader, which `docSide` draws over the page's bar up to the window's top edge */}
-      <If when={shownDoc() && readerSide()}>
-        <View style={{ width: readerWidth() }} />
-      </If>
-      <If when={shownDoc() && !readerSide() && !touch}>
-        <View testID="doc-sheet" style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, paddingBottom: safeArea().bottom, backgroundColor: colors.background }}>{readerPane()}</View>
-      </If>
-    </View>
-  );
-
   const gutter = () => (wide() ? 32 : 16);
   const titleOf = (r: Route): string => {
     switch (r.name) {
@@ -4972,8 +4967,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
         alignItems: "center",
         gap: 6,
         paddingLeft: (wide() && sidebarOpen() ? 0 : hasWindow ? titleBar().left : 0) + (wide() ? 24 : 8),
-        // the reader beside the chat takes the bar's right end and the window buttons with it
-        paddingRight: (docSide() ? readerWidth() : hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
+        // Opening the reader leaves the header geometry intact.
+        paddingRight: (hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
         borderBottomWidth: 0.5,
         borderBottomColor: surfaceEdge(),
         backgroundColor: colors.background,
@@ -5014,8 +5009,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   );
   const content = (r: Route) => {
     switch (r.name) {
-      case "channel": return withReader(channelPage());
-      case "task": return withReader(<TaskDetail hub={hub} id={r.id} wide={wide()} onFold={(f) => taskFolds.update((m) => ({ ...m, [r.id]: f }))} />);
+      case "channel": return channelPage();
+      case "task": return <TaskDetail hub={hub} id={r.id} wide={wide()} onFold={(f) => taskFolds.update((m) => ({ ...m, [r.id]: f }))} />;
       case "tasks": return <TaskHistory hub={hub} wide={wide()} onTask={openTask} />;
       case "host": return <MachineDetail hub={hub} host={r.host} wide={wide()} onTask={openTask} />;
       case "team":
@@ -5080,13 +5075,18 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
           </NavPage>
         )}
       </NavStack>
-      <If when={docSide()}>
-        <View testID="doc-side" style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: readerWidth(), borderLeftWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}>{readerPane()}</View>
-      </If>
       <If when={!wide() && !touch && drawer()}>
         <View testID="drawer-dismiss" role="button" accessibilityLabel={L("Close sidebar", "关闭侧栏")} onPress={() => drawer.set(false)} pan={{ x: drawerX }} onPanStart={() => { Keyboard.dismiss(); drawerDragging.set(true); }} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.08)" }} />
       </If>
       </View>
+
+      <If when={!touch}>
+        <ReaderSheet open={!!shownDoc()} availableWidth={chatRoom()} insetLeft={windowSize().width - chatRoom()}
+          width={readerWidth()} expanded={readerWide()} onResize={(width) => resizedReaderWidth.set(width)}
+          onClose={() => reading.set(null)}>
+          {readerPane()}
+        </ReaderSheet>
+      </If>
 
       {/* A touch screen: the sidebar is a sheet from the left edge, the report reader one from the bottom over the chat. */}
       <If when={touch}>
@@ -5103,7 +5103,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
         </Sheet>
         <Sheet
           side="bottom"
-          open={!!shownDoc() && !readerSide()}
+          open={!!shownDoc()}
           onOpenChange={({ open }) => { if (!open) reading.set(null); }}
           closeOnSwipe
           backdropClass="bg-scrim"

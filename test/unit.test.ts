@@ -34,6 +34,8 @@ test("external signature links the Noop name to its site", () => {
 test("result parsing", () => {
   expect(parseResult('blah\n```json\n{"status":"done","summary":"ok"}\n```').status).toBe("done");
   expect(parseResult("no block").status).toBe("failed");
+  // codex sometimes ends its reply with a bare JSON object instead of a fenced ```json block
+  expect(parseResult('{"status":"done","summary":"ok"}').status).toBe("done");
 });
 
 test("owner image uploads: images only, 10 MB, attachments are the hub's own media", async () => {

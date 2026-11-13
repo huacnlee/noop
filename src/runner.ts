@@ -288,6 +288,14 @@ export function parseResult(out: string): Result {
       if (r.status) return r;
     } catch {}
   }
+  // codex (and others) sometimes end the reply with a bare JSON object instead of a fenced block
+  const bare = out.match(/\{[\s\S]*\}/);
+  if (bare) {
+    try {
+      const r = JSON.parse(bare[0]);
+      if (r.status) return r;
+    } catch {}
+  }
   return { status: "failed", summary: `agent returned no result block. tail: ${out.slice(-300)}` };
 }
 

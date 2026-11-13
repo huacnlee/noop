@@ -27,7 +27,8 @@ const startedAt = (m: Meta) => Date.parse(m.waiting_since || m.created || "") ||
 /** The wait_check can never answer on the host that runs it (macOS path on a Linux primary, etc.). */
 export function checkUnrunnable(check: string | undefined, primaryOs: string): boolean {
   if (!check) return false;
-  if (primaryOs !== "macos" && /\/Users\/|\bswift\b|\bxcrun\b|\bosascript\b/.test(check)) return true;
+  // "/Users/" only means a macOS home when it starts a path: "/c/Users/me" (Git Bash), "C:/Users/me" and "/mnt/c/Users/me" are local Windows paths.
+  if (primaryOs !== "macos" && /(?<![A-Za-z0-9_:.~$-])\/Users\/|\bswift\b|\bxcrun\b|\bosascript\b/.test(check)) return true;
   if (primaryOs !== "windows" && /[A-Z]:\\|powershell|\.exe\b/i.test(check)) return true;
   return false;
 }
