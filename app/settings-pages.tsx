@@ -1,6 +1,9 @@
 // The settings pages, wide and on phones, and the team's rules and memory: a lazy chunk, loaded the first time one
 // shows (lazy.tsx). NumberField's NumberInput comes with it, and on the web its part of the runtime.
-import { SegmentedControl } from "nsh/mobile";
+import { toggleTheme } from "./appearance";
+import * as nshMobile from "nsh/mobile";
+type SegmentedControlProps = { testID?: string; items: { title: string }[]; selectedIndex: number; onChange: (event: { index: number }) => void };
+const SegmentedControl = (nshMobile as { SegmentedControl?: (props: SegmentedControlProps) => JSX.Element }).SegmentedControl;
 import { cleanup, openUrl, platform, safeArea, Scroll, signal, Text, View, type ViewStyle } from "nsh";
 import type { JSX } from "nsh";
 import { AlertDialog, Dialog, Input, Menu, MenuItem } from "nsh/base";
@@ -9,7 +12,7 @@ import { runningPackage } from "nsh/updater";
 import * as nshUpdater from "nsh/updater";
 import { L, lang, LANGS } from "./i18n";
 import {
-  alpha, Badge, Button, cardEdge, colors, corner, focusRing, hovered, Icon, IconButton, Indicator, isDark, toggleTheme, MenuPanel, menuBox,
+  alpha, Badge, Button, cardEdge, colors, corner, focusRing, hovered, Icon, IconButton, Indicator, isDark, MenuPanel, menuBox,
   menuEnter, menuRowHover, PageHeader, pageContent, radius, Separator, SettingsChoices, SettingsGroup, SettingsItem, size,
   Spinner, Switch, tints, touch,
 } from "./ui";
@@ -790,12 +793,18 @@ export function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings;
       <If when={platform.os === "ios"}>
         {/* iOS: the system's segmented control (Liquid Glass on iOS 26); the account menu has the same choice as checks. */}
         <Section title={L("Appearance", "外观")}>
-          <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
-            <SegmentedControl testID="settings-appearance"
-              items={[{ title: L("Light", "浅色") }, { title: L("Dark", "深色") }]}
-              selectedIndex={isDark() ? 1 : 0}
-              onChange={({ index }) => { if ((index === 1) !== isDark()) toggleTheme(); }} />
-          </View>
+          {SegmentedControl
+            ? <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+                <SegmentedControl testID="settings-appearance"
+                  items={[{ title: L("Light", "浅色") }, { title: L("Dark", "深色") }]}
+                  selectedIndex={isDark() ? 1 : 0}
+                  onChange={({ index }) => { if ((index === 1) !== isDark()) toggleTheme(); }} />
+              </View>
+            // A runtime without the native control: the same choice as rows, like the language above.
+            : <Choices label={L("Appearance", "外观")}
+                choices={[{ id: "light", label: L("Light", "浅色"), testID: "settings-appearance-light" }, { id: "dark", label: L("Dark", "深色"), testID: "settings-appearance-dark" }]}
+                selected={isDark() ? "dark" : "light"}
+                onPick={(id) => { if ((id === "dark") !== isDark()) toggleTheme(); }} />}
         </Section>
       </If>
       <Section title={L("Memory", "记忆")} hint={L("The rules the team works by, your preferences, member profiles and past decisions. Read-only.", "团队做事依据的规则、你的偏好、成员档案和决策先例。只读。")}>

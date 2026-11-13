@@ -1,3 +1,4 @@
+import { toggleTheme } from "./appearance";
 // noop chat client: one TSX app for the web (served by the hub), macOS, Linux and phones.
 // Design: the NSH gallery's (~/work/nsh/examples/gallery): its theme tokens (theme.json is the
 // gallery's), its shared UI layer (nsh-gallery-ui: palette, icons, tooltips, scroll bars), its
@@ -8,7 +9,6 @@ import {
   cleanup,
   createAnimatedValue,
   createMotion,
-  colorScheme,
   computed,
   effect,
   host,
@@ -26,7 +26,6 @@ import {
   safeArea,
   Scroll,
   type Signal,
-  setColorScheme,
   signal,
   Storage,
   Text,
@@ -36,9 +35,13 @@ import {
   windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
-import { Toast, ToastStack, Button as BaseButton, ContextMenu, Menu, MenuButton, type MenuButtonItem, MenuItem, Submenu, Input, NavPage, NavStack, Scrollbar, Sheet, createNavStack } from "nsh/base";
+import { Toast, ToastStack, Button as BaseButton, ContextMenu, Menu, MenuItem, Submenu, Input, NavPage, NavStack, Scrollbar, Sheet, createNavStack } from "nsh/base";
 import { isAvailable as hasWindow, titleBar, currentWindow } from "nsh/desktop";
 import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, installAndRestart, restartToPackage, runningPackage } from "nsh/updater";
+import * as nshBase from "nsh/base";
+type MenuButtonItem = { id: string; label: string; icon?: string; disabled?: boolean; checked?: boolean; inline?: boolean; items?: MenuButtonItem[] };
+type MenuButtonProps = { testID?: string; accessibilityLabel?: string; title?: string; items: MenuButtonItem[]; onSelect: (event: { id: string }) => void; style?: ViewStyle; children?: JSX.Element };
+const MenuButton = (nshBase as { MenuButton?: (props: MenuButtonProps) => JSX.Element }).MenuButton;
 import { SettingsToast } from "./settings-toast";
 import { Avatar, displayName, Field, linkColor, MONO, pickLang, releaseKeyboard, STATE_OF, surfaceEdge, systemHeader } from "./kit";
 import { createHub, type Hub, hostCall, ipBlocked, KEYS, loadConfig, type Boot, type Config } from "./connection";
@@ -79,6 +82,7 @@ import {
   Indicator,
   type IndicatorStatus,
   Input as TextField,
+  SearchField,
   Kbd,
   size,
   touch,
@@ -157,11 +161,7 @@ const updateAllMachines = async (hub: Hub) => (await confirms.load()).updateAllM
 // Email sign-in code length (cloud/src/index.ts CODE_LEN): letters and digits, case-insensitive.
 const CODE_LEN = 8;
 
-function toggleTheme() {
-  const next = colorScheme() === "dark" ? "light" : "dark";
-  setColorScheme(next);
-  Storage.setItem(KEYS.theme, next);
-}
+
 
 // ---------------------------------------------------------------- small pieces (the gallery's idioms; shared ones in kit.tsx)
 
@@ -871,14 +871,19 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
   const error = signal("");
   const loading = signal(false);
   const query = signal("");
+  const searched = signal(""); // the query the shown results are for
+  const searching = signal(false); // a first page is on its way (the field's spinner), not a "Load more"
   let asked = 0; // the newest request; an older answer that lands late is dropped
   async function load(reset: boolean) {
     const mine = ++asked;
     loading.set(true);
     const offset = reset ? 0 : untracked(tasks).length;
-    const r = await props.hub.api("GET", `/api/tasks?limit=${HISTORY_PAGE}&offset=${offset}&q=${encodeURIComponent(untracked(query).trim())}`);
+    const q = reset ? untracked(query).trim() : untracked(searched);
+    if (reset) { searched.set(q); searching.set(true); }
+    const r = await props.hub.api("GET", `/api/tasks?limit=${HISTORY_PAGE}&offset=${offset}&q=${encodeURIComponent(q)}`);
     if (mine !== asked) return;
     loading.set(false);
+    searching.set(false);
     if (!r.ok) { error.set(r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器")); return; }
     error.set("");
     const page = (r.data.tasks as TaskInfo[] | undefined) ?? [];
@@ -889,20 +894,27 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
   return (
     <Scroll testID="task-history" style={{ flex: 1 }}>
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 32 : 16, paddingVertical: 20 }}>
-        {/* searched on the button or Enter, not on every keystroke: each search reads every task on the server */}
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <TextField
-            testID="task-search"
-            value={query()}
-            onChange={query.set}
-            onSubmit={() => void load(true)}
-            placeholder={L("Search by ID, title or member", "搜索编号、标题或成员")}
-            style={{ flex: 1 }}
-          />
-          <Button testID="task-search-button" label={L("Search", "搜索")} variant="secondary" disabled={loading()} onPress={() => void load(true)} />
-        </View>
+        {/* searched on Return, not on every keystroke: each search reads every task on the server */}
+        <SearchField
+          testID="task-search"
+          value={query()}
+          onChange={query.set}
+          onSubmit={() => void load(true)}
+          onClear={() => { query.set(""); if (searched()) void load(true); }}
+          placeholder={L("Search by ID, title or member", "搜索编号、标题或成员")}
+          clearLabel={L("Clear search", "清除搜索")}
+          loading={searching()}
+          hint={query().trim() !== searched()}
+        />
         <If when={error()}><Text style={{ fontSize: 14, color: colors.danger }}>{error()}</Text></If>
-        <If when={total() === 0 && !loading()}><Text style={{ fontSize: 14, color: colors.faint }}>{L("No matching tasks", "没有符合的任务")}</Text></If>
+        <If when={searched() && total() !== null && !error()}>
+          <Text style={{ fontSize: 13, color: colors.faint }}>
+            {total() === 0
+              ? L(`No tasks match “${searched()}”`, `没有与“${searched()}”匹配的任务`)
+              : L(`${total()} ${total() === 1 ? "task matches" : "tasks match"} “${searched()}”`, `${total()} 个任务与“${searched()}”匹配`)}
+          </Text>
+        </If>
+        <If when={!searched() && total() === 0 && !loading()}><Text style={{ fontSize: 14, color: colors.faint }}>{L("No tasks yet", "还没有任务")}</Text></If>
         <Each of={groupByDay(tasks(), (t) => t.updated ?? "")} key={(g) => g.key}>
           {(g) => (
         <View>
@@ -1548,7 +1560,7 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
     <Text testID="user-account" style={{ flex: 1, fontSize: 13, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{account() || L("Account", "账户")}</Text>
     <Icon name="chevron-up" size={12} tint={colors.faint} />
   </>;
-  if (ios) {
+  if (ios && MenuButton) {
     /** The system menu's rows, as data: the same actions, language and appearance as the drawn menu's. */
     const items = (): MenuButtonItem[] => [
       { id: "mark-all-read", label: L("Mark all as read", "全部已读"), icon: "checkmark.circle", disabled: !props.reads.main().length },
