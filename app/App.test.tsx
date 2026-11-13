@@ -368,20 +368,28 @@ describe("channel", () => {
     expect(app.shows("text:/Queued 2/")).toBe(true);
   });
 
-  test("a task id is a chip that opens the task; a GitHub PR link is a plain link named repo#n", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
+  for (const os of ["macos", "linux"] as const) test(`a task tag opens the task on ${os}; a GitHub PR link stays a plain link`, async () => {
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: os });
     await app.waitFor("text:app#42");
     expect(app.shows("id:gh-chip-app-42")).toBe(false);
     expect(app.shows("text:/github\\.com\\/acme\\/app/")).toBe(false);
     await app.press("text:app#42");
     expect(app.openedUrls()).toEqual(["https://github.com/acme/app/pull/42"]);
-    await app.press("id:task-chip-T-0005");
+    expect(app.shows("id:task-chip-T-0005")).toBe(os !== "macos");
+    await app.press(os === "macos" ? "text:T-0005" : "id:task-chip-T-0005");
     await app.waitFor("Task T-0005");
+  });
+
+  test("macOS decision and proposal tags remain visible message text", async () => {
+    const extra = [{ id: "e30", ts: ts(40), from: "dev@linux-box", kind: "notice", text: "按 D-0408 选 A 处理，参考 P-H0001" }];
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], extra), width: 1200, height: 800, platform: "macos" });
+    await app.waitFor("text:/按 D-0408 选 A 处理/");
+    expect(app.shows("text:/P-H0001/")).toBe(true);
   });
 
   test("an id inside a file path stays plain text; one on its own is a chip", async () => {
     const extra = [{ id: "e30", ts: ts(40), from: "dev@linux-box", kind: "notice", text: "依据 tasks/done/T-0005.md 和 D-0294/notes，不重复 T-0005" }];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], extra), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], extra), width: 1200, height: 800, platform: "linux" });
     await app.waitFor("text:/tasks\\/done\\/T-0005\\.md/");
     expect(app.shows("text:/D-0294\\/notes/")).toBe(true);
     // The chip of the id on its own (the earlier message has one too).

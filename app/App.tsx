@@ -60,6 +60,7 @@ import { agentDisplayName, avatarOf } from "./avatars";
 import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc } from "./files";
 import { hubMarkdown } from "./markdown";
+import { messageTags, taskTagId } from "./message-tags";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
 import { setupTray, type TrayChat } from "./tray";
@@ -621,14 +622,18 @@ function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?:
   const doc = () => {
     // Reports preserve identifiers as text; chat-only chips can replace a heading prefix with an invisible attachment.
     const d = TextView.parse(hubMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, props.report ? [] : EXTENSIONS);
-    return { ...d, blocks: ghBlocks(d.blocks) };
+    return messageTags({ ...d, blocks: ghBlocks(d.blocks) }, platform.os);
   };
   return (
     <View style={{ gap: 6 }}>
       <TextView
         document={doc()}
         selectable
-        onLinkPress={({ url }) => { if (/^(https?|mailto):/i.test(url)) void openUrl(url).catch(() => {}); }}
+        onLinkPress={({ url }) => {
+          const task = taskTagId(url);
+          if (task) taskLink(task);
+          else if (/^(https?|mailto):/i.test(url)) void openUrl(url).catch(() => {});
+        }}
         renderCustom={(node) => <Custom node={node} small={small} />}
         styles={{
           root: { gap: 8 * k(), fontSize: fontSize(), lineHeight: lineHeight(), color: small ? colors.muted : colors.text },
