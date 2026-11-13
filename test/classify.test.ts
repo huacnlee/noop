@@ -31,3 +31,12 @@ test("login problems stay auth, and unrelated failures stay unclassified", () =>
   expect(classify("API Error: 401 unauthorized")).toBe("auth");
   expect(classify("tests failed: 3 of 40")).toBeNull();
 });
+
+test("Claude's expired OAuth session enters the auth failover path", () => {
+  const message = "Failed to authenticate: OAuth session expired and could not be refreshed";
+  expect(classify(message)).toBe("auth");
+  expect(classify(JSON.stringify({ type: "result", is_error: true, result: message }))).toBe("auth");
+  expect(classify("OAuth token has expired")).toBe("auth");
+  expect(classify("OAuth session has expired")).toBe("auth");
+  expect(classify("OAuth session created; tests failed: 3 of 40")).toBeNull();
+});
