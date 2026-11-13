@@ -726,6 +726,32 @@ describe("channel", () => {
     await app.waitFor("早就做完了");
   });
 
+  test("all tasks: Return searches, the result line names the query, and clearing brings every task back", async () => {
+    const row = (i: number) => ({ id: `T-${1000 + i}`, title: `旧任务 ${i}`, agent: "lead", state: "done", updated: ts(1) });
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: {
+        ...hub([]),
+        [`GET ${URL}/api/tasks?*`]: (r: { url: string }) => {
+          const q = new ParsedURL(r.url).searchParams.get("q");
+          if (q) return { body: { tasks: [row(70)], total: 1 } };
+          return { body: { tasks: Array.from({ length: 3 }, (_, i) => row(i)), total: 3 } };
+        },
+      },
+    });
+    await app.waitFor("Channel");
+    await app.press("label:All tasks");
+    await app.waitFor("旧任务 0");
+    expect(app.shows("Search")).toBe(false); // no separate button: Return searches
+    await app.type("id:task-search", "旧任务 70");
+    await app.submit("id:task-search");
+    await app.waitFor("1 task matches “旧任务 70”");
+    expect(app.shows("旧任务 0")).toBe(false);
+    await app.press("id:task-search-clear");
+    await app.waitFor("旧任务 0");
+    expect(app.shows("task matches")).toBe(false);
+  });
+
   test("channels: the sidebar lists them with unread counts; a channel shows its goal, items, edit and archive", async () => {
     const posts: unknown[] = [];
     const fresh = ts(5);
