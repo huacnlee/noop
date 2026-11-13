@@ -331,13 +331,16 @@ function yieldToPreferred(meta: Record<string, string>, caps: string[], cfg: Cfg
   return onlineHosts(cfg).some((h) => h.host !== hostName(cfg) && prefer.every((r) => h.caps.includes(r)));
 }
 
+/** A host's CPU pressure as its heartbeat reports it (0-1): measured utilisation when known, else load/cores. */
+const heartPressure = (s: any): number => (s?.cpuBusyPct == null ? (s?.loadRatio ?? 0) : s.cpuBusyPct / 100);
+
 /** Heavy work goes to the least-loaded capable online host. */
 function yieldHeavy(meta: Record<string, string>, cfg: Cfg, myLoad: number, heavyOk: boolean): boolean {
   if (meta.weight !== "heavy") return false;
   if (!heavyOk) return true;
   const me = hostName(cfg);
   return onlineHosts(cfg).some((h) => h.host !== me && matches(meta, h.caps) && h.stats
-    && h.stats.loadRatio + 0.2 < myLoad && h.busy === 0);
+    && heartPressure(h.stats) + 0.2 < myLoad && h.busy === 0);
 }
 
 export function pickTask(cfg: Cfg, myLoad = 0, heavyOk = true): string | null {

@@ -13,7 +13,7 @@ import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
-import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
+import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
@@ -651,7 +651,7 @@ export async function tick(cfg: Cfg, background = false) {
     if (running >= max) break;
     if (!pickAccount(cfg, ["claude", "codex"].filter((c) => Bun.which(c)))) break;
     if ((await githubStarved(cfg)).starved && list(P("tasks", "inbox"), /^T-.*\.md$/).every((p) => GH_HEAVY.has(readDoc(p).meta.agent))) break;
-    const t = pickTask(cfg, s.loadRatio, canRunHeavy(s, cfg, running));
+    const t = pickTask(cfg, pressureOf(s), canRunHeavy(s, cfg, running));
     if (!t) break;
     const active = await claim(t, host);
     if (!active) { if (tried.has(t)) break; tried.add(t); continue; } // e.g. offline: don't spin on the same task
