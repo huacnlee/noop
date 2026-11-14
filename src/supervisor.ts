@@ -53,6 +53,13 @@ export function classify(t: Task, ctx: Ctx): Verdict | null {
   // 2. blocked on a card that is already closed → the answer never reached it
   if (t.folder === "blocked" && m.decision && ctx.decision(m.decision) === "closed") return v(`answered:${m.decision}`, "resume", [L(`${m.decision} was answered but the task did not continue`, `${m.decision} 已回答但任务没有继续`)]);
   if (t.folder === "blocked" && m.decision && ctx.decision(m.decision) === "open") return null; // the owner has the card
+  // 2b. parked on the owner: a human wait is a state, not a stall. waits.ts gives it no deadline and no timer, so a
+  // clock-based card here would only add a second unanswered card about the first one (2026-11-14: 167 identical
+  // "long run on <host>" cards, every one a routine copy waiting on the same unanswered card).
+  if (m.wait_kind === "human") return null;
+  if (t.folder === "blocked" && (m.waiting_on ?? "").match(/D-\d+/g)?.some((id) => ctx.decision(id) === "open")) return null;
+  // a wake the runner already scheduled is progress too (CI waits cap at 120 minutes in waits.ts)
+  if (m.wake_at && Date.parse(m.wake_at) > ctx.now) return null;
   const age = (ctx.now - startedAt(m)) / 3_600_000;
   const wakes = Number(m.wakes ?? 0);
   const reasons: string[] = [];
@@ -82,7 +89,8 @@ export function classify(t: Task, ctx: Ctx): Verdict | null {
 export function sweepPlatform(tasks: Task[], vs: Verdict[]): Verdict[] {
   const causes = new Set(vs.filter((v) => v.action === "escalate" && v.cause.startsWith("platform:")).map((v) => v.cause));
   const have = new Set(vs.map((v) => v.id));
-  return tasks.filter((t) => t.folder === "waiting" && !t.meta.children && !have.has(t.meta.id) && causes.has(`platform:${platform(t.meta)}`))
+  // a task parked on the owner is not evidence that its platform is missing (T-1477)
+  return tasks.filter((t) => t.folder === "waiting" && !t.meta.children && t.meta.wait_kind !== "human" && !have.has(t.meta.id) && causes.has(`platform:${platform(t.meta)}`))
     .map((t) => ({ id: t.meta.id, cause: `platform:${platform(t.meta)}`, reasons: [L(`also needs ${platform(t.meta)}`, `同样需要 ${platform(t.meta)}`)], action: "escalate" as const }));
 }
 
