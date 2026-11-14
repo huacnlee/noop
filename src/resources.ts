@@ -1,12 +1,54 @@
 // Resource governor: telemetry, adaptive parallelism, per-agent CPU budgets, automatic disk cleanup.
 // Everything here is deterministic code — agents never decide to delete things on their own.
 import { existsSync, lstatSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs";
-import { availableParallelism, freemem, homedir, loadavg, tmpdir, totalmem } from "node:os";
+import { availableParallelism, cpus, freemem, homedir, loadavg, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import { type Cfg, L, P, journal } from "./core";
 
-export type Stats = { cores: number; load1: number; loadRatio: number; memFreePct: number; diskFreeGB: number; diskFreePct: number };
+export type Stats = {
+  cores: number; load1: number; loadRatio: number;
+  /** Share of CPU time busy (0-100) since the previous sample; null until a delta exists or where it cannot be read. */
+  cpuBusyPct?: number | null;
+  memFreePct: number; diskFreeGB: number; diskFreePct: number;
+};
+
+type CpuTicks = { idle: number; total: number };
+
+/** Share of CPU time busy between two counter snapshots (0-1), null when there is no usable delta. */
+export function busyShare(prev: CpuTicks | null, cur: CpuTicks): number | null {
+  if (!prev || cur.total <= prev.total) return null;
+  return Math.min(1, Math.max(0, 1 - (cur.idle - prev.idle) / (cur.total - prev.total)));
+}
+
+const CPU_MIN_MS = 2000, CPU_FIRST_MS = 50;
+const snapCpu = (): CpuTicks => cpus().reduce<CpuTicks>((a, c) => {
+  a.idle += c.times.idle;
+  a.total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
+  return a;
+}, { idle: 0, total: 0 });
+// Primed at load so the first tick already has a baseline instead of falling back to loadavg.
+let cpuPrev: ({ at: number } & CpuTicks) | null = { at: Date.now(), ...snapCpu() };
+let cpuBusy: number | null = null;
+
+/** CPU busy share since the previous call, cached for minMs so a burst of samples in one dispatch loop reads one
+ *  stable value. loadavg is NOT usable for this on macOS: it averages every runnable thread of every process, so a
+ *  Mac with Chrome, WeChat and a chat app open reads 20-35 on 8 cores (2-4x the core count) while two thirds of the
+ *  CPU is idle — and the fleet then throttles itself for load it did not create. */
+export function cpuBusyShare(now = Date.now(), minMs = CPU_MIN_MS): number | null {
+  const prev = cpuPrev;
+  const elapsed = prev ? now - prev.at : Infinity;
+  if (prev && elapsed < minMs && cpuBusy != null) return cpuBusy; // still fresh
+  if (prev && elapsed < CPU_FIRST_MS) return cpuBusy; // counters have not moved enough to mean anything
+  const cur = snapCpu();
+  cpuPrev = { at: now, ...cur };
+  const busy = busyShare(prev, cur);
+  if (busy != null) cpuBusy = busy;
+  return cpuBusy;
+}
+
+/** The machine's CPU pressure, 0-1: measured utilisation when it is known, else load/cores (Windows, first tick). */
+export const pressureOf = (s: Stats): number => (s.cpuBusyPct == null ? s.loadRatio : s.cpuBusyPct / 100);
 
 /** Available memory. macOS freemem() excludes inactive/purgeable/speculative pages and reads ~2% on a healthy Mac. */
 function availMem(): number {
@@ -23,10 +65,12 @@ function availMem(): number {
 export function sample(cfg: Cfg): Stats {
   const cores = availableParallelism();
   const load1 = process.platform === "win32" ? 0 : loadavg()[0]; // Windows has no loadavg → rely on mem/disk
+  const busy = cpuBusyShare();
   const fsInfo = statfsSync(cfg.resources?.disk_path ?? homedir());
   const free = fsInfo.bavail * fsInfo.bsize, total = fsInfo.blocks * fsInfo.bsize;
   return {
     cores, load1: +load1.toFixed(2), loadRatio: +(load1 / cores).toFixed(2),
+    cpuBusyPct: busy == null ? null : Math.round(busy * 100),
     memFreePct: Math.round((availMem() / totalmem()) * 100),
     diskFreeGB: Math.round(free / 1e9), diskFreePct: Math.round((free / total) * 100),
   };
@@ -36,20 +80,22 @@ export function sample(cfg: Cfg): Stats {
 export function allowedParallel(s: Stats, cfg: Cfg, running: number): number {
   const max = cfg.host?.max_parallel ?? Math.max(2, Math.floor(s.cores / 3));
   const r = cfg.resources ?? {};
-  // load from our own running agents is expected; judge headroom by load beyond that
+  // Judge headroom by CPU actually spent, not by loadavg: on macOS loadavg counts every runnable thread of every
+  // GUI app, so a Mac at two thirds idle reads 2-4x its core count and used to pin the fleet to one agent forever.
+  const pressure = pressureOf(s);
   if (s.memFreePct < (r.mem_min_pct ?? 10) || s.diskFreeGB < (r.disk_hard_min_gb ?? 5)) return Math.min(running, 1) || 0;
-  if (s.loadRatio > (r.load_high ?? 0.9)) return Math.max(1, Math.min(running, max - 1));
-  if (s.loadRatio > (r.load_mid ?? 0.7)) return Math.max(1, Math.ceil(max / 2));
+  if (pressure > (r.load_high ?? 0.9)) return Math.max(1, Math.min(running, max - 1));
+  if (pressure > (r.load_mid ?? 0.7)) return Math.max(1, Math.ceil(max / 2));
   return max;
 }
 
 /** Heavy tasks (benchmarks, full builds, perf validation) only start with real headroom. */
 export const canRunHeavy = (s: Stats, cfg: Cfg, running: number) =>
-  s.loadRatio < (cfg.resources?.heavy_max_load ?? 0.5) && s.memFreePct > 25 && running < 2;
+  pressureOf(s) < (cfg.resources?.heavy_max_load ?? 0.5) && s.memFreePct > 25 && running < 2;
 
 /** CPU budget handed to each agent through env + prompt. */
 export function budget(s: Stats, running: number, heavy: boolean) {
-  const idle = Math.max(1, Math.floor(s.cores * (1 - Math.min(s.loadRatio, 0.95))));
+  const idle = Math.max(1, Math.floor(s.cores * (1 - Math.min(pressureOf(s), 0.95))));
   const jobs = heavy ? Math.max(2, idle) : Math.max(1, Math.floor(idle / Math.max(1, running)));
   return {
     jobs,
