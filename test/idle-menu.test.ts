@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { DATA, P, list, readDoc, writeDoc } from "../src/core";
 import { maybeProposeNext } from "../src/cli";
 
-const dirs = ["tasks/inbox", "tasks/active", "decisions/open", "journal"];
+const dirs = ["tasks/inbox", "tasks/active", "decisions/open", "decisions/closed", "journal"];
 const cfg = { idle: { after_minutes: 20, cooldown_minutes: 180 } };
 const now = Date.now();
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
@@ -59,4 +59,31 @@ test("active work resets the idle window and prevents a menu", () => {
   maybeProposeNext(cfg, "test", st);
   expect(tasks()).toEqual([]);
   expect(st.idle_since).toBeUndefined();
+});
+
+test("an idle run that raised no menu waits out the full cooldown before the next one", () => {
+  const clock = spyOn(Date, "now").mockReturnValue(now);
+  try {
+    // T-0100 was the last idle run; the chief of staff found nothing worth asking, so no decision points at it.
+    const st = { idle_since: ago(600), last_menu: ago(30), last_idle_task: "T-0100" };
+    maybeProposeNext(cfg, "test", st);
+    expect(tasks()).toEqual([]);
+    maybeProposeNext(cfg, "test", { ...st, last_menu: ago(181) });
+    expect(tasks()).toHaveLength(1);
+  } finally { clock.mockRestore(); }
+});
+
+test("an idle run whose menu was answered does not delay the next menu past the 15-minute guard", () => {
+  const clock = spyOn(Date, "now").mockReturnValue(now);
+  try {
+    writeDoc(P("decisions/closed", "D-0001.md"), { id: "D-0001", kind: "menu", task: "T-0100", created: ago(40) }, "answered");
+    maybeProposeNext(cfg, "test", { idle_since: ago(60), last_menu: ago(30), last_idle_task: "T-0100" });
+    expect(tasks()).toHaveLength(1);
+  } finally { clock.mockRestore(); }
+});
+
+test("launching an idle run remembers its task id for the next check", () => {
+  const st: Record<string, string> = { idle_since: ago(60) };
+  maybeProposeNext(cfg, "test", st);
+  expect(st.last_idle_task).toBe(readDoc(tasks()[0]).meta.id);
 });

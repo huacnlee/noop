@@ -565,6 +565,10 @@ const inQuietHours = (cfg: Cfg) => {
   return a < b ? cur >= a && cur < b : cur >= a || cur < b;
 };
 
+/** Did this task end in a decision card (open or already answered)? Decision cards carry the id of the task that raised them. */
+const raisedDecision = (taskId: string) =>
+  ["open", "closed"].some((dir) => list(P("decisions", dir)).some((p) => readDoc(p).meta.task === taskId));
+
 export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, string>) {
   if (cfg.idle?.enabled === false || inQuietHours(cfg)) return;
   const busy = ["inbox", "active"].some((f) => list(P("tasks", f), /^T-.*\.md$/)
@@ -579,11 +583,16 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
     .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
   const cooldown = (cfg.idle?.cooldown_minutes ?? 180) * 60_000;
   if (pendingMenu && Date.now() - Date.parse(pendingMenu.created) < cooldown) return;
-  if (state.last_menu && Date.now() - Date.parse(state.last_menu) < 15 * 60_000) return;
+  const sinceLast = state.last_menu ? Date.now() - Date.parse(state.last_menu) : Infinity;
+  if (sinceLast < 15 * 60_000) return;
+  // The cooldown above only covers a menu card that is still open. A run that found nothing worth asking raises no card,
+  // so without this the next run fires every 15 minutes, each one a full model run that again answers "nothing new".
+  if (sinceLast < cooldown && state.last_idle_task && !raisedDecision(state.last_idle_task)) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
 Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
+  state.last_idle_task = id;
   journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff drafting a next-steps menu`);
 }
 
