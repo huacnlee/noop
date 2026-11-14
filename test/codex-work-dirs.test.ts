@@ -24,6 +24,16 @@ test("without work_dirs the writable dirs are unchanged", () => {
   expect(codexWritableDirs(home)).toContain(join(home, "work"));
 });
 
+test("codex can write the hub's feed, where `noop notify` appends", () => {
+  const home = tmp("noop-home-");
+  const root = join(home, "data");
+  mkdirSync(root);
+  mkdirSync(join(home, "feed")); // server.ts keeps it next to the data dir, not inside it
+  const dirs = codexWritableDirs(home, [], root);
+  expect(dirs).toContain(join(home, "feed"));
+  expect(dirs).toContain(root);
+});
+
 test("the codex command passes the configured work_dirs as --add-dir", () => {
   const elsewhere = tmp("noop-repos-");
   const cmd = cliCommand("codex", { resources: { work_dirs: [elsewhere] } } as any);
