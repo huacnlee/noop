@@ -12,7 +12,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { writeRules } from "./rules";
-import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
+import { backoffMinutes, checkedFallbackMin, isNoChangeRoutine, maxWaitMin, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -233,7 +233,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, children: children.join(",") }, body + runNote);
     journal(host, `🧩 ${meta.id} delegated to ${children.join(", ")}`);
   } else if (res.status === "waiting") { // parked: the slot is free until the wait is over
-    const w = waitMeta(res);
+    const w = waitMeta(res, Date.now(), maxWaitMin());
     const wakes = Number(meta.wakes ?? 0);
     // the owner's approval covers the whole task: a wait for CI before the approved merge must not revoke it
     writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, gate_override: meta.gate_override, waiting_since: meta.waiting_since || now(), parked_at: now(), wake_at: w.wake_at, wait_kind: w.kind, wakes: wakes ? String(wakes) : undefined,
@@ -470,6 +470,7 @@ const GH_HEAVY = new Set(["dispatcher", "reviewer", "ops-watcher", "oss-triage",
 
 /** Parent tasks waiting on delegated children: when every child is finished, requeue the parent to consolidate. */
 function wakeParents(host: string, ready = new Set<string>()) {
+  const cap = maxWaitMin();
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta, body } = readDoc(p);
     if (meta.wait_kind === "human" && !meta.wake_at) { // waits on a person: only an event wakes it, never the clock
@@ -478,14 +479,14 @@ function wakeParents(host: string, ready = new Set<string>()) {
     if (meta.wake_at || meta.wait_kind) { // parked on something slow: back to the queue once the time is up, or as soon as its check changes
       if (meta.wake_at && Date.parse(meta.wake_at) > Date.now() && !ready.has(meta.id)) continue;
       // A CI wait with a wait_check is watched by the daemon for free; waking an agent only to see "still pending" burns a
-      // slot and a wake. Until its check changes, the timer is just a fallback (CHECKED_FALLBACK_MIN after parking).
+      // slot and a wake. Until its check changes, the timer is just a fallback (checkedFallbackMin after parking).
       if (!ready.has(meta.id) && meta.wait_check && meta.wait_kind !== "human") {
-        const fallback = (Date.parse(meta.parked_at || meta.waiting_since || "") || 0) + CHECKED_FALLBACK_MIN * 60_000;
+        const fallback = (Date.parse(meta.parked_at || meta.waiting_since || "") || 0) + checkedFallbackMin(cap) * 60_000;
         if (fallback > Date.now()) { writeDoc(p, { ...meta, wake_at: new Date(fallback).toISOString() }, body); continue; }
       }
       // Only wakes without progress count toward parking it as blocked; a changed wait_check is progress.
       const wakes = Number(meta.wakes ?? 0) + (ready.has(meta.id) ? 0 : 1);
-      if (tooManyWakes(wakes)) { // cycling without progress: stop waking it, tell the owner once what blocks it
+      if (tooManyWakes(wakes, cap)) { // cycling without progress: stop waking it, tell the owner once what blocks it
         writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...meta, wake_at: undefined, wakes: String(wakes), status: "blocked" },
           `${body}\nBlocked after ${wakes} wake-ups, still waiting on: ${meta.waiting_on ?? "?"}\n`);
         unlinkSync(p);
@@ -549,7 +550,7 @@ export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Se
       if (saved && saved[2] === cmd) base = Number(saved[1]);
       else if (doc) writeDoc(path, { ...doc.meta, wait_check_base: `${code} ${cmd}` }, doc.body);
     }
-    waitChecks.set(id, { cmd, base: base ?? code, next: now + (everyMs ?? backoffMinutes(n) * 60_000), n });
+    waitChecks.set(id, { cmd, base: base ?? code, next: now + (everyMs ?? backoffMinutes(n, maxWaitMin()) * 60_000), n });
     if (base !== undefined && code !== base) { ready.add(id); waitChecks.delete(id); }
   }));
   for (const id of waitChecks.keys()) if (!waiting.has(id)) waitChecks.delete(id);

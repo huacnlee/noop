@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { backoffMinutes, isMergeCard, isNoChangeRoutine, mergeHeadline, tooManyWakes, waitKind, waitMeta } from "../src/waits";
+import { backoffMinutes, checkedFallbackMin, isMergeCard, isNoChangeRoutine, mergeHeadline, maxWaitMin, tooManyWakes, waitKind, waitMeta } from "../src/waits";
 
 test("CI wait_check backs off 5 → 10 → 20 → 40 minutes", () => {
-  expect([0, 1, 2, 3, 4, 9].map(backoffMinutes)).toEqual([5, 10, 20, 40, 40, 40]);
+  expect([0, 1, 2, 3, 4, 9].map((n) => backoffMinutes(n))).toEqual([5, 10, 20, 40, 40, 40]);
 });
 
 test("human waits get no timed wake-up; CI waits do", () => {
@@ -33,4 +33,24 @@ test("routine runs without changes stay out of the owner channel", () => {
   expect(isNoChangeRoutine("routine:own-prs-ci", "本轮没有修改或推送。")).toBe(true);
   expect(isNoChangeRoutine("owner@chat", "本轮没有修改")).toBe(false);
   expect(isNoChangeRoutine("routine:pr-review", "审了 nsh #981，发了评论")).toBe(false);
+});
+
+test("[waits] max_minutes lowers the cap; a missing or too-small value keeps the 120-minute default", () => {
+  expect(maxWaitMin({})).toBe(120);
+  expect(maxWaitMin({ waits: { max_minutes: 20 } })).toBe(20);
+  expect(maxWaitMin({ waits: { max_minutes: 1 } })).toBe(120);
+  expect(maxWaitMin({ waits: { max_minutes: "soon" } })).toBe(120);
+});
+
+test("every timed wait respects the cap, and the wake budget keeps the same 12 hours of patience", () => {
+  expect([0, 1, 2, 3, 9].map((n) => backoffMinutes(n, 20))).toEqual([5, 10, 20, 20, 20]);
+  expect(backoffMinutes(9)).toBe(40);
+  expect(checkedFallbackMin(20)).toBe(20);
+  expect(checkedFallbackMin()).toBe(120);
+  expect(waitMeta({ waiting_on: "CI", wait_minutes: 500 }, 0, 20).minutes).toBe(20);
+  expect(waitMeta({ waiting_on: "CI", wait_minutes: 500 }, 0).minutes).toBe(120);
+  expect(tooManyWakes(36, 20)).toBe(false);
+  expect(tooManyWakes(37, 20)).toBe(true);
+  expect(tooManyWakes(6)).toBe(false);
+  expect(tooManyWakes(7)).toBe(true);
 });

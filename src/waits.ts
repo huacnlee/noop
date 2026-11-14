@@ -1,7 +1,7 @@
 // Wait tiers, routine silence and merge cards: pure rules the daemon applies (kept here so they are unit-tested).
 
 /** A wait on a person (owner clicks merge, answers a card, publishes by hand) vs. a wait on a machine (CI, a deploy). */
-import { L } from "./core";
+import { L, loadConfig, type Cfg } from "./core";
 
 export type WaitKind = "human" | "ci";
 
@@ -12,21 +12,30 @@ export function waitKind(res: { wait_kind?: string; waiting_on?: string }): Wait
   return HUMAN.test(res.waiting_on ?? "") ? "human" : "ci";
 }
 
-/** Poll interval for a CI wait_check after `checks` earlier polls: 5 → 10 → 20 → 40 minutes, then stays at 40. */
-export const backoffMinutes = (checks: number) => 5 * 2 ** Math.min(3, Math.max(0, checks));
+/** The longest a task waits before it is looked at again (agent re-check or daemon poll), in minutes. */
+export const DEFAULT_MAX_WAIT_MIN = 120;
+
+/** `[waits] max_minutes` in config.toml changes the cap; a missing value or one below the 5-minute floor keeps the default. */
+export function maxWaitMin(cfg: Cfg = loadConfig()): number {
+  const n = Math.floor(Number(cfg.waits?.max_minutes));
+  return n >= 5 ? n : DEFAULT_MAX_WAIT_MIN;
+}
+
+/** Poll interval for a CI wait_check after `checks` earlier polls: 5 → 10 → 20 → 40 minutes, then stays at 40 (or at the cap, if lower). */
+export const backoffMinutes = (checks: number, cap = DEFAULT_MAX_WAIT_MIN) => Math.min(cap, 5 * 2 ** Math.min(3, Math.max(0, checks)));
 
 /** A CI wait whose wait_check the daemon polls wakes its agent on the clock only after this long without a change. */
-export const CHECKED_FALLBACK_MIN = 120;
+export const checkedFallbackMin = (cap = DEFAULT_MAX_WAIT_MIN) => cap;
 
-/** Wake-ups after which a task stops cycling and is parked as blocked. */
-export const MAX_WAKES = 6;
-export const tooManyWakes = (wakes: number) => wakes > MAX_WAKES;
+/** Wake-ups after which a task stops cycling and is parked as blocked: about 12 hours of waking at the cap (6 × 120, 36 × 20),
+ * so lowering the cap checks a healthy long wait more often without parking it sooner. */
+export const tooManyWakes = (wakes: number, cap = DEFAULT_MAX_WAIT_MIN) => wakes > Math.round(720 / cap);
 
 /** A human wait has no deadline: it wakes only on an event (its wait_check changes, the owner answers or writes). */
-export function waitMeta(res: { wait_kind?: string; waiting_on?: string; wait_minutes?: number; wait_check?: string }, now = Date.now()) {
+export function waitMeta(res: { wait_kind?: string; waiting_on?: string; wait_minutes?: number; wait_check?: string }, now = Date.now(), cap = DEFAULT_MAX_WAIT_MIN) {
   const kind = waitKind(res);
   if (kind === "human") return { kind, wake_at: undefined as string | undefined, minutes: 0 };
-  const minutes = Math.min(120, Math.max(5, Number(res.wait_minutes) || 15));
+  const minutes = Math.min(cap, Math.max(5, Number(res.wait_minutes) || 15));
   return { kind, wake_at: new Date(now + minutes * 60_000).toISOString(), minutes };
 }
 
