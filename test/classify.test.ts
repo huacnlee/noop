@@ -23,6 +23,8 @@ test("quota walls are still recognised, including reset hints that carry a time"
     "429 Too Many Requests",
     "Your credit balance is too low to access the API",
     "The server is overloaded",
+    // Command Code Plan's 402 wording (T-1953): credits exhausted, resets only on renewal — failover now
+    "API Error: 402 Command Code Plan: You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
   ]) expect(classify(msg)).toBe("quota");
 });
 
