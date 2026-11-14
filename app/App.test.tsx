@@ -1091,6 +1091,32 @@ describe("images", () => {
     expect(posts[0]).toMatchObject({ text: "看这个报错", attachments: ["/media/shot-1.png"] });
   });
 
+  test("a composer thumbnail opens the full-size viewer, pages through the attached images, and still removes", async () => {
+    const app = await open("./App.tsx", { ...desk, network: withUploads([], []) });
+    await app.waitFor("id:composer");
+    await app.dropFiles("id:drop-window", [`file://${here("icon.png")}`]);
+    await app.waitFor("id:attachment");
+    await app.dropFiles("id:drop-window", [`file://${here("icon.png")}`]);
+    await app.waitUntil(() => app.count("id:attachment") === 2);
+    // pressing the picture, not the close button, is what opens it
+    await app.press("label:View icon.png >> nth=0");
+    await app.waitFor("text:1 / 2");
+    await app.press("id:image-next");
+    await app.waitFor("text:2 / 2");
+    await app.press("label:Close image >> nth=0");
+    await app.waitUntil(() => !app.shows("text:1 / 2"));
+    expect(app.count("id:attachment")).toBe(2);
+    // reopening on the second picture starts there, not back at the first
+    await app.press("label:View icon.png >> nth=1");
+    await app.waitFor("text:2 / 2");
+    await app.press("label:Close image >> nth=0");
+    await app.waitUntil(() => !app.shows("text:2 / 2"));
+    // the close button still removes the attachment
+    await app.press("label:Remove icon.png >> nth=1");
+    expect(app.count("id:attachment")).toBe(1);
+    expect(app.shows("id:image-viewer")).toBe(false); // removing is not a press on the picture
+  });
+
   test("undo brings the image back to the composer; nothing is uploaded", async () => {
     const posts: { text: string }[] = [];
     const uploads: string[] = [];
