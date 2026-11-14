@@ -1,5 +1,5 @@
 // Fleet metrics → fleet/metrics.json; the architect uses them to evolve prompts, rules and memory.
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { P, list, readDoc } from "./core";
 import { judgeAccuracy } from "./autonomy";
 
@@ -23,7 +23,10 @@ export function computeMetrics(days = 7) {
   const agents = Object.fromEntries(Object.entries(per).map(([k, v]) => {
     const n = v.done + v.failed + v.blocked;
     const med = v.minutes.sort((a, b) => a - b)[Math.floor(v.minutes.length / 2)] ?? 0;
-    return [k, { runs: n, success: +(v.done / (n || 1)).toFixed(2), failed: v.failed, blocked: v.blocked, median_minutes: Math.round(med) }];
+    // blocked/ holds tasks parked on the owner's decision (needs_decision), not agent failures: a menu that ends in a
+    // question is doing its job, so counting those as failures reads as 0.00 success for the agents that ask the most.
+    const judged = v.done + v.failed;
+    return [k, { runs: n, success: judged ? +(v.done / judged).toFixed(2) : null, failed: v.failed, blocked: v.blocked, median_minutes: Math.round(med) }];
   }));
   const approvals = list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => m.kind === "proposals");
   const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/).length;
@@ -34,6 +37,7 @@ export function computeMetrics(days = 7) {
     decisions: { total: decisions.length, by_judge: byWho(/^judge/), by_owner: byWho(/^owner\(/), owner_overrides_of_judge: byWho(/override/),
       owner_accepted_recommendation: rubberStamp },
   };
+  mkdirSync(P("fleet"), { recursive: true });
   writeFileSync(P("fleet", "metrics.json"), JSON.stringify(out, null, 2));
   return out;
 }
