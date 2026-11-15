@@ -24,6 +24,35 @@ export type Result = {
   followups?: { title: string; body?: string; agent?: string; priority?: string; repo?: string; requires?: string; host?: string }[];
 };
 
+export type RunLimits = {
+  totalMinutes: number;
+  workMinutes: number;
+  checkpointMinutes: number;
+  checkpointAt: string;
+  hardAt: string;
+};
+
+export function runLimits(cfg: Cfg, started = Date.now()): RunLimits {
+  const totalMinutes = Math.max(1, Number(cfg.clis?.timeout_minutes) || 60);
+  const configured = Number(cfg.clis?.checkpoint_minutes);
+  const checkpointMinutes = totalMinutes < 15 ? 0 : Math.min(totalMinutes - 5,
+    Number.isFinite(configured) && configured > 0 ? configured : 10);
+  const workMinutes = totalMinutes - checkpointMinutes;
+  return {
+    totalMinutes, workMinutes, checkpointMinutes,
+    checkpointAt: new Date(started + workMinutes * 60_000).toISOString(),
+    hardAt: new Date(started + totalMinutes * 60_000).toISOString(),
+  };
+}
+
+export function deadlinePrompt(limits: RunLimits): string {
+  const reserve = limits.checkpointMinutes
+    ? `The final ${limits.checkpointMinutes} minutes are reserved for emergency checkpoint recovery; the process is stopped at ${limits.hardAt}.`
+    : `The process is stopped at ${limits.hardAt}.`;
+  return `The task has a ${limits.totalMinutes}-minute hard limit. Finish normally or return a structured result before ${limits.checkpointAt}.
+If work may outlive that checkpoint deadline, save durable progress first, then return \`waiting\` with a quick read-only \`wait_check\` whose exit code changes when the wait is over. ${reserve}`;
+}
+
 const RESULT_SPEC = () => `Finish the work, then end your final reply with EXACTLY one fenced \`\`\`json block:
 {
   "status": "done" | "needs_decision" | "failed" | "delegated" | "waiting",   // delegated = you split the work into followups and want to be woken up to consolidate when they finish; waiting = see below
@@ -46,7 +75,7 @@ Never sit idle waiting on something slow (GitHub Actions/CI, a release, a review
 Before returning "waiting", do every part of the task that does not depend on the condition (other platforms, docs, tests, screenshots, the next PR): implement and let CI verify rather than wait for a host. Waiting on another PR to merge is not a reason to stop: build on its branch or merge it locally, and note the dependency.
 The machine then runs other work and wakes you later with your notes; check the condition first, then continue from where you left off.`;
 
-export function buildPrompt(meta: Record<string, string>, body: string, cfg: Cfg, resourceNote = ""): string {
+export function buildPrompt(meta: Record<string, string>, body: string, cfg: Cfg, resourceNote = "", limits = runLimits(cfg)): string {
   const agent = meta.agent || "lead";
   const host = meta.claimed_by || "?";
   return `You are **${agentName(agent)}**, a permanent member of ${cfg.owner?.name ?? "the owner"}'s AI agent fleet, running headless on host \`${host}\`.
@@ -82,6 +111,9 @@ Outside the hub you are Noop: never use your agent name (${agentName(agent)}) or
 
 # Resource budget
 ${resourceNote}
+
+# Run deadline
+${deadlinePrompt(limits)}
 
 ${channelPrompt()}
 
@@ -175,8 +207,8 @@ export function stripImages(line: string): string {
 /** A run that died before reaching the provider — no tokens spent, no tool ran, so it is safe to spawn again. */
 const UNREACHABLE = /Can't reach the API server|connection_failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo/i;
 
-/** Marker runAgent appends when it stopped a run that went quiet (see stall_minutes). */
 export const STALLED = "\n[stalled]";
+export const RUN_LIMIT = "\n[run-limit]";
 
 /** `retryEmpty` is internal: an empty completion gets exactly one rerun (see the end of the function). */
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
@@ -251,7 +283,6 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   };
 
   let stalled = false, timedOut = false;
-  // hitting the run limit is not a tooling fault: report it like a stall so the task continues where it got to
   const timer = setTimeout(() => { timedOut = true; proc.kill(); }, timeoutMs);
   // a run that has gone quiet: no output at all, and nothing slow in flight (a sub-agent may work quietly for long)
   const watch = setInterval(() => {
@@ -266,7 +297,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const logged = json ? raw.split("\n").map(stripImages).join("\n") : raw;
   writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${logged}\n\n[stderr]\n${err}`);
   const out = json ? (resultText ?? assistantText) : raw;
-  if (timedOut) return `${out}${STALLED} hit the ${Math.round(timeoutMs / 60_000)}-minute run limit (clis.timeout_minutes)${act.step ? `; last step: ${act.step}` : ""}; run long builds in the background and return "waiting"`;
+  if (timedOut) return `${out}${RUN_LIMIT} hit the ${Math.round(timeoutMs / 60_000)}-minute work limit${act.step ? `; last step: ${act.step}` : ""}`;
   if (stalled) return `${out}${STALLED} no output for ${Math.round(stallMs / 60_000)} minutes${act.step ? `; last step: ${act.step}` : ""}`;
   // A provider occasionally answers with an empty completion (no text, no tool call, exit 0) and Claude Code's own
   // "no visible output" retry gets nothing either. That is a flake of the tool chain, not the task failing: rerun the

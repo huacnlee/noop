@@ -10,7 +10,7 @@ import {
 } from "./core";
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
-import { STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
+import { RUN_LIMIT, STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent, runLimits } from "./runner";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
@@ -155,9 +155,47 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const gh = await githubStarved(cfg);
     const b = budget(sample(cfg), running, meta.weight === "heavy");
     b.note += gh.note ? `\n${gh.note}` : "";
-    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note), meta.repo || P(), cfg, log, !!meta.gate_override,
+    const limits = runLimits(cfg);
+    const workCfg = limits.checkpointMinutes
+      ? { ...cfg, clis: { ...cfg.clis, timeout_minutes: limits.workMinutes } }
+      : cfg;
+    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note, limits), meta.repo || P(), workCfg, log, !!meta.gate_override,
       { ...b.env, ...accountEnv(acct) });
     if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; } // the owner cancelled it while it ran
+    if (out.includes(RUN_LIMIT)) {
+      const partial = parseResult(out.slice(0, out.indexOf(RUN_LIMIT)));
+      if (partial.status !== "failed") { res = partial; break; }
+      if (limits.checkpointMinutes) {
+        await locked(async () => {
+          journal(host, L(`💾 ${meta.id} work window ended; saving a checkpoint`, `💾 ${meta.id} 工作窗口结束，开始保存检查点`));
+          await _commitPush(`[${host}] checkpoint ${meta.id}`);
+        });
+        const checkpointLog = P("logs", "runs", `${meta.id}-${Date.now()}-${cli}-checkpoint.log`);
+        const hardAt = Date.parse(limits.hardAt);
+        const remainingMinutes = Math.max(0.1, (hardAt - Date.now()) / 60_000);
+        const resumeAt = hardAt + 5 * 60_000;
+        const resumeMinutes = Math.max(5, Math.ceil((resumeAt - Date.now()) / 60_000));
+        const checkpointCfg = { ...cfg, clis: { ...cfg.clis, timeout_minutes: remainingMinutes } };
+        const checkpointBody = `${promptBody}\n\n# Checkpoint-only recovery\nThe main work window ended. Do not continue broad implementation. Inspect ${log} and the current checkout, preserve all durable progress (including a commit on the existing agent branch when appropriate), and return a structured result. Prefer \`waiting\` with the real external condition's read-only \`wait_check\`. If there is no external condition, use \`wait_kind: "ci"\`, \`wait_minutes: ${resumeMinutes}\`, and \`wait_check: "test \"$(date +%s)\" -ge ${Math.floor(resumeAt / 1000)}"\` so the daemon resumes from the saved checkpoint instead of rerunning immediately.`;
+        const checkpointLimits = {
+          totalMinutes: remainingMinutes,
+          workMinutes: remainingMinutes,
+          checkpointMinutes: 0,
+          checkpointAt: limits.hardAt,
+          hardAt: limits.hardAt,
+        };
+        const checkpointOut = await runAgent(cli, buildPrompt(meta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
+          meta.repo || P(), checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
+        if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; }
+        const checkpoint = parseResult(checkpointOut);
+        if (checkpoint.status !== "failed" && (checkpoint.status !== "waiting" || checkpoint.wait_check)) {
+          res = checkpoint;
+          break;
+        }
+      }
+      res = checkpointFallback(meta.id, log);
+      break;
+    }
     if (out.includes(STALLED)) { // went quiet and was stopped: run it again from where it got to, up to twice
       const why = out.slice(out.indexOf(STALLED) + STALLED.length).trim();
       const stalls = Number(meta.stalls ?? 0) + 1;
@@ -261,6 +299,17 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   }
   await _commitPush(`[${host}] ${res.status} ${meta.id}: ${meta.title}`);
   });
+}
+
+export function checkpointFallback(id: string, log: string, resumeAt = Date.now() + 5 * 60_000): Result {
+  return {
+    status: "waiting",
+    wait_kind: "ci",
+    wait_minutes: 5,
+    wait_check: `test "$(date +%s)" -ge ${Math.floor(resumeAt / 1000)}`,
+    waiting_on: `checkpoint saved after the work limit; resume ${id} from ${log}`,
+    summary: `The work window ended before a structured checkpoint was returned. The transcript is preserved at ${log}; resume by inspecting the existing branch and checkout instead of repeating completed work.`,
+  };
 }
 
 /** The followups this run may spawn: the array the result spec asks for, minus entries with no usable title.

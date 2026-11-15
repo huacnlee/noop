@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { due } from "../src/cli";
+import { checkpointFallback, due } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
-import { cliCommand, parseResult, runAgent, stripImages } from "../src/runner";
+import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
 
 test("routine schedule", () => {
   const t = new Date("2026-11-02T19:05:00"); // Monday
@@ -41,6 +41,37 @@ test("result parsing", () => {
 test("result parsing repairs a raw line break inside a JSON string", () => {
   const out = '```json\n{"status":"delegated","summary":"ok","followups":[{"title":"x","body":"line one\n","agent":"a"}]}\n```';
   expect(parseResult(out)).toMatchObject({ status: "delegated", followups: [{ title: "x", body: "line one\n", agent: "a" }] });
+});
+
+test("long runs reserve a checkpoint window before the hard limit", () => {
+  const limits = runLimits({ clis: { timeout_minutes: 90 } } as Cfg, 0);
+  expect(limits).toEqual({
+    totalMinutes: 90,
+    workMinutes: 80,
+    checkpointMinutes: 10,
+    checkpointAt: "1970-01-01T01:20:00.000Z",
+    hardAt: "1970-01-01T01:30:00.000Z",
+  });
+  expect(runLimits({ clis: { timeout_minutes: 90, checkpoint_minutes: 15 } } as Cfg, 0).workMinutes).toBe(75);
+  expect(runLimits({ clis: { timeout_minutes: 10 } } as Cfg, 0).checkpointMinutes).toBe(0);
+});
+
+test("every task prompt states the checkpoint and hard deadlines", () => {
+  const cfg = { clis: { timeout_minutes: 90 }, owner: { name: "owner" } } as Cfg;
+  const prompt = deadlinePrompt(runLimits(cfg, 0));
+  expect(prompt).toContain("90-minute hard limit");
+  expect(prompt).toContain("1970-01-01T01:20:00.000Z");
+  expect(prompt).toContain("1970-01-01T01:30:00.000Z");
+  expect(prompt).toContain("return `waiting` with a quick read-only `wait_check`");
+});
+
+test("checkpoint fallback parks with an executable time-based wait_check", () => {
+  expect(checkpointFallback("T-1", "/tmp/run.log", 300_000)).toMatchObject({
+    status: "waiting",
+    wait_kind: "ci",
+    wait_minutes: 5,
+    wait_check: 'test "$(date +%s)" -ge 300',
+  });
 });
 
 test("owner image uploads: images only, 10 MB, attachments are the hub's own media", async () => {
@@ -365,6 +396,21 @@ test("a run that never reached the API is retried once instead of failing the ta
     rmSync(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("a run stopped by its work limit uses a distinct checkpoint marker", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/noop-run-limit-`);
+  const script = `setTimeout(() => {}, 5000)`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script] }, timeout_minutes: 0.001 } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const out = await runAgent("fake", "prompt", dir, cfg, log);
+    expect(out).toContain(RUN_LIMIT);
+    expect(out).not.toContain("[stalled]");
+    expect(readFileSync(log, "utf8")).toContain("[stderr]");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 5_000);
 
 test("a failed run that already did work is not retried, however its text reads", async () => {
   // The medic reports connection errors in its own result text. Replaying a run that ran a tool would repeat its
