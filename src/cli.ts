@@ -12,7 +12,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { RUN_LIMIT, STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent, runLimits } from "./runner";
 import { writeRules } from "./rules";
-import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
+import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, MAX_WAKES, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -165,6 +165,14 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     if (out.includes(RUN_LIMIT)) {
       const partial = parseResult(out.slice(0, out.indexOf(RUN_LIMIT)));
       if (partial.status !== "failed") { res = partial; break; }
+      const limitHits = recordRunLimit(meta);
+      if (tooManyWakes(limitHits)) {
+        res = { status: "failed", summary: L(
+          `The task reached its work limit ${limitHits} times; stopped after the ${MAX_WAKES}-resume safety cap`,
+          `任务已 ${limitHits} 次达到工作时限；超过 ${MAX_WAKES} 次恢复的安全上限，已停止`,
+        ) };
+        break;
+      }
       if (limits.checkpointMinutes) {
         await locked(async () => {
           journal(host, L(`💾 ${meta.id} work window ended; saving a checkpoint`, `💾 ${meta.id} 工作窗口结束，开始保存检查点`));
@@ -176,7 +184,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
         const resumeAt = hardAt + 5 * 60_000;
         const resumeMinutes = Math.max(5, Math.ceil((resumeAt - Date.now()) / 60_000));
         const checkpointCfg = { ...cfg, clis: { ...cfg.clis, timeout_minutes: remainingMinutes } };
-        const checkpointBody = `${promptBody}\n\n# Checkpoint-only recovery\nThe main work window ended. Do not continue broad implementation. Inspect ${log} and the current checkout, preserve all durable progress (including a commit on the existing agent branch when appropriate), and return a structured result. Prefer \`waiting\` with the real external condition's read-only \`wait_check\`. If there is no external condition, use \`wait_kind: "ci"\`, \`wait_minutes: ${resumeMinutes}\`, and \`wait_check: "test \"$(date +%s)\" -ge ${Math.floor(resumeAt / 1000)}"\` so the daemon resumes from the saved checkpoint instead of rerunning immediately.`;
+        const checkpointBody = checkpointRecoveryBody(promptBody, log, resumeAt, resumeMinutes);
         const checkpointLimits = {
           totalMinutes: remainingMinutes,
           workMinutes: remainingMinutes,
@@ -310,6 +318,16 @@ export function checkpointFallback(id: string, log: string, resumeAt = Date.now(
     waiting_on: `checkpoint saved after the work limit; resume ${id} from ${log}`,
     summary: `The work window ended before a structured checkpoint was returned. The transcript is preserved at ${log}; resume by inspecting the existing branch and checkout instead of repeating completed work.`,
   };
+}
+
+export function checkpointRecoveryBody(body: string, log: string, resumeAt: number, resumeMinutes: number): string {
+  return `${body}\n\n# Checkpoint-only recovery\nThe main work window ended. Do not continue broad implementation. Inspect ${log} and the current checkout, preserve all durable progress (including a commit on the existing agent branch when appropriate), and return a structured result. Prefer \`waiting\` with the real external condition's read-only \`wait_check\`. If there is no external condition, use \`wait_kind: "ci"\`, \`wait_minutes: ${resumeMinutes}\`, and \`wait_check: "test \"$(date +%s)\" -ge ${Math.floor(resumeAt / 1000)}"\` so the daemon resumes from the saved checkpoint instead of rerunning immediately.`;
+}
+
+export function recordRunLimit(meta: Record<string, string>): number {
+  const hits = Number(meta.run_limits ?? 0) + 1;
+  meta.run_limits = String(hits);
+  return hits;
 }
 
 /** The followups this run may spawn: the array the result spec asks for, minus entries with no usable title.

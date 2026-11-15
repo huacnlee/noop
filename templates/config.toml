@@ -36,6 +36,8 @@ stale_repo_days = 7                   # target/ of repos (and, on macOS, Xcode D
 # Claude Opus = challenging work (development, debugging, architecture, UI, judge, learning, evolution).
 # Codex (ChatGPT) = routine work. The planner only suggests, so it can never override a member pinned here.
 timeout_minutes = 90
+# Runs of 30+ minutes reserve 10 minutes for checkpoint recovery by default. Set 0 to disable or another value to override.
+# checkpoint_minutes = 10
 [clis.agents]
 # reviewer = ["codex", "claude"]      # per-member order; ["codex"] = codex only (unless codex has no usable account)
 [clis.claude]

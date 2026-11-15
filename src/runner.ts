@@ -35,8 +35,8 @@ export type RunLimits = {
 export function runLimits(cfg: Cfg, started = Date.now()): RunLimits {
   const totalMinutes = Math.max(1, Number(cfg.clis?.timeout_minutes) || 60);
   const configured = Number(cfg.clis?.checkpoint_minutes);
-  const checkpointMinutes = totalMinutes < 15 ? 0 : Math.min(totalMinutes - 5,
-    Number.isFinite(configured) && configured > 0 ? configured : 10);
+  const requested = Number.isFinite(configured) ? Math.max(0, configured) : (totalMinutes >= 30 ? 10 : 0);
+  const checkpointMinutes = Math.min(Math.max(0, totalMinutes - 5), requested);
   const workMinutes = totalMinutes - checkpointMinutes;
   return {
     totalMinutes, workMinutes, checkpointMinutes,
@@ -207,7 +207,9 @@ export function stripImages(line: string): string {
 /** A run that died before reaching the provider — no tokens spent, no tool ran, so it is safe to spawn again. */
 const UNREACHABLE = /Can't reach the API server|connection_failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo/i;
 
+/** Marker for a quiet process that should use the bounded stall-retry path. */
 export const STALLED = "\n[stalled]";
+/** Marker for a process stopped at its work deadline so the caller can run checkpoint recovery. */
 export const RUN_LIMIT = "\n[run-limit]";
 
 /** `retryEmpty` is internal: an empty completion gets exactly one rerun (see the end of the function). */
@@ -283,6 +285,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   };
 
   let stalled = false, timedOut = false;
+  // A work deadline is a checkpoint signal, not a quiet-process stall: the caller gets the reserved recovery window.
   const timer = setTimeout(() => { timedOut = true; proc.kill(); }, timeoutMs);
   // a run that has gone quiet: no output at all, and nothing slow in flight (a sub-agent may work quietly for long)
   const watch = setInterval(() => {

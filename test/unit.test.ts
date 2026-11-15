@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { checkpointFallback, due } from "../src/cli";
+import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
 import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
+import { tooManyWakes } from "../src/waits";
 
 test("routine schedule", () => {
   const t = new Date("2026-11-02T19:05:00"); // Monday
@@ -53,7 +54,9 @@ test("long runs reserve a checkpoint window before the hard limit", () => {
     hardAt: "1970-01-01T01:30:00.000Z",
   });
   expect(runLimits({ clis: { timeout_minutes: 90, checkpoint_minutes: 15 } } as Cfg, 0).workMinutes).toBe(75);
-  expect(runLimits({ clis: { timeout_minutes: 10 } } as Cfg, 0).checkpointMinutes).toBe(0);
+  expect(runLimits({ clis: { timeout_minutes: 29 } } as Cfg, 0).checkpointMinutes).toBe(0);
+  expect(runLimits({ clis: { timeout_minutes: 15, checkpoint_minutes: 5 } } as Cfg, 0).workMinutes).toBe(10);
+  expect(runLimits({ clis: { timeout_minutes: 90, checkpoint_minutes: 0 } } as Cfg, 0).checkpointMinutes).toBe(0);
 });
 
 test("every task prompt states the checkpoint and hard deadlines", () => {
@@ -72,6 +75,13 @@ test("checkpoint fallback parks with an executable time-based wait_check", () =>
     wait_minutes: 5,
     wait_check: 'test "$(date +%s)" -ge 300',
   });
+});
+
+test("work-limit resumes use a separate counter with the MAX_WAKES safety cap", () => {
+  const meta: Record<string, string> = {};
+  for (let hit = 1; hit <= 6; hit++) expect(tooManyWakes(recordRunLimit(meta))).toBe(false);
+  expect(tooManyWakes(recordRunLimit(meta))).toBe(true);
+  expect(meta.run_limits).toBe("7");
 });
 
 test("owner image uploads: images only, 10 MB, attachments are the hub's own media", async () => {
@@ -407,6 +417,32 @@ test("a run stopped by its work limit uses a distinct checkpoint marker", async 
     expect(out).toContain(RUN_LIMIT);
     expect(out).not.toContain("[stalled]");
     expect(readFileSync(log, "utf8")).toContain("[stderr]");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 5_000);
+
+test("a work-limit run hands off to a checkpoint-only run end to end", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/noop-checkpoint-e2e-`);
+  const script = `let input = "";
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  if (input.includes("# Checkpoint-only recovery")) {
+    console.log('\`\`\`json\\n{"status":"waiting","wait_kind":"ci","wait_minutes":5,"wait_check":"test -f /tmp/noop-ready","waiting_on":"saved checkpoint","summary":"progress saved"}\\n\`\`\`');
+  } else setTimeout(() => {}, 5000);
+});`;
+  const workCfg = { clis: { fake: { command: [process.execPath, "-e", script] }, timeout_minutes: 0.001 } } as unknown as Cfg;
+  const checkpointCfg = { clis: { fake: { command: [process.execPath, "-e", script] }, timeout_minutes: 1 } } as unknown as Cfg;
+  const workLog = `${dir}/work.log`;
+  const checkpointLog = `${dir}/checkpoint.log`;
+  try {
+    const work = await runAgent("fake", "do work", dir, workCfg, workLog);
+    expect(work).toContain(RUN_LIMIT);
+    const body = checkpointRecoveryBody("do work", workLog, Date.now() + 300_000, 5);
+    const checkpoint = parseResult(await runAgent("fake", body, dir, checkpointCfg, checkpointLog));
+    expect(checkpoint).toMatchObject({ status: "waiting", wait_kind: "ci", wait_minutes: 5, waiting_on: "saved checkpoint" });
+    expect(checkpoint.wait_check).toBe("test -f /tmp/noop-ready");
+    expect(readFileSync(checkpointLog, "utf8")).toContain("progress saved");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
