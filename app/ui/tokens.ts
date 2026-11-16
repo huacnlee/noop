@@ -125,6 +125,9 @@ export const menuGlass = (tint: string, cornerRadius: number): ViewStyle => ({
  */
 export const composerGlass = (active = false): ViewStyle => ({
   ...glass(colors.field, corner.composer),
+  // Keep the material, fill, border and overflow mask on the same curve.
+  // Use the same circular outline for the compact pill and expanded field.
+  borderCurve: "circular",
   ...(platform.os === "ios" ? { backgroundColor: iosGlass ? "transparent" : alpha(colors.field, 0.25) } : {}),
   boxShadow: iosGlass ? "none" : "0 4px 16px rgba(0,0,0,0.06)",
   borderWidth: platform.os === "ios" || platform.os === "macos" ? 0 : 1,
