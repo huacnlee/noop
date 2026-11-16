@@ -17,6 +17,7 @@
     "host": "./host.js"
   },
   "capabilities": {
+    "application": true,
     "clipboard": true,
     "statusBar": true,
     "network": {

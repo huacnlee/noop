@@ -461,6 +461,8 @@ function toggleTheme() {
 
 /** Shared edge for controls and grouped settings surfaces. */
 const surfaceEdge = () => colors.line;
+/** The report reader's width when it first opens. */
+const READER_WIDTH = 760;
 
 /** Links use a quiet, underlined accent shared by the app's themes. */
 const linkColor = () => token("link");
@@ -1268,26 +1270,27 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
               </View>
             }
           >
-            <PopIn style={[popupSurface(), { width: 420, maxWidth: "100%", padding: 12, gap: 8 }]}>
-              <View testID={`reply-preview-${ref}`} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            {/* No padding on the card: the body scrolls edge to edge, so its scroll bar sits on the card's edge. */}
+            <PopIn style={[popupSurface(), { width: 400, maxWidth: "100%", padding: 0, overflow: "hidden" }]}>
+              <View testID={`reply-preview-${ref}`} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingLeft: 14, paddingRight: 6, paddingVertical: 6, minHeight: 44, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
                 <If when={original()}>
                   <Avatar from={original()!.from} small />
-                  <Text style={{ fontSize: size.small, fontWeight: "600", color: colors.text }}>{displayName(original()!.from)}</Text>
+                  <Text style={{ flexShrink: 1, fontSize: size.small, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{displayName(original()!.from)}</Text>
                 </If>
                 <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.muted }}>{ref}</Text>
-                <View style={{ flex: 1 }} />
                 <If when={original()}>
                   <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(original()!.ts)}</Text>
                 </If>
-              </View>
-              <Scroll style={{ maxHeight: 320 }}>
-                <If when={original()} else={<Text style={{ fontSize: size.small, color: colors.muted, userSelect: "text" }}>{asked() || L("The original message is no longer loaded.", "原消息已不在当前记录里。")}</Text>}>
-                  <Rich text={original()!.text} />
-                </If>
-              </Scroll>
-              <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+                <View style={{ flex: 1 }} />
                 <Button testID={`reply-goto-${ref}`} label={L("Go to message", "跳到原消息")} variant="ghost" size="sm" onPress={() => { peek.set(false); props.onRef?.(ref!); }} />
               </View>
+              <Scroll style={{ maxHeight: 320 }}>
+                <View style={{ paddingHorizontal: 14, paddingTop: 10, paddingBottom: 12 }}>
+                  <If when={original()} else={<Text style={{ fontSize: size.small, color: colors.muted, userSelect: "text" }}>{asked() || L("The original message is no longer loaded.", "原消息已不在当前记录里。")}</Text>}>
+                    <Rich text={original()!.text} scale={0.9} />
+                  </If>
+                </View>
+              </Scroll>
             </PopIn>
           </Popover>
         </If>
@@ -4019,7 +4022,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   /** The sheet covers only the conversation, keeping the navigation sidebar accessible. */
   const chatRoom = () => windowSize().width - (wide() && sidebarOpen() ? size.sidebar : 0);
   const readerSide = () => wide() && chatRoom() >= 860;
-  const readerWidth = () => Math.min(chatRoom(), resizedReaderWidth() ?? Math.max(360, Math.min(460, Math.round(chatRoom() * 0.42))));
+  // It opens at a reading width (about 70 characters of report text), leaving a strip of the chat to click back to.
+  const readerWidth = () => Math.min(chatRoom(), resizedReaderWidth() ?? Math.max(360, Math.min(READER_WIDTH, chatRoom() - 200)));
   const shownDoc = () => { const d = reading(); return d && d.at === readerAt() ? d : null; };
   /**
    * When the conversation was entered: reports already there stay closed (their cards and the header's button open

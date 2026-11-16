@@ -565,7 +565,8 @@ export function NumberField(props: {
   const h = size.field;
   const stepStyle = (left: boolean): ViewStyle => ({
     width: touch ? 44 : 30, alignItems: "center", justifyContent: "center",
-    [left ? "borderRightWidth" : "borderLeftWidth"]: 1, borderColor: colors.line,
+    // the dividers only part the segments: a fainter hairline than the frame around them
+    [left ? "borderRightWidth" : "borderLeftWidth"]: 1, borderColor: alpha(colors.text, fill.rest),
     transitionProperty: "background-color", transitionDuration: duration.quick,
   });
   const steps = "hover:bg-foreground/8 active:bg-foreground/14 disabled:opacity-35";
@@ -579,12 +580,12 @@ export function NumberField(props: {
       step={props.step}
       disabled={props.disabled}
       onChange={({ value }) => value != null && props.onChange(value)}
-      hoverStyle={{ borderColor: alpha(colors.text, 0.28) }}
+      hoverStyle={{ borderColor: alpha(colors.text, edge.hover) }}
       focusStyle={focusRing()}
       style={{
         flexDirection: "row", alignItems: "stretch", height: h, overflow: "hidden",
-        borderRadius: corner.field, borderCurve: "continuous", borderWidth: 1, borderColor: colors.fieldBorder,
-        backgroundColor: colors.field, boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+        borderRadius: corner.field, borderCurve: "continuous", borderWidth: 1, borderColor: alpha(colors.text, edge.rest),
+        backgroundColor: colors.field,
         opacity: props.disabled ? DISABLED : 1,
         transitionProperty: "border-color", transitionDuration: duration.quick,
       }}
