@@ -249,6 +249,10 @@ const ipBlocked = (status: number, data: unknown): string | null =>
 
 /** Failed reconnects in a row before the owner hears about it; anything shorter recovers silently. */
 const OFFLINE_AFTER = 5;
+/** Heartbeat: a socket can die silently (sleep, network switch, idle NAT timeout) and never fire `close`, leaving the
+ * chat "live" but frozen. Ping on this interval; no frame back within STALE_AFTER means the socket is dead. */
+const PING_EVERY = 25_000;
+const STALE_AFTER = 60_000;
 
 function createHub(cfg: Config) {
   const events = signal<HubEvent[]>([]);
@@ -261,6 +265,7 @@ function createHub(cfg: Config) {
   let socket: WebSocket | null = null;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let failures = 0;
+  let lastFrame = 0;
 
   const last = () => {
     const evs = untracked(events);
@@ -299,10 +304,13 @@ function createHub(cfg: Config) {
     socket = ws;
     ws.onopen = () => {
       failures = 0;
+      lastFrame = Date.now();
       conn.set("live");
       loadStatus(); // whatever changed while disconnected; from here on the hub pushes it
     };
     ws.onmessage = (m: { data: unknown }) => {
+      if (ws === socket) lastFrame = Date.now();
+      if (m.data === "pong") return;
       try {
         const d = JSON.parse(String(m.data)) as HubEvent & { $status?: Status };
         if (d.$status) status.set(d.$status);
@@ -312,8 +320,10 @@ function createHub(cfg: Config) {
       }
     };
     ws.onclose = () => {
-      if (disposed) return;
+      if (disposed || ws !== socket) return; // a socket replaced by `revive` already reconnected
+      socket = null;
       if (++failures >= OFFLINE_AFTER && untracked(conn) !== "unauthorized" && untracked(conn) !== "blocked") conn.set("offline");
+      clearTimeout(retry);
       retry = setTimeout(async () => {
         await loadFeed();
         stream();
@@ -378,13 +388,43 @@ function createHub(cfg: Config) {
     }
   }
 
+  /** Drops a silently dead socket and reconnects at once, catching up on what was missed. */
+  function revive() {
+    const dead = socket;
+    socket = null;
+    try { dead?.close(); } catch { /* already gone */ }
+    clearTimeout(retry);
+    void loadFeed().then(stream);
+  }
+
+  /** The socket's health: ping it, and replace it when nothing (pong or event) came back in time. */
+  function heartbeat() {
+    if (disposed || !socket || socket.readyState !== 1) return;
+    if (Date.now() - lastFrame > STALE_AFTER) return revive();
+    try { socket.send("ping"); } catch { revive(); }
+  }
+
   loadFeed().then(stream);
   loadStatus();
+  const pinger = setInterval(heartbeat, PING_EVERY);
+  // back from the background (or a sleeping laptop): fetch what was missed and check the socket right away
+  effect(() => {
+    if (lifecycle() !== "active") return;
+    untracked(() => {
+      if (disposed) return;
+      void loadFeed();
+      if (socket?.readyState !== 1 || Date.now() - lastFrame < PING_EVERY) return;
+      const sent = Date.now();
+      try { socket.send("ping"); } catch { return revive(); }
+      setTimeout(() => !disposed && lastFrame < sent && revive(), 10_000); // a live socket answers well within this
+    });
+  });
   // the socket pushes the dashboard; only without it does the app poll, and slowly (Cloudflare free plan)
   const timer = setInterval(() => untracked(conn) !== "live" && loadStatus(), 120_000);
   const dispose = () => {
     disposed = true;
     clearInterval(timer);
+    clearInterval(pinger);
     clearTimeout(retry);
     socket?.close();
   };

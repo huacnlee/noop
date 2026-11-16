@@ -565,7 +565,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         statusTimer ??= setInterval(pushStatus, STATUS_PUSH_MS);
       },
       close(ws) { sockets.delete(ws); pushStatus(); }, // the last watcher leaving also stops the timer
-      message() {},
+      message(ws, m) { if (m === "ping") ws.send("pong"); }, // the app's heartbeat (the cloud hub auto-answers it)
     },
   });
   console.log(`hub server on http://${server.hostname}:${server.port}  (phone: tailscale serve --bg ${server.port})`);
