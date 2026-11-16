@@ -57,5 +57,5 @@ for (const background of [false, true]) {
     `], { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", timeout: 10_000 });
     expect(proc.stderr.toString()).toBe("");
     expect(proc.exitCode).toBe(0);
-  });
+  }, 15_000); // Let the child reach its 10 s timeout before the test runner interrupts it.
 }
