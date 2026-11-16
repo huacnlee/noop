@@ -58,6 +58,12 @@ function credStamp(a: Account): number {
 export function usable(a: Account): boolean {
   const all = load();
   const s = all.accounts[key(a)] ?? {};
+  if (s.cooldown_until && !s.needs_login && s.last_error && /API Error: 50[234]\b/.test(s.last_error) && classify(s.last_error) === null) {
+    // Older versions treated the gateway's vague retry hint as exhausted credits.
+    all.accounts[key(a)] = { ...s, cooldown_until: undefined, told: undefined };
+    save(all);
+    return true;
+  }
   if ((s.needs_login || s.cooldown_until) && s.cred && credStamp(a) > s.cred) {
     // the owner logged in again (maybe another account): try it right away instead of waiting out the old limit
     all.accounts[key(a)] = { ...s, needs_login: false, cooldown_until: undefined, cred: undefined, told: undefined };
@@ -130,6 +136,11 @@ function resetTime(output: string): Date {
   return new Date(Date.now() + 60 * 60_000);
 }
 
+/** Keep concurrent failures in the same cooldown episode so they share one notification. */
+export function quotaCooldownUntil(current: string | undefined, output: string): string {
+  return current && Date.parse(current) > Date.now() ? current : resetTime(output).toISOString();
+}
+
 export async function reportFailure(a: Account, kind: Failure, output: string, cfg: Cfg) {
   if (!kind) return;
   const s = load();
@@ -139,7 +150,7 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
   st.cred = credStamp(a);
   const gateway = kind === "auth" && usesGateway(a);
   if (kind === "quota") {
-    st.cooldown_until = resetTime(output).toISOString();
+    st.cooldown_until = quotaCooldownUntil(st.cooldown_until, output);
     journal(host, `${key(a)} hit usage limit → cooldown until ${st.cooldown_until.slice(11, 16)}Z`);
     if (st.told !== st.cooldown_until) {
       st.told = st.cooldown_until;
