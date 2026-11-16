@@ -5010,7 +5010,10 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       accessibilityLabel={L(`${p.folded.title}, back to the top`, `${p.folded.title}，回到顶部`)}
       onPress={() => p.folded.reveal()}
       style={p.stacked
-        ? { minWidth: 0, maxWidth: "100%", alignItems: platform.os === "ios" ? "center" : "flex-start" }
+        // Native header slots are measured at intrinsic width, so a percentage
+        // alone cannot constrain them. Reserve 80pt per side for bar controls
+        // and their margins, including when an iPad shows the sidebar.
+        ? { width: Math.max(0, chatRoom() - 160), minWidth: 0, alignItems: platform.os === "ios" ? "center" : "flex-start", overflow: "hidden" }
         : { flexShrink: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8 }}
     >
       <Text style={{ flexShrink: 1, minWidth: 0, maxWidth: "100%", fontSize: 16, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{p.folded.title}</Text>
