@@ -563,12 +563,15 @@ describe("channel", () => {
     expect(app.openedUrls()).toEqual(["https://github.com/acme/nsh/issues/1394"]);
   });
 
-  test("an answer quotes the card it replies to; pressing the quote goes back to the card", async () => {
+  test("an answer quotes the card it replies to; pressing the quote previews it, Go to message goes back", async () => {
     const reply = { id: "e9", ts: ts(9), from: "owner", kind: "owner", ref: "D-0001", text: "B，但先跑一遍测试" };
     const app = await open("./App.tsx", { storage: STORAGE, network: hub([], [reply]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:reply-to-D-0001");
     expect(app.shows("text:要不要升级依赖？建议：B >> nth=1")).toBe(true);
     await app.press("id:reply-to-D-0001");
+    await app.waitFor("id:reply-preview-D-0001");
+    await app.press("id:reply-goto-D-0001");
+    await app.waitUntil(() => !app.shows("id:reply-preview-D-0001"));
   });
 
   test("answers a decision with one tap", async () => {

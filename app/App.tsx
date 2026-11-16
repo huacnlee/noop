@@ -39,7 +39,7 @@ import {
   windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
-import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
+import { AlertDialog, Popover, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
 // MenuButton and SegmentedControl through the namespaces: runtimes before NSH's native iOS controls (longbridge/nsh#1736)
 // lack these exports, and a missing named import would fail to link. Without them iOS keeps the drawn menu and choices.
 import * as nshBase from "nsh/base";
@@ -104,6 +104,7 @@ import {
   MenuSep,
   MenuPanel,
   PopIn,
+  popupSurface,
   menuBox,
   menuEnter,
   menuRowHover,
@@ -1200,6 +1201,9 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
   const over = signal(false);
   // a reply to an agent's message about a task quotes that message (the last one about it before this)
   const said = () => [...props.hub.events()].reverse().find((x) => x.ref === ref && x.ts <= e.ts && x.kind !== "owner" && !isHub(x.from));
+  // the message the preview shows: the card it answers, else the agent's message about the task
+  const original = () => (ref ? props.hub.events().find((x) => x.ref === ref && isAsk(x)) ?? said() : undefined);
+  const peek = signal(false);
   const asked = () => (ref ? askLine(props.hub.events().find((x) => x.ref === ref && isAsk(x))?.text ?? "") || (props.hub.status()?.decisions.find((d) => d.id === ref)?.question ?? "")
     || (/^T-/.test(ref) && said() ? `${displayName(said()!.from)}${L(": ", "：")}${firstLine(said()!.text)}` : "") : "");
   // "选 A" alone says little: the option's own words go under it, without the "A:" it already shows
@@ -1239,21 +1243,53 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
             <Text style={{ fontSize: size.tiny, fontWeight: "600", color: colors.danger }}>{L("Retry", "重试")}</Text>
           </View>
         </If>
-        {/* what this answers, quoted above the bubble (press: back to the card) */}
+        {/* what this answers, quoted above the bubble; press previews the original in place, "Go to message" scrolls there */}
         <If when={ref}>
-          <View
-            role="link"
-            testID={`reply-to-${ref}`}
-            onPress={() => props.onRef?.(ref!)}
-            hoverStyle={{ opacity: 1 }}
-            style={{ cursor: "pointer", opacity: 0.85, flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%", paddingHorizontal: 4 }}
+          <Popover
+            open={peek()}
+            onOpenChange={(o) => peek.set(o.open)}
+            placement="bottom"
+            align="end"
+            offset={6}
+            margin={8}
+            trigger={
+              <View
+                role="button"
+                testID={`reply-to-${ref}`}
+                accessibilityLabel={L(`Preview ${ref}`, `预览 ${ref}`)}
+                hoverStyle={{ opacity: 1 }}
+                style={{ cursor: "pointer", opacity: peek() ? 1 : 0.85, flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%", paddingHorizontal: 4 }}
+              >
+                <Icon name="reply" size={13} tint={colors.faint} />
+                <Text style={{ ...chipText, fontFamily: MONO, fontSize: 12, color: colors.muted }}>{ref}</Text>
+                <If when={asked()}>
+                  <Text style={{ ...chipText, flexShrink: 1, numberOfLines: 1, fontSize: 13, color: colors.faint }}>{asked()}</Text>
+                </If>
+              </View>
+            }
           >
-            <Icon name="reply" size={13} tint={colors.faint} />
-            <Text style={{ ...chipText, fontFamily: MONO, fontSize: 12, color: colors.muted }}>{ref}</Text>
-            <If when={asked()}>
-              <Text style={{ ...chipText, flexShrink: 1, numberOfLines: 1, fontSize: 13, color: colors.faint }}>{asked()}</Text>
-            </If>
-          </View>
+            <PopIn style={[popupSurface(), { width: 420, maxWidth: "100%", padding: 12, gap: 8 }]}>
+              <View testID={`reply-preview-${ref}`} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <If when={original()}>
+                  <Avatar from={original()!.from} small />
+                  <Text style={{ fontSize: size.small, fontWeight: "600", color: colors.text }}>{displayName(original()!.from)}</Text>
+                </If>
+                <Text style={{ fontFamily: MONO, fontSize: 12, color: colors.muted }}>{ref}</Text>
+                <View style={{ flex: 1 }} />
+                <If when={original()}>
+                  <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(original()!.ts)}</Text>
+                </If>
+              </View>
+              <Scroll style={{ maxHeight: 320 }}>
+                <If when={original()} else={<Text style={{ fontSize: size.small, color: colors.muted, userSelect: "text" }}>{asked() || L("The original message is no longer loaded.", "原消息已不在当前记录里。")}</Text>}>
+                  <Rich text={original()!.text} />
+                </If>
+              </Scroll>
+              <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+                <Button testID={`reply-goto-${ref}`} label={L("Go to message", "跳到原消息")} variant="ghost" size="sm" onPress={() => { peek.set(false); props.onRef?.(ref!); }} />
+              </View>
+            </PopIn>
+          </Popover>
         </If>
         <If when={e.attachments?.length}>
           <View testID="owner-images" style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "flex-end", gap: 6, opacity: props.out ? 0.65 : 1 }}>
