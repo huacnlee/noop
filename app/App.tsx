@@ -4506,7 +4506,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // Shortcuts. Single keys never fire while typing (`notEditing`).
   keymap.bind("mod+enter", submit, { when: "always" });
   keymap.bind("mod+k", () => composer?.focus(), { when: "always" });
-  keymap.bind("mod+z", () => { if (!draft()) undo(); }, { when: "always" });
+  // Mod+Z recalls a held message only while the draft is empty and one is held; otherwise the key stays with the
+  // composer, whose own undo / redo must keep working.
+  effect(() => {
+    if (draft() || !outbox().some((o) => o.state === "held")) return;
+    const off = keymap.bind("mod+z", () => { undo(); }, { when: "always" });
+    cleanup(off);
+  });
   keymap.bind("mod+,", openTeam, { when: "always" });
   keymap.bind("mod+b", () => setSidebarOpen(!untracked(sidebarOpen)), { when: "always" });
   keymap.bind("mod+shift+l", toggleTheme, { when: "always" });
