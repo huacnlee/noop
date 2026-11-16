@@ -637,3 +637,12 @@ test("lessons sent as a bare string are kept, not fatal", async () => {
   expect(() => remember("crashguard-test", undefined, "T-3")).not.toThrow();
   expect(() => remember("crashguard-test", { length: 2 } as any, "T-4")).not.toThrow(); // no write, no crash
 });
+
+test("runsCheckHere: the host that parked a wait runs its check; the primary runs the rest it can", async () => {
+  const { runsCheckHere } = await import("../src/cli");
+  const mac = { host_caps: "os:macos,host:mbp", wait_check: "test -f /Users/j/done" };
+  expect(runsCheckHere(mac, "mbp", false, "linux")).toBe(true);
+  expect(runsCheckHere(mac, "lb", true, "linux")).toBe(false); // macOS path: the primary can't answer it
+  expect(runsCheckHere({ host_caps: "host:mbp", wait_check: "gh pr checks 1 -R o/r" }, "lb", true, "linux")).toBe(true);
+  expect(runsCheckHere({ host_caps: "host:mbp", wait_check: "gh pr checks 1 -R o/r" }, "win", false, "linux")).toBe(false);
+});

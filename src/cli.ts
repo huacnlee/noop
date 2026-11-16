@@ -19,7 +19,7 @@ import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
 import { computeMetrics } from "./metrics";
 import { writeUsageReport } from "./usage-report";
-import { supervise } from "./supervisor";
+import { checkUnrunnable, supervise } from "./supervisor";
 import { collect, LEARN_PROMPT } from "./sessions";
 import { medic } from "./medic";
 import { githubStarved } from "./github";
@@ -561,7 +561,7 @@ function wakeParents(host: string, ready = new Set<string>()) {
         void notify(L(`${meta.id} is stuck: ${meta.waiting_on ?? "?"} (woken ${wakes} times, no more automatic retries)`, `${meta.id} 卡住了：${meta.waiting_on ?? "?"}（已唤醒 ${wakes} 次，不再自动重试）`), loadConfig(), { kind: "notice", ref: meta.id });
         continue;
       }
-      writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, status: undefined, claimed_by: undefined, resumed: "yes", wakes: String(wakes) },
+      writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, wait_ready: undefined, status: undefined, claimed_by: undefined, resumed: "yes", wakes: String(wakes) },
         `${body}\nResumed after waiting on: ${meta.waiting_on ?? "?"}. Check it now; if still not ready, return "waiting" again.\n`);
       unlinkSync(p);
       journal(host, L(`⏰ ${meta.id} wait over, requeued to check`, `⏰ ${meta.id} 等待结束，重新排队检查`));
@@ -587,13 +587,33 @@ const runningIds = new Set<string>();
 /** Waits with a wait_check: the daemon runs it itself (no agent) with backoff 5 → 10 → 20 → 40 minutes; once its exit
  * code differs from the first run, the wait is over. Human waits are checked too: that is how an event (PR merged) wakes them. */
 const waitChecks = new Map<string, { cmd: string; base?: number; next: number; n: number }>();
-export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Set<string>> {
+/** The host that parked a wait (it ran there), from the host_caps it recorded. */
+export const waitHost = (meta: Record<string, string | undefined>) => (meta.host_caps ?? "").split(",").find((c) => c.startsWith("host:"))?.slice(5);
+/** Which host runs a wait's check: the host that parked it always does (its local paths, Xcode, files only exist there);
+ * the primary runs every other check it can run itself. A non-primary host marks its finished waits wait_ready for the primary. */
+export function runsCheckHere(meta: Record<string, string | undefined>, host?: string, primary = true, primaryOs = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux"): boolean {
+  const owner = waitHost(meta);
+  if (host && owner === host) return true;
+  return primary && !checkUnrunnable(meta.wait_check, primaryOs);
+}
+/** Non-primary hosts hand a finished wait to the primary through the synced task file. */
+function markWaitsReady(ids: Set<string>) {
+  for (const id of ids) {
+    const p = P("tasks", "waiting", `${id}.md`);
+    if (!existsSync(p)) continue;
+    const { meta, body } = readDoc(p);
+    if (meta.wait_ready !== "yes") writeDoc(p, { ...meta, wait_ready: "yes" }, body);
+  }
+}
+export async function checkWaits(now = Date.now(), everyMs?: number, host?: string, primary = true): Promise<Set<string>> {
   const ready = new Set<string>();
   const due: [string, string, string][] = [];
   const waiting = new Set<string>();
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta } = readDoc(p);
+    if (meta.wait_ready === "yes") { ready.add(meta.id); continue; } // another host saw its check change
     if (!(meta.wake_at || meta.wait_kind) || !meta.wait_check) continue;
+    if (host !== undefined && !runsCheckHere(meta, host, primary)) continue;
     waiting.add(meta.id);
     const c = waitChecks.get(meta.id);
     if (c && c.cmd === meta.wait_check && c.next > now) continue;
@@ -618,7 +638,9 @@ export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Se
       else if (doc) writeDoc(path, { ...doc.meta, wait_check_base: `${code} ${cmd}` }, doc.body);
     }
     waitChecks.set(id, { cmd, base: base ?? code, next: now + (everyMs ?? backoffMinutes(n) * 60_000), n });
-    if (base !== undefined && code !== base) { ready.add(id); waitChecks.delete(id); }
+    if (base !== undefined && code !== base) {
+      ready.add(id); waitChecks.delete(id);
+    }
   }));
   for (const id of waitChecks.keys()) if (!waiting.has(id)) waitChecks.delete(id);
   return ready;
@@ -679,7 +701,8 @@ function maybeSupervise(cfg: Cfg, host: string) {
 export async function tick(cfg: Cfg, background = false) {
   const host = hostName(cfg);
   const primary = isPrimary(cfg, host);
-  const ready = primary ? await checkWaits().catch(() => new Set<string>()) : new Set<string>();
+  // Every host runs the checks of waits it parked (local files, Xcode); the primary also runs the rest.
+  const ready = await checkWaits(Date.now(), undefined, host, primary).catch(() => new Set<string>());
   await locked(async () => {
     await _pull();
     try { writeRules(); } catch (e) { console.error(`rules.md: ${e}`); }
@@ -691,7 +714,10 @@ export async function tick(cfg: Cfg, background = false) {
       maybeSupervise(cfg, host);
       await proposeBatch(cfg, host);
       noteUnservable(cfg, host);
-    } else reapStale(cfg, host, true);
+    } else {
+      reapStale(cfg, host, true);
+      markWaitsReady(ready); // the primary wakes them on its next tick
+    }
     await _commitPush(`[${host}] tick`);
   });
   pruneMediaHourly(cfg);

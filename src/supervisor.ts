@@ -65,7 +65,9 @@ export function classify(t: Task, ctx: Ctx): Verdict | null {
   const reasons: string[] = [];
   if (age >= ctx.maxAgeHours) reasons.push(L(`waiting ${Math.floor(age)} hours`, `已等待 ${Math.floor(age)} 小时`));
   if (wakes >= ctx.maxWakes) reasons.push(L(`woken ${wakes} times`, `唤醒 ${wakes} 次`));
-  if (checkUnrunnable(m.wait_check, ctx.primaryOs)) reasons.push(L("the wait check cannot run on the primary, so it will never fire", "等待检查命令在主控机上无法运行，永远不会触发"));
+  // the host that parked the wait runs its own check (cli.ts runsCheckHere), so only a hostless wait is stuck
+  const parkedOn = (m.host_caps ?? "").split(",").find((c) => c.startsWith("host:"))?.slice(5);
+  if (!parkedOn && checkUnrunnable(m.wait_check, ctx.primaryOs)) reasons.push(L("the wait check cannot run on the primary, so it will never fire", "等待检查命令在主控机上无法运行，永远不会触发"));
   // 3. waits on nothing: requeue once so the agent re-decides; the second time it is a card
   if (!m.waiting_on && !m.wait_check && t.folder === "waiting") {
     if (m.supervisor_requeued) return v("no-wait", "escalate", [L("nothing recorded as being waited on", "没有记录在等什么"), ...reasons]);
