@@ -4904,6 +4904,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                   paddingLeft: 18,
                   paddingRight: 8,
                   ...composerGlass(focused()),
+                  // The compact outline and its round controls share a center: radius + 4pt inset.
+                  ...(compactComposer() ? { borderRadius: corner.composerCompact } : {}),
                   ...(dropping() && onChannel() ? { borderColor: colors.accent, borderStyle: "dashed" as const } : {}),
                 }}
               >
@@ -5010,7 +5012,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                   }}
                 />
                 {/* Keep the toolbar and its buttons in one place in the tree as the field expands. */}
-                <View style={{ position: "absolute", left: 18, right: 8, bottom: compactComposer() ? 4 : 8, flexDirection: "row", alignItems: "center", gap: 8, pointerEvents: "box-none" }}>
+                <View style={{ position: "absolute", left: compactComposer() ? 12 : 18, right: compactComposer() ? 4 : 8, bottom: compactComposer() ? 4 : 8, flexDirection: "row", alignItems: "center", gap: 8, pointerEvents: "box-none" }}>
                   <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0, pointerEvents: "box-none" }}>
                     <View
                       testID="attach"

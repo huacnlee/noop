@@ -51,6 +51,8 @@ export const controlMetrics = (sm: boolean) =>
  */
 export const corner = {
   composer: 24,
+  /** Round compact control plus its uniform four-point inset. */
+  composerCompact: (touch ? 44 : 36) / 2 + 4,
   /** A sheet or an iOS menu: the softest floating surface, as the system's. */
   sheet: 24,
   field: 10,
