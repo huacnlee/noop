@@ -148,11 +148,27 @@ function prState(ref: string): string {
   try { return Bun.spawnSync(["gh", "pr", "view", n, "-R", repo, "--json", "state", "-q", ".state"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; }
 }
 
+/** Head-commit workflow runs that will never start on their own: GitHub holds them until a maintainer clicks
+    "Approve and run" (fork/first-time contributors, protected environments). One graphql call per PR. */
+function ciNeedsApproval(ref: string): boolean {
+  const [full, n] = ref.split("#");
+  const [owner, name] = full.split("/");
+  const q = `{repository(owner:"${owner}",name:"${name}"){pullRequest(number:${Number(n)}){state commits(last:1){nodes{commit{checkSuites(first:50){nodes{status conclusion}}}}}}}}`;
+  try {
+    const out = Bun.spawnSync(["gh", "api", "graphql", "-f", `query=${q}`], { stdout: "pipe", stderr: "ignore" }).stdout.toString();
+    const pr = JSON.parse(out)?.data?.repository?.pullRequest;
+    return pr?.state === "OPEN" && approvalPending(pr.commits?.nodes?.[0]?.commit?.checkSuites?.nodes ?? []);
+  } catch { return false; }
+}
+/** Pure: unit-tested. */
+export const approvalPending = (suites: { status?: string; conclusion?: string | null }[]) =>
+  suites.some((x) => x.status === "WAITING" || x.conclusion === "ACTION_REQUIRED");
+
 // ------------------------------------------------------------------ IO: one supervisor pass over the hub
 const decisionState = (id: string) => existsSync(P("decisions", "open", `${id}.md`)) ? "open" as const
   : existsSync(P("decisions", "closed", `${id}.md`)) ? "closed" as const : undefined;
 
-export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = prState) {
+export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = prState, needsApproval = ciNeedsApproval) {
   const s = cfg.supervisor ?? {};
   const retired: string[] = s.retired_hosts ?? cfg.fleet?.retired_hosts ?? [];
   const ctx: Ctx = {
@@ -174,6 +190,19 @@ export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = 
     unlinkSync(task.path);
     tasks.splice(tasks.indexOf(task), 1);
     journal(host, L(`🧭 supervisor: ${task.meta.id} resumed, ${prs.join(", ")} already merged`, `🧭 supervisor: ${task.meta.id} 唤醒核对收尾，${prs.join("、")} 已合并`)); merged++;
+  }
+  for (const task of tasks) { // A machine wait on CI that GitHub holds for approval never ends by itself: tell the owner once.
+    const m = task.meta;
+    if (task.folder !== "waiting" || m.children || m.wait_kind === "human") continue;
+    const prs = trackedPrs(m, task.body);
+    const held = prs.filter((r) => needsApproval(r));
+    const sig = held.slice().sort().join(",");
+    if (!held.length) continue;
+    const urls = held.map((r) => `https://github.com/${r.replace("#", "/pull/")}`).join(" ");
+    const on = L(`approve and run the PR's CI on GitHub: ${urls}`, `在 GitHub 上批准运行 PR 的 CI（Approve and run）：${urls}`);
+    writeDoc(task.path, { ...m, wait_kind: "human", wake_at: undefined, waiting_on: `${on}${m.waiting_on ? ` — ${m.waiting_on}` : ""}`, supervisor_ci_approval: sig }, task.body ?? "");
+    tasks.splice(tasks.indexOf(task), 1, { ...task, meta: { ...m, wait_kind: "human" } });
+    journal(host, L(`⏳ ${m.id} waiting on you: ${on} (CI has not started; the task continues once it runs)`, `⏳ ${m.id} 等你处理：${on}（CI 还没开始跑，批准后任务自动继续）`));
   }
   for (const task of tasks) {
     const v = classify(task, ctx);

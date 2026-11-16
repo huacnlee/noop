@@ -194,3 +194,20 @@ test("merged PRs wake a task once for acceptance checks instead of completing it
     for (const path of [waiting, inbox, done]) rmSync(path, { force: true });
   }
 });
+
+import { approvalPending } from "../src/supervisor";
+test("CI held for approval turns a machine wait into a visible owner wait", () => {
+  expect(approvalPending([{ status: "WAITING" }, { status: "QUEUED" }])).toBe(true);
+  expect(approvalPending([{ status: "COMPLETED", conclusion: "ACTION_REQUIRED" }])).toBe(true);
+  expect(approvalPending([{ status: "IN_PROGRESS" }, { status: "COMPLETED", conclusion: "SUCCESS" }])).toBe(false);
+  const id = "T-9810-test";
+  const waiting = P("tasks", "waiting", `${id}.md`);
+  try {
+    writeDoc(waiting, { id, title: "NSH #2126 review", waiting_on: "CI", wait_kind: "ci", wait_check: "gh pr checks 2126 -R longbridge/nsh", created: new Date(NOW).toISOString() }, "PR: https://github.com/longbridge/nsh/pull/2126");
+    supervise({}, "test", NOW, () => "OPEN", () => true);
+    const m = readDoc(waiting).meta;
+    expect(m.wait_kind).toBe("human");
+    expect(m.waiting_on).toContain("https://github.com/longbridge/nsh/pull/2126");
+    supervise({}, "test", NOW, () => "OPEN", () => { throw new Error("human waits are not rechecked"); });
+  } finally { rmSync(waiting, { force: true }); }
+});
