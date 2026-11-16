@@ -348,14 +348,18 @@ function parsed(text: string): Result | null {
   } catch { return null; }
 }
 
-/** Models occasionally put a literal line break or a bare `"` inside a JSON string. Keep the text, make the block parseable.
+/** Models occasionally put a literal line break, a bare `"` or a lone backslash inside a JSON string. Keep the text, make the block parseable.
  * A `"` inside a string is a stray quote unless the next non-space character can follow a value (`:`, `,`, `}`, `]`, end). */
 function repairJson(json: string): string {
   let out = "", inString = false, escaped = false;
   for (let i = 0; i < json.length; i++) {
     const c = json[i];
     if (escaped) { out += c; escaped = false; continue; }
-    if (c === "\\") { out += c; escaped = true; continue; }
+    if (c === "\\") {
+      // a lone backslash, e.g. a Windows path like `D:\`, is not a JSON escape: keep it as a literal backslash
+      if (inString && !/["\\/bfnrtu]/.test(json[i + 1] ?? "")) { out += "\\\\"; continue; }
+      out += c; escaped = true; continue;
+    }
     if (c === '"') {
       if (!inString) { inString = true; out += c; continue; }
       let j = i + 1;

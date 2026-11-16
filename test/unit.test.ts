@@ -39,6 +39,11 @@ test("result parsing", () => {
   expect(parseResult('{"status":"done","summary":"ok"}').status).toBe("done");
 });
 
+test("result parsing keeps a lone backslash such as a Windows drive path", () => {
+  const out = '```json\n{"status":"done","summary":"can\'t reach D:\\、USB drives"}\n```';
+  expect(parseResult(out)).toMatchObject({ status: "done", summary: "can't reach D:\\、USB drives" });
+});
+
 test("result parsing repairs a raw line break inside a JSON string", () => {
   const out = '```json\n{"status":"delegated","summary":"ok","followups":[{"title":"x","body":"line one\n","agent":"a"}]}\n```';
   expect(parseResult(out)).toMatchObject({ status: "delegated", followups: [{ title: "x", body: "line one\n", agent: "a" }] });
