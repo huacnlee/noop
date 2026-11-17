@@ -28,6 +28,8 @@ import { EmailMessage } from "cloudflare:email";
 
 import { GUEST_TOKEN, guestApi, guestJoin, guestWho, guestsAdmin, initGuestSchema } from "./guests";
 import { seal, secretProblem, unseal } from "./secrets";
+import { type OAuthState, PENDING_TTL_MS, authorizeUrl, callbackPage, discover, freshTokens, oauthVar, pkceChallenge, randomToken, register, tokenRequest } from "./mcp-oauth";
+import { mcpServers } from "../../app/mcp-servers";
 
 const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
 async function cfMail(binding: SendEmail, from: string, to: string, subject: string, text: string) {
@@ -191,7 +193,9 @@ export class Hub extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS auth_sends (email TEXT, ts INTEGER, sent INTEGER);
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, email TEXT, created INTEGER, last_seen INTEGER, ua TEXT);
       CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);
-      CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, sealed TEXT, updated TEXT);`);
+      CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, sealed TEXT, updated TEXT);
+      CREATE TABLE IF NOT EXISTS mcp_oauth (name TEXT PRIMARY KEY, sealed TEXT, updated TEXT);
+      CREATE TABLE IF NOT EXISTS mcp_oauth_pending (state TEXT PRIMARY KEY, name TEXT, verifier TEXT, created INTEGER);`);
     initFilesSchema(this.sql);
     initGuestSchema(this.sql);
     // scope: "owner" (app / browser) or "mcp" (an OAuth access token for a Claude / ChatGPT connector: /mcp only)
@@ -573,6 +577,75 @@ export class Hub extends DurableObject<Env> {
     return json({ error: "not found" }, 404);
   }
 
+  // ------------------------------------------------------------ MCP OAuth (mcp-oauth.ts)
+  mcpHttpServer(name: string) {
+    const st = this.get("settings") as { current?: { mcp_servers?: unknown } } | undefined;
+    return mcpServers(st?.current?.mcp_servers).find((s) => s.name === name && s.type === "http");
+  }
+  mcpOAuthNames(): string[] {
+    return this.sql.exec("SELECT name FROM mcp_oauth").toArray().map((r) => r.name as string);
+  }
+  async mcpOAuthRead(name: string): Promise<OAuthState | null> {
+    const r = this.sql.exec("SELECT sealed FROM mcp_oauth WHERE name = ?", name).toArray()[0];
+    const v = r ? await unseal(this.env.HUB_TOKEN, `mcp-oauth:${name}`, r.sealed as string) : null;
+    try { return v ? (JSON.parse(v) as OAuthState) : null; } catch { return null; }
+  }
+  async mcpOAuthWrite(name: string, s: OAuthState) {
+    this.sql.exec("INSERT OR REPLACE INTO mcp_oauth (name, sealed, updated) VALUES (?, ?, ?)", name, await seal(this.env.HUB_TOKEN, `mcp-oauth:${name}`, JSON.stringify(s)), new Date().toISOString());
+  }
+  /** The access token to hand a machine now (refreshed when it ends soon), or null. */
+  async mcpOAuthToken(name: string): Promise<string | null> {
+    const s = await this.mcpOAuthRead(name);
+    if (!s?.tokens) return null;
+    const { tokens, changed } = await freshTokens(fetch, s);
+    if (changed && tokens) await this.mcpOAuthWrite(name, { ...s, tokens });
+    return tokens?.access_token ?? null;
+  }
+  /** What the app shows: signed in or not, until when; never a token. */
+  async mcpOAuthList() {
+    const out: { name: string; signed_in: boolean; expires_at?: number; renewable: boolean; updated: string }[] = [];
+    for (const r of this.sql.exec("SELECT name, updated FROM mcp_oauth ORDER BY name").toArray()) {
+      const s = await this.mcpOAuthRead(r.name as string);
+      const t = s?.tokens;
+      out.push({ name: r.name as string, signed_in: !!t && (!t.expires_at || t.expires_at > Date.now() || !!t.refresh_token), ...(t?.expires_at ? { expires_at: t.expires_at } : {}), renewable: !!t?.refresh_token, updated: r.updated as string });
+    }
+    return out;
+  }
+  async mcpOAuthStart(name: string, origin: string): Promise<Response> {
+    const server = this.mcpHttpServer(name);
+    if (!server?.url) return json({ error: L("No remote MCP server with that name", "没有这个名称的远程 MCP 服务") }, 404);
+    const redirect = `${origin}/api/mcp-oauth/callback`;
+    const found = await discover(fetch, server.url);
+    if (!found) return json({ error: L("This server does not support signing in with OAuth", "这个服务不支持 OAuth 登录") }, 422);
+    const prev = await this.mcpOAuthRead(name);
+    // reuse the registered client while the server's endpoints are unchanged
+    const client = prev && prev.meta.token_endpoint === found.meta.token_endpoint ? prev.client : await register(fetch, found.meta, redirect);
+    if (!client) return json({ error: L("This server does not allow registering Noop as a client", "这个服务不允许 Noop 自动注册为客户端") }, 422);
+    const s: OAuthState = { meta: found.meta, resource: found.resource, client, ...(prev?.tokens ? { tokens: prev.tokens } : {}) };
+    await this.mcpOAuthWrite(name, s);
+    const state = randomToken(), verifier = randomToken(48);
+    this.sql.exec("DELETE FROM mcp_oauth_pending WHERE created < ?", Date.now() - PENDING_TTL_MS);
+    this.sql.exec("INSERT INTO mcp_oauth_pending (state, name, verifier, created) VALUES (?, ?, ?, ?)", state, name, verifier, Date.now());
+    return json({ url: authorizeUrl(s, redirect, state, await pkceChallenge(verifier)) });
+  }
+  async mcpOAuthCallback(url: URL): Promise<Response> {
+    const fail = (text: string) => callbackPage(false, L("Sign-in failed", "登录失败"), text);
+    const state = url.searchParams.get("state") ?? "";
+    const row = this.sql.exec("SELECT name, verifier, created FROM mcp_oauth_pending WHERE state = ?", state).toArray()[0];
+    this.sql.exec("DELETE FROM mcp_oauth_pending WHERE state = ?", state); // one use
+    if (!row || Date.now() - (row.created as number) > PENDING_TTL_MS) return fail(L("This sign-in link expired. Start again from Noop.", "登录链接已失效，请回到 Noop 重新开始。"));
+    const name = row.name as string;
+    const code = url.searchParams.get("code");
+    if (!code) return fail(url.searchParams.get("error_description") ?? url.searchParams.get("error") ?? L("No authorization code", "没有收到授权码"));
+    const s = await this.mcpOAuthRead(name);
+    if (!s) return fail(L("Start again from Noop.", "请回到 Noop 重新开始。"));
+    const tokens = await tokenRequest(fetch, s, { grant_type: "authorization_code", code, redirect_uri: `${url.origin}/api/mcp-oauth/callback`, code_verifier: row.verifier as string });
+    if (!tokens) return fail(L("The server did not issue a token.", "服务没有签发令牌。"));
+    await this.mcpOAuthWrite(name, { ...s, tokens });
+    this.append({ from: "hub", kind: "notice", text: L(`Signed in to MCP server ${name}; every machine uses it from its next task.`, `已登录 MCP 服务 ${name}，各机器下一个任务起即可使用。`) });
+    return callbackPage(true, L(`Signed in to ${name}`, `已登录 ${name}`), L("Every machine can use it now. You can close this page.", "所有机器都可以使用了，可以关闭这个页面。"));
+  }
+
   async fetch(req: Request): Promise<Response> {
     try { return await this.handle(req); } finally { this.settle(1, routeKey(req)); }
   }
@@ -590,6 +663,8 @@ export class Hub extends DurableObject<Env> {
       if (!g) return json({ error: "unauthorized" }, 401);
       return guestApi(this.sql, req, url, g, (id, guest) => this.append({ from: "hub", kind: "notice", ref: id, text: L(`Guest machine ${guest} returned the result of ${id} (not reviewed).`, `访客机器 ${guest} 交回了 ${id} 的结果（未经审查）。`) }));
     }
+    // the browser lands here after signing in to an MCP server: no session, the one-time state is the credential
+    if (p === "/api/mcp-oauth/callback" && m === "GET") return this.mcpOAuthCallback(url);
     if (isMcpPath(p)) return this.mcp.fetch(req, await this.who(req, url));
     const who = await this.who(req, url);
     if (!who) return json({ error: "unauthorized" }, 401);
@@ -777,7 +852,23 @@ export class Hub extends DurableObject<Env> {
         const v = await unseal(this.env.HUB_TOKEN, r.name as string, r.sealed as string);
         if (v !== null) out[r.name as string] = v;
       }
+      for (const name of this.mcpOAuthNames()) {
+        const t = await this.mcpOAuthToken(name);
+        if (t) out[oauthVar(name)] = t;
+      }
       return Response.json({ values: out }, { headers: { "Cache-Control": "no-store" } });
+    }
+    // signing in to remote MCP servers (mcp-oauth.ts): the owner starts and signs out, machines get tokens above
+    if (p === "/api/mcp-oauth" && m === "GET") return json({ servers: await this.mcpOAuthList() });
+    if (p === "/api/mcp-oauth/start" && m === "POST") {
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      const { name } = (await req.json().catch(() => ({}))) as { name?: unknown };
+      return this.mcpOAuthStart(String(name ?? ""), url.origin);
+    }
+    if (p === "/api/mcp-oauth" && m === "DELETE") {
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      this.sql.exec("DELETE FROM mcp_oauth WHERE name = ?", url.searchParams.get("name") ?? "");
+      return json({ servers: await this.mcpOAuthList() });
     }
     if (p === "/api/settings" && m === "GET") return json(this.get("settings") ?? { current: {}, effective: {}, options: {} });
     if (p === "/api/tasks" && m === "GET") {

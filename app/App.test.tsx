@@ -2103,6 +2103,38 @@ describe("commands", () => {
     expect(puts[1].mcp_servers[0].enabled).toBe(false);
   });
 
+  test("settings signs a remote MCP server in once and out again", async () => {
+    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
+    let servers: { name: string; signed_in: boolean; renewable: boolean }[] = [];
+    const starts: any[] = [];
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+      ...server(posts, puts, updates),
+      [`GET ${URL}/api/mcp-oauth`]: () => ({ body: { servers } }),
+      [`POST ${URL}/api/mcp-oauth/start`]: (r: { body?: string | null }) => {
+        starts.push(JSON.parse(r.body!));
+        servers = [{ name: "linear", signed_in: true, renewable: true }]; // as if the browser finished at once
+        return { body: { url: "https://auth.example.com/authorize?state=x" } };
+      },
+      [`DELETE ${URL}/api/mcp-oauth?name=linear`]: () => { servers = []; return { body: { servers } }; },
+    } });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-mcp");
+    await app.press("id:mcp-new");
+    await app.waitFor("id:mcp-editor");
+    await app.type("id:mcp-name", "linear");
+    await app.press("text:Remote (HTTP)");
+    await app.type("id:mcp-url", "https://mcp.linear.app/mcp");
+    await app.press("id:mcp-save");
+    await app.waitUntil(() => puts.length === 1);
+    await app.press("id:mcp-signin-linear");
+    await app.waitUntil(() => starts.length === 1);
+    expect(starts[0]).toEqual({ name: "linear" });
+    await app.waitFor("id:mcp-signout-linear");
+    await app.press("id:mcp-signout-linear");
+    await app.waitFor("id:mcp-signin-linear");
+  });
+
   test("settings adds, replaces and deletes shared keys without ever showing a value", async () => {
     const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
     const sent: any[] = [];

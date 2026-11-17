@@ -3031,7 +3031,32 @@ function createSettings(hub: Hub) {
     return false;
   };
   const secretDraft = { editing: signal<string | undefined>(undefined), name: signal(""), value: signal(""), note: signal("") };
-  return { view, error, toast, saving, load, save, commandDraft, mcpDraft, tab, secrets, loadSecrets, putSecret, secretDraft };
+  /** Remote MCP servers signed in once for every machine (the Worker keeps and renews the tokens; none come here). */
+  const oauth = signal<{ name: string; signed_in: boolean; expires_at?: number; renewable: boolean }[] | null>(null);
+  const oauthBusy = signal("");
+  const loadOAuth = async () => {
+    const r = await hub.api("GET", "/api/mcp-oauth");
+    if (r.ok && Array.isArray(r.data.servers)) oauth.set(r.data.servers as never);
+  };
+  const signIn = async (name: string) => {
+    oauthBusy.set(name);
+    const r = await hub.api("POST", "/api/mcp-oauth/start", { name });
+    oauthBusy.set("");
+    if (!r.ok || typeof r.data.url !== "string") return error.set(String(r.data.error ?? L(`Couldn’t start signing in (${r.status})`, `无法开始登录（${r.status}）`)));
+    if (!(await openUrl(r.data.url).catch(() => ({ opened: false }))).opened) return error.set(L("Could not open the sign-in page", "无法打开登录页面"));
+    toast.show(L("Finish signing in in the browser, then come back", "在浏览器里完成登录后回到这里"));
+    // the browser finishes it with the Worker: look until it shows up (up to the sign-in link's 10 minutes)
+    for (let i = 0; i < 200; i++) {
+      await new Promise((ok) => setTimeout(ok, 3000));
+      await loadOAuth();
+      if ((oauth() ?? []).some((o) => o.name === name && o.signed_in)) return;
+    }
+  };
+  const signOut = async (name: string) => {
+    const r = await hub.api("DELETE", `/api/mcp-oauth?name=${encodeURIComponent(name)}`);
+    if (r.ok && Array.isArray(r.data.servers)) { oauth.set(r.data.servers as never); toast.show(L("Signed out", "已退出登录")); }
+  };
+  return { view, error, toast, saving, load, save, commandDraft, mcpDraft, tab, secrets, loadSecrets, putSecret, secretDraft, oauth, oauthBusy, loadOAuth, signIn, signOut };
 }
 type Settings = ReturnType<typeof createSettings>;
 
@@ -3441,8 +3466,8 @@ function CommandEditor(props: { settings: Settings }) {
 }
 
 const MCP_HINT = () => L(
-  "Tools every agent on every machine can use. Never paste a key into a server: add it under Keys below and write ${NAME} where it goes.",
-  "所有机器上的每个成员都能用的工具。不要把密钥直接填进服务：在下方「密钥」里添加，再在需要的位置写 ${NAME}。",
+  "Tools every agent on every machine can use. A remote server that uses OAuth: Sign in once here. Never paste a key into a server: add it under Keys below and write ${NAME} where it goes.",
+  "所有机器上的每个成员都能用的工具。用 OAuth 的远程服务，在这里登录一次即可。不要把密钥直接填进服务：在下方「密钥」里添加，再在需要的位置写 ${NAME}。",
 );
 const SECRETS_HINT = () => L(
   "Entered once here, used by every machine. Stored encrypted in your own cloud, never in the team's data; this app can replace or delete a key but never show it again. A machine's own environment variable is used when no key here has that name.",
@@ -3462,6 +3487,11 @@ function McpRows(props: { settings: Settings }) {
   };
   const toggle = (name: string, on: boolean) => save({ mcp_servers: list().map((s) => (s.name === name ? { ...s, enabled: on } : s)) });
   const missingKeys = (s: McpServer) => { const have = new Set((props.settings.secrets() ?? []).map((k) => k.name)); return mcpVars(s).filter((v) => !have.has(v)); };
+  const st = props.settings;
+  void st.loadOAuth();
+  // a remote server with its own Authorization header does not sign in
+  const canSignIn = (s: McpServer) => s.type === "http" && !Object.keys(s.headers ?? {}).some((k) => k.toLowerCase() === "authorization");
+  const signedIn = (name: string) => (st.oauth() ?? []).find((o) => o.name === name && o.signed_in);
   return (
     <>
       <Each of={list()} key={(s) => s.name}>
@@ -3481,7 +3511,18 @@ function McpRows(props: { settings: Settings }) {
               <If when={missingKeys(s()).length}>
                 <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{L(`Not in Keys (each machine needs it set): ${missingKeys(s()).join(", ")}`, `「密钥」里没有，需各机器自行设置：${missingKeys(s()).join("、")}`)}</Text>
               </If>
+              <If when={canSignIn(s()) && signedIn(s().name)}>
+                <Text testID={`mcp-oauth-state-${s().name}`} style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{L("Signed in for every machine", "已登录，所有机器共用")}</Text>
+              </If>
             </View>
+            <If when={canSignIn(s())}>
+              <If
+                when={signedIn(s().name)}
+                else={<Button label={L("Sign in", "登录")} size="sm" variant="secondary" loading={st.oauthBusy() === s().name} onPress={() => void st.signIn(s().name)} testID={`mcp-signin-${s().name}`} />}
+              >
+                <Button label={L("Sign out", "退出")} size="sm" variant="ghost" onPress={() => void st.signOut(s().name)} testID={`mcp-signout-${s().name}`} />
+              </If>
+            </If>
             <Switch testID={`mcp-enabled-${s().name}`} label={s().name} checked={s().enabled !== false} onChange={(on) => toggle(s().name, on)} />
           </SettingsItem>
         )}

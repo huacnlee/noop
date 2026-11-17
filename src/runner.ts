@@ -7,7 +7,7 @@ import {
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
-import { claudeMcpConfig, codexMcpLaunch, mcpServers, usableMcp } from "../app/mcp-servers";
+import { claudeMcpConfig, codexMcpLaunch, mcpServers, usableMcp, withOAuth } from "../app/mcp-servers";
 import { sharedSecrets } from "./secrets";
 
 export type Result = {
@@ -150,7 +150,7 @@ export function codexWritableDirs(home = homedir(), workDirs: string[] = [], roo
 /** The owner's shared MCP servers (Settings → MCP) this machine can run: enabled, with every variable they name set
  *  (by the team's shared keys or this machine's environment). */
 export function sharedMcp(cfg: Cfg, env: Record<string, string | undefined> = process.env) {
-  return usableMcp(mcpServers((cfg as { mcp_servers?: unknown }).mcp_servers), env).use;
+  return usableMcp(withOAuth(mcpServers((cfg as { mcp_servers?: unknown }).mcp_servers), env), env).use;
 }
 
 /** `mcpArgs`: the MCP flags of this run (see `mcpLaunch`); none when left out (status views, model lookups). */

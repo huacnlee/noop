@@ -101,6 +101,17 @@ export function mcpVars(s: McpServer): string[] {
   return [...new Set([...all.matchAll(VAR)].map((m) => m[1]!))];
 }
 
+/** The variable a machine receives a signed-in server's access token in (cloud/src/mcp-oauth.ts signs in). */
+export const oauthVar = (server: string) => `NOOP_OAUTH_${server.replace(/\W/g, "_").toUpperCase()}`;
+
+/** Remote servers without their own Authorization header use the shared sign-in when there is one. */
+export function withOAuth(list: McpServer[], env: Record<string, string | undefined>): McpServer[] {
+  return list.map((s) => {
+    if (s.type !== "http" || !env[oauthVar(s.name)] || Object.keys(s.headers ?? {}).some((k) => k.toLowerCase() === "authorization")) return s;
+    return { ...s, headers: { ...s.headers, Authorization: `Bearer \${${oauthVar(s.name)}}` } };
+  });
+}
+
 /** On this machine: the enabled entries whose variables are all set, and the names left out for a missing one. */
 export function usableMcp(list: McpServer[], env: Record<string, string | undefined>): { use: McpServer[]; missing: { name: string; vars: string[] }[] } {
   const use: McpServer[] = [], missing: { name: string; vars: string[] }[] = [];
