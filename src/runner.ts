@@ -7,6 +7,7 @@ import {
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
+import { claudeMcpConfig, codexMcpArgs, mcpServers, usableMcp } from "../app/mcp-servers";
 
 export type Result = {
   status: "done" | "needs_decision" | "failed" | "delegated" | "waiting";
@@ -145,6 +146,11 @@ export function codexWritableDirs(home = homedir(), workDirs: string[] = [], roo
   return [...new Set(real)];
 }
 
+/** The owner's shared MCP servers (Settings → MCP) this machine can run: enabled, with every variable they name set here. */
+export function sharedMcp(cfg: Cfg, env: Record<string, string | undefined> = process.env) {
+  return usableMcp(mcpServers((cfg as { mcp_servers?: unknown }).mcp_servers), env).use;
+}
+
 export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[] {
   const c = cfg.clis?.[cli] ?? {};
   if (Array.isArray(c.command)) return c.command;
@@ -155,6 +161,8 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
     cmd.push("--settings", JSON.stringify({ attribution: { commit: "", pr: "" }, includeCoAuthoredBy: false }));
     const deny = claudeDisallowed(cfg, gateOverride);
     if (deny.length) cmd.push("--disallowedTools", ...deny);
+    const mcp = sharedMcp(cfg);
+    if (mcp.length) cmd.push("--mcp-config", claudeMcpConfig(mcp));
     return cmd;
   }
   if (cli === "codex") {
@@ -163,6 +171,7 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
       "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true"];
     for (const dir of codexWritableDirs(homedir(), cfg.resources?.work_dirs)) cmd.push("--add-dir", dir);
     if (c.model) cmd.push("-m", c.model);
+    cmd.push(...codexMcpArgs(sharedMcp(cfg), process.env));
     return [...cmd, "-"];
   }
   throw new Error(`unknown cli ${cli}`);

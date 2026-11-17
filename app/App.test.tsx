@@ -2077,6 +2077,31 @@ describe("commands", () => {
     await app.waitUntil(() => puts.length === 3);
     expect(puts[2]).toEqual({ commands: [{ name: "今日", text: "把今天各项目的进展整理成日报发给我" }] });
   });
+
+  test("settings adds and toggles shared MCP servers, refusing literal keys", async () => {
+    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: server(posts, puts, updates) });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-mcp");
+    await app.press("id:mcp-new");
+    await app.waitFor("id:mcp-editor");
+    await app.type("id:mcp-name", "github");
+    await app.type("id:mcp-command", "npx -y @modelcontextprotocol/server-github");
+    await app.type("id:mcp-env", "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123");
+    await app.press("id:mcp-save");
+    await app.waitFor("id:mcp-note");
+    expect(puts.length).toBe(0);
+    await app.clear("id:mcp-env");
+    await app.type("id:mcp-env", "GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN}");
+    await app.press("id:mcp-save");
+    await app.waitUntil(() => puts.length === 1);
+    expect(puts[0]).toEqual({ mcp_servers: [{ name: "github", type: "stdio", enabled: true, command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" } }] });
+    await app.waitFor("id:mcp-row-github");
+    await app.press("id:mcp-enabled-github");
+    await app.waitUntil(() => puts.length === 2);
+    expect(puts[1].mcp_servers[0].enabled).toBe(false);
+  });
 });
 
 

@@ -25,6 +25,7 @@ import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } fro
 import { channels, originChannel, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
+import { type McpServer, mcpProblem, mcpServers } from "../app/mcp-servers";
 
 export type Event = {
   id: string; ts: string; from: string; kind: "notice" | "decision" | "menu" | "proposals" | "login" | "owner" | "system";
@@ -232,7 +233,7 @@ export function status() {
 }
 
 // ---------------------------------------------------------------- settings (UI-adjustable, shared via data repo)
-const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days"]; // whitelisted top-level keys
+const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days", "mcp_servers"]; // whitelisted top-level keys
 
 /** What an agent is for, from its profile's first line: "# Name (中文名) — what it does". */
 /** Chinese titles and one-liners for the built-in roles (a profile's own Chinese "(标题)" and text still win where present). */
@@ -312,6 +313,14 @@ export async function saveSettings(patch: Record<string, unknown>) {
     return o;
   };
   const clean = Object.fromEntries(Object.entries(patch).filter(([k]) => SETTABLE.includes(k)));
+  if ("mcp_servers" in clean) {
+    // the whole list replaces the saved one. The app checks each entry first; here an entry that still fails
+    // (a literal secret above all: the data repo syncs through the cloud) is left out rather than failing the save,
+    // which arrives through the cloud inbox and would otherwise be retried forever.
+    const list: McpServer[] = [];
+    for (const s of mcpServers(clean.mcp_servers)) if (!mcpProblem(s, list)) list.push(s);
+    clean.mcp_servers = list;
+  }
   const next = deep(cur, clean);
   writeFileSync(P("settings.json"), JSON.stringify(next, null, 2) + "\n");
   await settingsHook?.(JSON.stringify(clean));

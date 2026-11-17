@@ -120,6 +120,7 @@ import {
   pageContent,
   font,
   leading,
+  Segmented,
 } from "./ui";
 import {
   answeredIds,
@@ -191,6 +192,7 @@ import {
   type TaskInfo,
 } from "./hub";
 import { notificationFor, type NotifyRules } from "./notify";
+import { type McpServer, mcpServers, mcpProblem, mcpVars, formatPairs, parsePairs, splitCommand, joinCommand } from "./mcp-servers";
 import { DEMO_CODE, DEMO_EMAIL, DEMO_TOKEN, DEMO_TOTP, DEMO_URL, hubFetch, isDemo, openSocket, type Socket } from "./demo";
 // Email sign-in code length (cloud/src/index.ts CODE_LEN): letters and digits, case-insensitive.
 const CODE_LEN = 8;
@@ -3012,7 +3014,9 @@ function createSettings(hub: Hub) {
   const commandDraft = { name: signal(""), text: signal(""), editing: signal<string | undefined>(undefined), note: signal("") };
   /** The section the wide settings page shows (its sidebar picks it). */
   const tab = signal<SettingsTab>("notify");
-  return { view, error, toast, saving, load, save, commandDraft, tab };
+  /** The MCP server editor: `editing` as for commands. */
+  const mcpDraft = { editing: signal<string | undefined>(undefined), name: signal(""), type: signal<"stdio" | "http">("stdio"), command: signal(""), env: signal(""), url: signal(""), headers: signal(""), note: signal("") };
+  return { view, error, toast, saving, load, save, commandDraft, mcpDraft, tab };
 }
 type Settings = ReturnType<typeof createSettings>;
 
@@ -3023,6 +3027,7 @@ const SETTINGS_TABS = () => [
   ["routines", L("Routines", "例行任务"), "play"],
   ["parallel", L("Parallelism", "并行"), "layers"],
   ["commands", L("Commands", "常用指令"), "terminal"],
+  ["mcp", "MCP", "components"],
   ["storage", L("Storage", "存储"), "photos"],
   ["version", L("Version", "版本"), "github"],
   ["rules", L("Rules & memory", "规则与记忆"), "scroll"],
@@ -3166,6 +3171,11 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
         <If when={on("commands")}>
         <Group title={L("Commands", "常用指令")} hint={L("Type / in the message box to use one. Built-in commands perform an action; ones you add send a message to the team.", "在输入框里输入 / 选用。内置指令执行操作，你添加的指令把一段话发给团队。")}>
           <CommandRows settings={props.settings} />
+        </Group>
+        </If>
+        <If when={on("mcp")}>
+        <Group title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
+          <McpRows settings={props.settings} />
         </Group>
         </If>
         <If when={on("storage")}>
@@ -3406,6 +3416,172 @@ function CommandEditor(props: { settings: Settings }) {
           <View style={{ flex: 1 }} />
           <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="command-cancel" />
           <Button label={isNew() ? L("Add", "添加") : L("Save", "保存")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="command-save" />
+        </View>
+      </View>
+    </Dialog>
+  );
+}
+
+const MCP_HINT = () => L(
+  "Tools every agent on every machine can use. Shared through the team's data, so never paste a key here: write ${NAME} and set NAME on each machine. A machine without it leaves that server out.",
+  "所有机器上的每个成员都能用的工具。配置随团队数据同步，所以不要在这里填密钥：写 ${NAME}，再在各台机器的环境变量里设置 NAME。缺少变量的机器会跳过这个服务。",
+);
+
+/** The shared MCP servers: one row each (its command or address, an on/off switch), then "Add". */
+function McpRows(props: { settings: Settings }) {
+  const { view, save } = props.settings;
+  const list = () => mcpServers(view()?.current?.mcp_servers);
+  const d = props.settings.mcpDraft;
+  const open = (s?: McpServer) => {
+    d.name.set(s?.name ?? ""); d.type.set(s?.type ?? "stdio");
+    d.command.set(s?.command ? joinCommand([s.command, ...(s.args ?? [])]) : "");
+    d.env.set(formatPairs(s?.env)); d.url.set(s?.url ?? ""); d.headers.set(formatPairs(s?.headers, ": ")); d.note.set("");
+    d.editing.set(s?.name ?? "");
+  };
+  const toggle = (name: string, on: boolean) => save({ mcp_servers: list().map((s) => (s.name === name ? { ...s, enabled: on } : s)) });
+  return (
+    <>
+      <Each of={list()} key={(s) => s.name}>
+        {(s, i) => (
+          <SettingsItem first={i() === 0} testID={`mcp-row-${s().name}`} style={{ flexDirection: "row", alignItems: "center" }}>
+            <View
+              role="button"
+              accessibilityLabel={L(`Edit MCP server ${s().name}`, `编辑 MCP 服务 ${s().name}`)}
+              onPress={() => open(s())}
+              style={{ flex: 1, minWidth: 0, gap: 3 }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
+                <Text style={{ fontSize: 15.5, fontWeight: "500", color: s().enabled === false ? colors.faint : colors.text, numberOfLines: 1 }}>{s().name}</Text>
+                <Text style={{ fontSize: 12.5, color: colors.faint }}>{s().type === "http" ? "HTTP" : "stdio"}</Text>
+              </View>
+              <Text style={{ fontFamily: MONO, fontSize: 12.5, lineHeight: 18, color: colors.muted, numberOfLines: 1 }}>{s().type === "http" ? s().url : joinCommand([s().command ?? "", ...(s().args ?? [])])}</Text>
+              <If when={mcpVars(s()).length}>
+                <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{L(`Needs on each machine: ${mcpVars(s()).join(", ")}`, `各机器需设置：${mcpVars(s()).join("、")}`)}</Text>
+              </If>
+            </View>
+            <Switch testID={`mcp-enabled-${s().name}`} label={s().name} checked={s().enabled !== false} onChange={(on) => toggle(s().name, on)} />
+          </SettingsItem>
+        )}
+      </Each>
+      <SetRow first={!list().length} label={L("Add MCP server", "添加 MCP 服务")} tone="accent" leading={<Icon name="plus" size={16} tint={colors.info} />} onPress={() => open()} testID="mcp-new" />
+      <McpEditor settings={props.settings} />
+    </>
+  );
+}
+
+/** A multi-line monospace field, for "KEY=value" lines. */
+function PairsField(props: { label: string; value: string; onChange: (v: string) => void; placeholder: string; hint: string; testID: string }) {
+  const focused = signal(false);
+  return (
+    <View style={{ gap: 7 }}>
+      <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{props.label}</Text>
+      <Input
+        testID={props.testID}
+        multiline
+        value={props.value}
+        onChange={({ value }) => props.onChange(value)}
+        onFocus={() => focused.set(true)}
+        onBlur={() => focused.set(false)}
+        placeholder={props.placeholder}
+        class="placeholder:text-faint"
+        style={{
+          height: 88, paddingHorizontal: 14, paddingVertical: 10, borderRadius: corner.field, borderWidth: 1,
+          borderColor: focused() ? colors.accent : colors.fieldBorder, backgroundColor: colors.field,
+          fontFamily: MONO, fontSize: 13.5, lineHeight: 20, color: colors.text,
+          ...(focused() ? { outlineStyle: "solid", outlineWidth: 3, outlineColor: alpha(colors.accent, 0.12) } : {}),
+        }}
+      />
+      <Text style={{ fontSize: 13, lineHeight: 18, color: colors.faint }}>{props.hint}</Text>
+    </View>
+  );
+}
+
+/** New / edit / delete one MCP server, in a dialog. */
+function McpEditor(props: { settings: Settings }) {
+  const { view, save } = props.settings;
+  const d = props.settings.mcpDraft;
+  const isNew = () => d.editing() === "";
+  const close = () => d.editing.set(undefined);
+  const list = () => mcpServers(view()?.current?.mcp_servers);
+  const draft = (): McpServer => {
+    const prev = list().find((s) => s.name === d.editing());
+    const base = { name: d.name().trim(), enabled: prev?.enabled ?? true };
+    if (d.type() === "http") return { ...base, type: "http", url: d.url().trim(), headers: parsePairs(d.headers(), ":") };
+    const [command = "", ...args] = splitCommand(d.command());
+    return { ...base, type: "stdio", command, args, env: parsePairs(d.env()) };
+  };
+  const problem = (s: McpServer) => {
+    const p = mcpProblem(s, list().filter((o) => o.name !== d.editing()));
+    if (!p) return "";
+    if (p.code === "name") return L("Name: letters, digits, - and _, up to 40", "名称只能用字母、数字、- 和 _，最多 40 个字符");
+    if (p.code === "duplicate") return L(`“${s.name}” already exists`, `已经有「${s.name}」了`);
+    if (p.code === "command") return L("Write the command that starts the server", "填写启动服务的命令");
+    if (p.code === "url") return L("The address starts with https://", "地址以 https:// 开头");
+    return L(`${p.field} looks like a key. Set it on each machine and write \${NAME} here`, `${p.field} 看起来是密钥。请设置到各机器的环境变量里，这里写 \${NAME}`);
+  };
+  const ok = () => !!d.name().trim() && (d.type() === "http" ? !!d.url().trim() : !!d.command().trim());
+  const submit = async () => {
+    const s = draft();
+    const bad = problem(s);
+    if (bad) return d.note.set(bad);
+    const cur = list();
+    const i = cur.findIndex((o) => o.name === d.editing());
+    close();
+    await save({ mcp_servers: i < 0 ? [...cur, s] : cur.map((o, j) => (j === i ? s : o)) });
+  };
+  const remove = async () => {
+    const n = d.editing();
+    close();
+    await save({ mcp_servers: list().filter((s) => s.name !== n) });
+  };
+  const edit = (f: (v: string) => void) => (v: string) => { f(v); d.note.set(""); };
+  return (
+    <Dialog
+      testID="mcp-editor"
+      open={d.editing() !== undefined}
+      animation="fade"
+      onOpenChange={({ open }) => !open && close()}
+      backdropClass="bg-scrim"
+      style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}
+    >
+      <View style={{ width: "100%", maxWidth: 560, maxHeight: "100%", borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
+        <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
+          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{isNew() ? L("Add MCP server", "添加 MCP 服务") : L("Edit MCP server", "编辑 MCP 服务")}</Text>
+          <IconButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
+        </View>
+        <Scroll style={{ flexShrink: 1 }}>
+          <View style={{ gap: 16, padding: 20 }}>
+            <Field label={L("Name", "名称")} value={d.name()} onChange={edit(d.name.set)} placeholder={L("e.g. github", "例如：github")} testID="mcp-name" autoFocus={isNew()} />
+            <Segmented
+              options={[{ value: "stdio", label: L("Command (stdio)", "本地命令（stdio）") }, { value: "http", label: L("Remote (HTTP)", "远程（HTTP）") }] as const}
+              value={d.type()}
+              onChange={(v) => { d.type.set(v); d.note.set(""); }}
+              fill
+            />
+            <If
+              when={d.type() === "http"}
+              else={
+                <>
+                  <Field label={L("Command", "命令")} value={d.command()} onChange={edit(d.command.set)} placeholder="npx -y @modelcontextprotocol/server-github" testID="mcp-command" hint={L("Each machine runs it, so it must be installed there.", "每台机器各自运行，需要在机器上可用。")} />
+                  <PairsField label={L("Environment", "环境变量")} value={d.env()} onChange={edit(d.env.set)} placeholder={"GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN}"} hint={L("One KEY=value per line.", "每行一个 KEY=value。")} testID="mcp-env" />
+                </>
+              }
+            >
+              <Field label={L("Address", "地址")} value={d.url()} onChange={edit(d.url.set)} placeholder="https://mcp.example.com/mcp" testID="mcp-url" keyboardType="url" autoComplete="url" />
+              <PairsField label={L("Headers", "请求头")} value={d.headers()} onChange={edit(d.headers.set)} placeholder={"Authorization: Bearer ${EXAMPLE_TOKEN}"} hint={L("One Name: value per line.", "每行一个 Name: value。")} testID="mcp-headers" />
+            </If>
+            <If when={d.note()}>
+              <Text testID="mcp-note" style={{ fontSize: 13.5, color: colors.danger }}>{d.note()}</Text>
+            </If>
+          </View>
+        </Scroll>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingBottom: 20, paddingTop: 4 }}>
+          <If when={!isNew()}>
+            <Button label={L("Delete", "删除")} variant="danger" icon="trash" onPress={() => void remove()} testID="mcp-delete" />
+          </If>
+          <View style={{ flex: 1 }} />
+          <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="mcp-cancel" />
+          <Button label={isNew() ? L("Add", "添加") : L("Save", "保存")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="mcp-save" />
         </View>
       </View>
     </Dialog>
@@ -3667,6 +3843,9 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       </If>
       <Section title={L("Commands", "常用指令")} hint={L("Type / in the message box to use one. Built-in commands perform an action; ones you add send a message to the team.", "在输入框里输入 / 选用。内置指令执行操作，你添加的指令把一段话发给团队。")}>
         <CommandRows settings={props.settings} />
+      </Section>
+      <Section title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
+        <McpRows settings={props.settings} />
       </Section>
       <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />
