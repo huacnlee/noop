@@ -3,7 +3,7 @@ import { $ } from "bun";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
-import { CODE, DATA, HOME_DIR, P } from "./core";
+import { CODE, DATA, HOME_DIR, P, isCloudDeployHost } from "./core";
 
 const STATE_DIRS = [
   "tasks/proposed", "tasks/rejected", "tasks/waiting", "tasks/inbox", "tasks/active", "tasks/blocked", "tasks/failed", "tasks/done",
@@ -164,11 +164,11 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
     return false;
   }
   seedTemplates(); // new template agents/policies appear; existing ones untouched
-  { // primary keeps its own Cloudflare hub in step with the code (Worker or app changed)
-    const { loadConfig, hostName } = await import("./core");
+  { // designated deployment host keeps its own Cloudflare hub in step with the code (Worker or app changed)
+    const { loadConfig } = await import("./core");
     const c = loadConfig();
     const changed = (await g("diff", "--name-only", head, up)).stdout.toString();
-    if (c.cloud?.url && c.fleet?.primary === hostName(c) && (opts.deploy || /^(cloud|app)\//m.test(changed))) {
+    if (c.cloud?.url && isCloudDeployHost(c) && (opts.deploy || /^(cloud|app)\//m.test(changed))) {
       const { cloudDeploy } = await import("./cloud");
       await cloudDeploy(c);
     }

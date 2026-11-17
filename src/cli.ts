@@ -30,7 +30,7 @@ import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineParkedOnDecision, routineQueued, supersedeProposed } from "./autonomy";
-import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, capOk, idTagFor, isPrimary, isCloudDeployHost, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
@@ -490,7 +490,7 @@ async function drainAndExit(why: string, host: string) {
 
 const UPDATE_DONE = () => P("..", "update-handled");
 /** The owner's "update every machine": once per request, now (not at the hourly check), running work finishing
- *  first. The primary redeploys the Worker and the web app even when its code was already current. */
+ *  first. The cloud deployment host redeploys the Worker and the web app even when its code was already current. */
 async function ownerUpdate(c: Cfg, host: string) {
   let at = "";
   try { at = JSON.parse(readFileSync(UPDATE_REQUEST(), "utf8")).at ?? ""; } catch { return; }
@@ -515,7 +515,7 @@ async function ownerUpdate(c: Cfg, host: string) {
   }
   const now7 = (Bun.spawnSync(["git", "-C", CODE, "rev-parse", "--short", "HEAD"], { stdout: "pipe" }).stdout.toString().trim()) || before;
   const stale = now7 !== before; // the code moved but this process could not take it (local edits, failing tests)
-  if (isPrimary(c, host) && c.cloud?.url) {
+  if (isCloudDeployHost(c, host) && c.cloud?.url) {
     await report("deploying", L("Redeploying", "重新发布线上"));
     const cloud = await import("./cloud");
     const err = await cloud.cloudDeploy(c).then((u) => (u ? "" : cloud.lastDeployError || "unknown"), (e) => String(e));

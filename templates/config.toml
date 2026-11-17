@@ -180,3 +180,8 @@ prompt = "Deep weekly evolution: 30-day window. Re-read every agent profile and 
 # user = ""
 # pass = ""                           # put in the private data repo only
 # from = "Noop <hub@example.com>"
+
+# Optional: run automatic Worker/web deployments on a different machine from the primary.
+# That machine needs Cloudflare credentials for the existing account. Omitted = primary.
+# [cloud]
+# deploy_host = "my-macbook"

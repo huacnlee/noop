@@ -203,7 +203,7 @@ export async function cloudDeploy(cfg: Cfg) {
   const account = process.env.CLOUDFLARE_ACCOUNT_ID || cfg.cloud?.account;
   const env = { ...process.env, ...(account ? { CLOUDFLARE_ACCOUNT_ID: account } : {}) };
   const who = await $`${wr} whoami`.cwd(dir).env(env).quiet().nothrow();
-  if (!/logged in/i.test(who.stdout.toString())) {
+  if (who.exitCode !== 0 || !/logged in/i.test(who.stdout.toString()) || /not logged in/i.test(who.stdout.toString())) {
     return fail(L("Log in to your own Cloudflare account first (the free plan is enough):\n  bunx wrangler login\nThen run again: hub cloud deploy", "先登录你自己的 Cloudflare 账号（免费版即可）：\n  bunx wrangler login\n然后重新运行：hub cloud deploy"));
   }
   if (!cfg.server?.token) return fail(L("[server] token is missing, run hub init first", "缺少 [server] token，先运行 hub init"));
@@ -249,9 +249,18 @@ export async function cloudDeploy(cfg: Cfg) {
     secrets.HUB_MAIL_FROM = String(e.from).match(/<([^>]+)>/)?.[1] ?? String(e.from);
   } else console.log(L("Email is not configured, login codes cannot be sent: fill in [email] in the shared config.toml and run noop cloud deploy again", "还没配置邮箱：登录验证码发不出去，在共享的 config.toml 里填 [email] 后重新运行 noop cloud deploy"));
   if (cfg.owner?.language) secrets.HUB_LANG = String(cfg.owner.language);
-  const vapid = await vapidKeys();
-  secrets.HUB_VAPID_PUBLIC = vapid.publicKey;
-  secrets.HUB_VAPID_PRIVATE = JSON.stringify(vapid.privateJwk);
+  // Keep the deployed pair when another host takes over; local pairs are machine-specific.
+  const existing = await $`${wr} secret list --name ${name}`.cwd(dir).env(env).quiet().nothrow();
+  if (existing.exitCode !== 0) return fail("Could not inspect existing Worker secrets; refusing to replace Web Push keys.");
+  let names: string[];
+  try { names = JSON.parse(existing.stdout.toString()).map((s: { name: string }) => s.name); }
+  catch { return fail("Could not parse existing Worker secrets; refusing to replace Web Push keys."); }
+  if (!(names.includes("HUB_VAPID_PUBLIC") && names.includes("HUB_VAPID_PRIVATE"))) {
+    if (names.includes("HUB_VAPID_PUBLIC") || names.includes("HUB_VAPID_PRIVATE")) return fail("Worker has an incomplete Web Push key pair; repair it before deploying secrets.");
+    const vapid = await vapidKeys();
+    secrets.HUB_VAPID_PUBLIC = vapid.publicKey;
+    secrets.HUB_VAPID_PRIVATE = JSON.stringify(vapid.privateJwk);
+  }
   // `secret bulk` reads JSON from stdin — values never touch argv or the console.
   const sec = Bun.spawn([...wr, "secret", "bulk", "--name", name], { cwd: dir, env, stdin: new Blob([JSON.stringify(secrets)]), stdout: "pipe", stderr: "pipe" });
   if ((await sec.exited) !== 0) return fail(L("Setting the Worker secrets failed:\n", "设置 Worker 密钥失败：\n") + (await new Response(sec.stderr).text()).slice(-800));
@@ -263,7 +272,7 @@ export async function cloudDeploy(cfg: Cfg) {
     const f = P("config.toml");
     let s = readFileSync(f, "utf8");
     // keep the account too: without it the primary's next redeploy (on every update) may land in another account
-    const block = `[cloud]\nurl = "${url}"\nname = "${name}"\n${account ? `account = "${account}"\n` : ""}${domain ? `domain = "${domain}"\n` : ""}${allow !== undefined ? `allow_ips = "${allow}"\n` : ""}`;
+    const block = `[cloud]\n${cfg.cloud?.deploy_host ? `deploy_host = ${JSON.stringify(cfg.cloud.deploy_host)}\n` : ""}url = "${url}"\nname = "${name}"\n${account ? `account = "${account}"\n` : ""}${domain ? `domain = "${domain}"\n` : ""}${allow !== undefined ? `allow_ips = "${allow}"\n` : ""}`;
     s = /^\[cloud\]/m.test(s) ? s.replace(/^\[cloud\][^\[]*/m, `${block}\n`) : `${s.trimEnd()}\n\n${block}`;
     writeFileSync(f, s);
     writeFileSync(P("README.md"), L(`# noop data\n\nPrivate data (kept in your own Cloudflare Worker): tasks, decisions, memory, logs.\n\n## Client\n\nAddress: **${url}**\n\nOpen it and paste the token to connect (or log in with an email code; the machine token is in ~/.noop/noop.toml on the host). This address is deployed in your own Cloudflare account and does not change.\n`, `# noop data\n\n私有数据（保存在你自己的 Cloudflare Worker 里）：任务、决策、记忆、日志。\n\n## 客户端\n\n地址：**${url}**\n\n打开后粘贴 token 连接（或用邮箱验证码登录；机器 token 在主机的 ~/.noop/noop.toml 里）。这个地址部署在你自己的 Cloudflare 账号里，固定不变。\n`));

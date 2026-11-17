@@ -164,6 +164,12 @@ export function isPrimary(cfg: Cfg, host = hostName(cfg)): boolean {
   return !list(P("fleet", "hosts"), /\.json$/).some((p) => basename(p, ".json") !== host);
 }
 
+/** Automatic cloud deployment can run on a credentialed host without moving fleet coordination. */
+export function isCloudDeployHost(cfg: Cfg, host = hostName(cfg)): boolean {
+  const deployHost = String(cfg.cloud?.deploy_host ?? "").trim();
+  return deployHost ? deployHost === host : isPrimary(cfg, host);
+}
+
 /** Id tag for a host: "" on the primary, else [host].id_tag or the host name's first letter, upper-cased. */
 export function idTagFor(cfg: Cfg, host: string): string {
   if (isPrimary(cfg, host)) return "";
