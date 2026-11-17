@@ -37,6 +37,7 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
   const channels: { slug: string; name: string; goal: string; created: string; archived: boolean }[] = [];
   const files = new Map<string, { content: string; updated: string }>();
   const docs = new Map<string, string>();
+  let demoSecrets: { name: string; updated: string }[] = [];
   let settingsView: SettingsView;
 
   function emit(e: Omit<HubEvent, "id" | "ts"> & { ts?: string }): HubEvent {
@@ -259,6 +260,13 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
       }
       case "POST /api/uploads": return ok({ url: `/media/upload-${++seq}.png` });
       case "GET /api/settings": return ok(settingsView);
+      case "GET /api/secrets": return ok({ secrets: demoSecrets });
+      case "PUT /api/secrets": {
+        const name = String(b.name ?? "");
+        demoSecrets = demoSecrets.filter((k) => k.name !== name);
+        if (b.value) demoSecrets = [...demoSecrets, { name, updated: new Date().toISOString() }].sort((x, y) => x.name.localeCompare(y.name));
+        return ok({ secrets: demoSecrets });
+      }
       case "PUT /api/settings": {
         const deep = (a: Record<string, unknown>, c: Record<string, unknown>): Record<string, unknown> => {
           const o = { ...a };

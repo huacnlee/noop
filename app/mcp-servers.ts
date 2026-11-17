@@ -115,37 +115,51 @@ export function usableMcp(list: McpServer[], env: Record<string, string | undefi
 
 const fill = (v: string, env: Record<string, string | undefined>) => v.replace(VAR, (_, k) => env[k] ?? "");
 
-/** Claude Code's `--mcp-config` JSON. Claude expands `${VAR}` itself, so no secret ends up in the command line. */
-export function claudeMcpConfig(list: McpServer[]): string {
+/** Claude Code's `--mcp-config` JSON. Without `env` the `${VAR}` references stay for Claude to expand; with it they are
+ *  filled in, for the private file the runner hands Claude (so a key is never in the agent's environment or argv). */
+export function claudeMcpConfig(list: McpServer[], env?: Record<string, string | undefined>): string {
+  const f = (v: string) => (env ? fill(v, env) : v);
+  const map = (m: Record<string, string> | undefined) => Object.fromEntries(Object.entries(m ?? {}).map(([k, v]) => [k, f(v)]));
   const servers = Object.fromEntries(list.map((s) => [s.name, s.type === "http"
-    ? { type: "http", url: s.url, ...(Object.keys(s.headers ?? {}).length ? { headers: s.headers } : {}) }
-    : { type: "stdio", command: s.command, args: s.args ?? [], ...(Object.keys(s.env ?? {}).length ? { env: s.env } : {}) }]));
+    ? { type: "http", url: f(s.url!), ...(Object.keys(s.headers ?? {}).length ? { headers: map(s.headers) } : {}) }
+    : { type: "stdio", command: f(s.command!), args: (s.args ?? []).map(f), ...(Object.keys(s.env ?? {}).length ? { env: map(s.env) } : {}) }]));
   return JSON.stringify({ mcpServers: servers });
 }
 
 const toml = (v: string) => JSON.stringify(v); // a TOML basic string has JSON's escapes
 const tomlTable = (m: Record<string, string>) => `{${Object.entries(m).map(([k, v]) => `${toml(k)}=${toml(v)}`).join(",")}}`;
+const hasVar = (v: string) => /\$\{[A-Za-z_]\w*\}/.test(v);
 
-/** Codex `-c mcp_servers.<name>=…` overrides. A value that is exactly `${NAME}` for the same key is passed through
- *  (`env_vars`) instead of being written out; other references are filled from the machine's environment. */
-export function codexMcpArgs(list: McpServer[], env: Record<string, string | undefined>): string[] {
-  return list.flatMap((s) => {
+/** Codex `-c mcp_servers.<name>=…` overrides, and the environment Codex must be started with. A value that names a
+ *  variable never lands in the arguments: it goes through Codex's env indirections (`env_vars`, `bearer_token_env_var`,
+ *  `env_http_headers`), filled into `env`. Plain values stay inline. */
+export function codexMcpLaunch(list: McpServer[], env: Record<string, string | undefined>): { args: string[]; env: Record<string, string> } {
+  const out: Record<string, string> = {};
+  const via = (name: string, v: string) => { out[name] = fill(v, env); return name; };
+  const args = list.flatMap((s, si) => {
     const parts: string[] = [];
+    const tag = `NOOP_MCP_${si}_${s.name.replace(/\W/g, "_").toUpperCase()}`;
     if (s.type === "http") {
-      parts.push(`url=${toml(s.url!)}`);
-      const headers = { ...(s.headers ?? {}) };
-      const auth = Object.keys(headers).find((k) => k.toLowerCase() === "authorization");
-      const bearer = auth ? headers[auth]!.match(/^Bearer \$\{([A-Za-z_]\w*)\}$/) : null;
-      if (auth && bearer) { parts.push(`bearer_token_env_var=${toml(bearer[1]!)}`); delete headers[auth]; }
-      const rest = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, fill(v, env)]));
-      if (Object.keys(rest).length) parts.push(`http_headers=${tomlTable(rest)}`);
+      parts.push(`url=${toml(fill(s.url!, env))}`);
+      const plain: Record<string, string> = {}, viaEnv: Record<string, string> = {};
+      for (const [k, v] of Object.entries(s.headers ?? {})) {
+        const bearer = k.toLowerCase() === "authorization" ? v.match(/^Bearer (.*)$/) : null;
+        if (bearer && hasVar(v)) {
+          const m = bearer[1]!.match(/^\$\{([A-Za-z_]\w*)\}$/);
+          parts.push(`bearer_token_env_var=${toml(m ? via(m[1]!, bearer[1]!) : via(`${tag}_BEARER`, bearer[1]!))}`);
+        } else if (hasVar(v)) viaEnv[k] = via(`${tag}_H${Object.keys(viaEnv).length}`, v);
+        else plain[k] = v;
+      }
+      if (Object.keys(plain).length) parts.push(`http_headers=${tomlTable(plain)}`);
+      if (Object.keys(viaEnv).length) parts.push(`env_http_headers=${tomlTable(viaEnv)}`);
     } else {
       parts.push(`command=${toml(fill(s.command!, env))}`, `args=[${(s.args ?? []).map((a) => toml(fill(a, env))).join(",")}]`);
       const pass: string[] = [], set: Record<string, string> = {};
-      for (const [k, v] of Object.entries(s.env ?? {})) v === `\${${k}}` ? pass.push(k) : (set[k] = fill(v, env));
+      for (const [k, v] of Object.entries(s.env ?? {})) hasVar(v) ? pass.push(via(k, v)) : (set[k] = v);
       if (pass.length) parts.push(`env_vars=[${pass.map(toml).join(",")}]`);
       if (Object.keys(set).length) parts.push(`env=${tomlTable(set)}`);
     }
     return ["-c", `mcp_servers.${s.name}={${parts.join(",")}}`];
   });
+  return { args, env: out };
 }

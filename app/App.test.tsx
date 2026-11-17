@@ -2102,6 +2102,39 @@ describe("commands", () => {
     await app.waitUntil(() => puts.length === 2);
     expect(puts[1].mcp_servers[0].enabled).toBe(false);
   });
+
+  test("settings adds, replaces and deletes shared keys without ever showing a value", async () => {
+    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
+    const sent: any[] = [];
+    let keys: { name: string; updated: string }[] = [];
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+      ...server(posts, puts, updates),
+      [`GET ${URL}/api/secrets`]: () => ({ body: { secrets: keys } }),
+      [`PUT ${URL}/api/secrets`]: (r: { body?: string | null }) => {
+        const b = JSON.parse(r.body!); sent.push(b);
+        keys = keys.filter((k) => k.name !== b.name);
+        if (b.value) keys.push({ name: b.name, updated: "2026-11-17T00:00:00Z" });
+        return { body: { secrets: keys } };
+      },
+    } });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-mcp");
+    await app.press("id:secret-new");
+    await app.waitFor("id:secret-editor");
+    await app.type("id:secret-name", "GITHUB_TOKEN");
+    await app.type("id:secret-value", "ghp_live_value");
+    await app.press("id:secret-save");
+    await app.waitUntil(() => sent.length === 1);
+    expect(sent[0]).toEqual({ name: "GITHUB_TOKEN", value: "ghp_live_value" });
+    await app.waitFor("id:secret-row-GITHUB_TOKEN");
+    expect(app.shows("text:ghp_live_value")).toBe(false);
+    await app.press("label:Replace key GITHUB_TOKEN");
+    expect(app.value("id:secret-value")).toBe("");
+    await app.press("id:secret-delete");
+    await app.waitUntil(() => sent.length === 2);
+    expect(sent[1]).toEqual({ name: "GITHUB_TOKEN", value: null });
+  });
 });
 
 

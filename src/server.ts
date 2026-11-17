@@ -25,6 +25,7 @@ import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } fro
 import { channels, originChannel, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
+import { localSecretList, localSecretPut } from "./secrets";
 import { type McpServer, mcpProblem, mcpServers } from "../app/mcp-servers";
 
 export type Event = {
@@ -504,6 +505,12 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       if (url.pathname === "/api/files/read" && req.method === "GET") {
         const f = readDataFile(url.searchParams.get("path") ?? "");
         return f ? json(f) : f === null ? json({ error: "path not readable" }, 403) : json({ error: "not found" }, 404);
+      }
+      if (url.pathname === "/api/secrets" && req.method === "GET") return json({ secrets: localSecretList() });
+      if (url.pathname === "/api/secrets" && req.method === "PUT") {
+        const b = (await req.json().catch(() => ({}))) as { name?: unknown; value?: unknown };
+        const r = await localSecretPut(loadConfig(), b.name, b.value);
+        return "error" in r ? json(r, 400) : json(r);
       }
       if (url.pathname === "/api/settings" && req.method === "GET") return json(settingsView());
       if (url.pathname === "/api/settings" && req.method === "PUT") return json(await saveSettings((await req.json()) as Record<string, unknown>));

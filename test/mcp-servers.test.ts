@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { claudeMcpConfig, codexMcpArgs, looksSecret, mcpProblem, mcpServers, parsePairs, splitCommand, usableMcp } from "../app/mcp-servers";
+import { claudeMcpConfig, codexMcpLaunch, looksSecret, mcpProblem, mcpServers, parsePairs, splitCommand, usableMcp } from "../app/mcp-servers";
 
 const gh = { name: "github", type: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}", LOG: "warn" } } as const;
 const remote = { name: "docs", type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer ${DOCS_TOKEN}", "X-Team": "noop" } } as const;
@@ -29,13 +29,23 @@ describe("shared MCP servers", () => {
     expect(cfg.mcpServers.github).toEqual({ type: "stdio", command: "npx", args: gh.args, env: gh.env });
     expect(cfg.mcpServers.docs.headers.Authorization).toBe("Bearer ${DOCS_TOKEN}");
   });
-  test("Codex gets -c overrides", () => {
-    const args = codexMcpArgs(mcpServers([gh, remote]), { GITHUB_TOKEN: "t", DOCS_TOKEN: "d" });
+  test("Claude's private file gets the values filled in", () => {
+    const cfg = JSON.parse(claudeMcpConfig(mcpServers([gh, remote]), { GITHUB_TOKEN: "t", DOCS_TOKEN: "d" }));
+    expect(cfg.mcpServers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN).toBe("t");
+    expect(cfg.mcpServers.docs.headers.Authorization).toBe("Bearer d");
+  });
+  test("Codex gets -c overrides, keys only through its environment", () => {
+    const { args, env } = codexMcpLaunch(mcpServers([gh, remote]), { GITHUB_TOKEN: "t", DOCS_TOKEN: "d" });
     expect(args).toEqual([
-      "-c", 'mcp_servers.github={command="npx",args=["-y","@modelcontextprotocol/server-github"],env={"GITHUB_PERSONAL_ACCESS_TOKEN"="t","LOG"="warn"}}',
+      "-c", 'mcp_servers.github={command="npx",args=["-y","@modelcontextprotocol/server-github"],env_vars=["GITHUB_PERSONAL_ACCESS_TOKEN"],env={"LOG"="warn"}}',
       "-c", 'mcp_servers.docs={url="https://mcp.example.com/mcp",bearer_token_env_var="DOCS_TOKEN",http_headers={"X-Team"="noop"}}',
     ]);
-    expect(codexMcpArgs(mcpServers([{ ...gh, env: { GITHUB_TOKEN: "${GITHUB_TOKEN}" } }]), {})[1]).toContain('env_vars=["GITHUB_TOKEN"]');
+    expect(env).toEqual({ GITHUB_PERSONAL_ACCESS_TOKEN: "t", DOCS_TOKEN: "d" });
+    expect(args.join(" ")).not.toMatch(/="t"|="d"/);
+    const h = codexMcpLaunch(mcpServers([{ name: "x", type: "http", url: "https://x.dev/mcp", headers: { "X-Key": "k-${K}", Authorization: "Bearer pre-${K}" } }]), { K: "s" });
+    expect(h.args[1]).toContain('bearer_token_env_var="NOOP_MCP_0_X_BEARER"');
+    expect(h.args[1]).toContain('env_http_headers={"X-Key"="NOOP_MCP_0_X_H0"}');
+    expect(h.env).toEqual({ NOOP_MCP_0_X_BEARER: "pre-s", NOOP_MCP_0_X_H0: "k-s" });
   });
   test("editing helpers", () => {
     expect(splitCommand(`npx -y "a b" 'c'`)).toEqual(["npx", "-y", "a b", "c"]);

@@ -1,13 +1,14 @@
 // Builds the prompt for an agent, runs Claude Code / Codex headless, parses the structured result.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  type Cfg, L, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, recentJournal, signature,
+  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, recentJournal, signature,
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
-import { claudeMcpConfig, codexMcpArgs, mcpServers, usableMcp } from "../app/mcp-servers";
+import { claudeMcpConfig, codexMcpLaunch, mcpServers, usableMcp } from "../app/mcp-servers";
+import { sharedSecrets } from "./secrets";
 
 export type Result = {
   status: "done" | "needs_decision" | "failed" | "delegated" | "waiting";
@@ -146,12 +147,14 @@ export function codexWritableDirs(home = homedir(), workDirs: string[] = [], roo
   return [...new Set(real)];
 }
 
-/** The owner's shared MCP servers (Settings → MCP) this machine can run: enabled, with every variable they name set here. */
+/** The owner's shared MCP servers (Settings → MCP) this machine can run: enabled, with every variable they name set
+ *  (by the team's shared keys or this machine's environment). */
 export function sharedMcp(cfg: Cfg, env: Record<string, string | undefined> = process.env) {
   return usableMcp(mcpServers((cfg as { mcp_servers?: unknown }).mcp_servers), env).use;
 }
 
-export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[] {
+/** `mcpArgs`: the MCP flags of this run (see `mcpLaunch`); none when left out (status views, model lookups). */
+export function cliCommand(cli: string, cfg: Cfg, gateOverride = false, mcpArgs: string[] = []): string[] {
   const c = cfg.clis?.[cli] ?? {};
   if (Array.isArray(c.command)) return c.command;
   if (cli === "claude") {
@@ -161,8 +164,7 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
     cmd.push("--settings", JSON.stringify({ attribution: { commit: "", pr: "" }, includeCoAuthoredBy: false }));
     const deny = claudeDisallowed(cfg, gateOverride);
     if (deny.length) cmd.push("--disallowedTools", ...deny);
-    const mcp = sharedMcp(cfg);
-    if (mcp.length) cmd.push("--mcp-config", claudeMcpConfig(mcp));
+    cmd.push(...mcpArgs);
     return cmd;
   }
   if (cli === "codex") {
@@ -171,7 +173,7 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
       "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true"];
     for (const dir of codexWritableDirs(homedir(), cfg.resources?.work_dirs)) cmd.push("--add-dir", dir);
     if (c.model) cmd.push("-m", c.model);
-    cmd.push(...codexMcpArgs(sharedMcp(cfg), process.env));
+    cmd.push(...mcpArgs);
     return [...cmd, "-"];
   }
   throw new Error(`unknown cli ${cli}`);
@@ -222,10 +224,29 @@ export const STALLED = "\n[stalled]";
 /** Marker for a process stopped at its work deadline so the caller can run checkpoint recovery. */
 export const RUN_LIMIT = "\n[run-limit]";
 
+/** The MCP flags and environment of one run. Keys (shared ones from the team, or this machine's own variables) never
+ *  go on the command line: Claude reads a private 0600 file that is removed when the run ends, Codex gets them in its
+ *  environment through its env indirections. */
+export async function mcpLaunch(cli: string, cfg: Cfg, secrets?: Record<string, string>): Promise<{ args: string[]; env: Record<string, string>; file?: string }> {
+  if (Array.isArray(cfg.clis?.[cli]?.command)) return { args: [], env: {} };
+  const env = { ...process.env, ...(secrets ?? await sharedSecrets(cfg)) };
+  const list = sharedMcp(cfg, env);
+  if (!list.length) return { args: [], env: {} };
+  if (cli === "codex") return codexMcpLaunch(list, env);
+  const dir = join(HOME_DIR, "run");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // a file left by a daemon that died mid-run: older than any run can last
+  for (const f of readdirSync(dir)) try { const p = join(dir, f); if (Date.now() - statSync(p).mtimeMs > 86_400_000) rmSync(p, { force: true }); } catch {}
+  const file = join(dir, `mcp-${crypto.randomUUID()}.json`);
+  writeFileSync(file, claudeMcpConfig(list, env), { mode: 0o600 });
+  return { args: ["--mcp-config", file], env: {}, file };
+}
+
 /** `retryEmpty` is internal: an empty completion gets exactly one rerun (see the end of the function). */
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
   extraEnv: Record<string, string> = {}, retryEmpty = true): Promise<string> {
-  const cmd = cliCommand(cli, cfg, gateOverride);
+  const mcp = await mcpLaunch(cli, cfg).catch(() => ({ args: [] as string[], env: {} as Record<string, string>, file: undefined }));
+  const cmd = cliCommand(cli, cfg, gateOverride, mcp.args);
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
   const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
@@ -234,8 +255,9 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const proc = Bun.spawn(cmd, {
     cwd: existsSync(dir) ? dir : ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     // Claude -p stops background subagents 10 min after the last turn; our own run limit bounds the run instead
-    env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ...extraEnv, HUB_DATA: ROOT },
+    env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ...mcp.env, ...extraEnv, HUB_DATA: ROOT },
   });
+  if (mcp.file) void proc.exited.finally(() => { try { rmSync(mcp.file!, { force: true }); } catch {} });
   const tid = logFile.split("/").pop()!.match(/^([A-Z]-[\w]*?\d{4})-\d{10,}/)?.[1];
   if (tid) agentProcs.set(tid, proc);
   void proc.exited.then(() => { if (tid && agentProcs.get(tid) === proc) agentProcs.delete(tid); });

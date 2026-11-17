@@ -27,6 +27,7 @@ import { sendMail, type SmtpCfg } from "./smtp";
 import { EmailMessage } from "cloudflare:email";
 
 import { GUEST_TOKEN, guestApi, guestJoin, guestWho, guestsAdmin, initGuestSchema } from "./guests";
+import { seal, secretProblem, unseal } from "./secrets";
 
 const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
 async function cfMail(binding: SendEmail, from: string, to: string, subject: string, text: string) {
@@ -189,7 +190,8 @@ export class Hub extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS auth_codes (email TEXT PRIMARY KEY, hash TEXT, expires INTEGER, attempts INTEGER);
       CREATE TABLE IF NOT EXISTS auth_sends (email TEXT, ts INTEGER, sent INTEGER);
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, email TEXT, created INTEGER, last_seen INTEGER, ua TEXT);
-      CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);`);
+      CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);
+      CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, sealed TEXT, updated TEXT);`);
     initFilesSchema(this.sql);
     initGuestSchema(this.sql);
     // scope: "owner" (app / browser) or "mcp" (an OAuth access token for a Claude / ChatGPT connector: /mcp only)
@@ -755,6 +757,28 @@ export class Hub extends DurableObject<Env> {
 
     if (p === "/api/status") return json(this.statusView());
 
+    // shared secrets (cloud/src/secrets.ts): the owner writes, only machines read values back
+    if (p === "/api/secrets" && m === "GET") {
+      return json({ secrets: this.sql.exec("SELECT name, updated FROM secrets ORDER BY name").toArray() });
+    }
+    if (p === "/api/secrets" && m === "PUT") {
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      const { name, value } = (await req.json().catch(() => ({}))) as { name?: unknown; value?: unknown };
+      const bad = secretProblem(name, value);
+      if (bad) return json({ error: bad }, 400);
+      if (value === null || value === "") this.sql.exec("DELETE FROM secrets WHERE name = ?", name as string);
+      else this.sql.exec("INSERT OR REPLACE INTO secrets (name, sealed, updated) VALUES (?, ?, ?)", name as string, await seal(this.env.HUB_TOKEN, name as string, value as string), new Date().toISOString());
+      return json({ secrets: this.sql.exec("SELECT name, updated FROM secrets ORDER BY name").toArray() });
+    }
+    if (p === "/api/secrets/values" && m === "GET") {
+      if (who !== "machine") return json({ error: "forbidden" }, 403);
+      const out: Record<string, string> = {};
+      for (const r of this.sql.exec("SELECT name, sealed FROM secrets").toArray()) {
+        const v = await unseal(this.env.HUB_TOKEN, r.name as string, r.sealed as string);
+        if (v !== null) out[r.name as string] = v;
+      }
+      return Response.json({ values: out }, { headers: { "Cache-Control": "no-store" } });
+    }
     if (p === "/api/settings" && m === "GET") return json(this.get("settings") ?? { current: {}, effective: {}, options: {} });
     if (p === "/api/tasks" && m === "GET") {
       return json(taskHistory(this.mcp.store(), { query: url.searchParams.get("q") ?? "", offset: Number(url.searchParams.get("offset")), limit: Number(url.searchParams.get("limit")) }));
