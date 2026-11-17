@@ -12,6 +12,8 @@ on:
       - scripts/test-prepare-client-release.py
       - scripts/prepare-client-release.py
       - scripts/check-ios-sdk.sh
+      - scripts/check-linux-runtime.sh
+      - scripts/fixtures/linux-runtime/**
       - scripts/setup-linux-deps.sh
       - install-client.sh
       - install-client.ps1
