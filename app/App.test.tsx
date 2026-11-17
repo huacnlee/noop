@@ -73,6 +73,8 @@ function auth(log: Auth, opts: { start?: number; code?: string } = {}) {
 }
 const newLog = (): Auth => ({ starts: [], verifies: [], logouts: 0 });
 
+const here = (f: string) => decodeURIComponent(new (globalThis as any).URL(`./${f}`, import.meta.url).pathname);
+
 describe("login", () => {
   test("email and authenticator codes log in and keep the session", async () => {
     const log = newLog();
@@ -424,6 +426,28 @@ describe("channel", () => {
     expect(posts[0]).toEqual({ text: "再看下 iPad", reply_to: "T-0005", thread: true });
     await app.waitUntil(() => app.value("id:task-composer") === "");
     await app.waitFor("text:再看下 iPad");
+  });
+
+  test("a task page's box takes a pasted image and sends it with the words, landing on the end", async () => {
+    const posts: { text: string; attachments?: string[] }[] = [];
+    const said = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, ts: ts(10 + i), from: "dev@linux-box", kind: "notice", ref: "T-0005", text: `Task line ${i}\n${"Longer progress text. ".repeat(6)}` }));
+    const app = await open("./App.tsx", { storage: STORAGE, network: {
+      ...hub(posts, said),
+      [`POST ${URL}/api/uploads`]: { body: { url: "/media/shot-1.png" } },
+      [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0005", title: "修复登录页", agent: "dev", state: "active", created: ts(1), request: "请修复登录页", runs: [] } },
+    }, width: 1200, height: 800, platform: "macos" });
+    await app.press("text:截图检查 gallery");
+    await app.waitFor("id:task-composer");
+    await app.paste("id:task-composer", { files: [here("icon.png")] });
+    await app.waitFor("id:task-attachment");
+    await app.paste("id:task-composer", { files: [here("hub.ts")] });
+    await app.waitFor("id:task-attach-note");
+    await app.type("id:task-composer", "看这张图");
+    await app.press("id:task-send");
+    expect(app.count("id:task-attachment")).toBe(0);
+    await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
+    expect(posts[0]).toMatchObject({ text: "看这张图", reply_to: "T-0007", thread: true, attachments: ["/media/shot-1.png"] });
+    await app.waitFor("text:看这张图");
   });
 
   // macOS sends Copy to the input that has the keyboard: a press on what a page shows takes it back, as the main timeline does
@@ -927,7 +951,6 @@ describe("channel", () => {
 
 describe("images", () => {
   const desk = { storage: STORAGE, width: 1200, height: 800, platform: "linux" as const };
-  const here = (f: string) => decodeURIComponent(new (globalThis as any).URL(`./${f}`, import.meta.url).pathname);
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
   function withUploads(posts: { text: string; reply_to?: string; attachments?: string[] }[], uploads: string[]) {
     return {
@@ -1150,6 +1173,27 @@ describe("images", () => {
     await app.submit("id:composer");
     await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
     expect(posts[0]).toMatchObject({ text: "", attachments: ["/media/shot-1.png"] });
+  });
+
+  test("in a channel a pasted image sends there, and sending lands on the newest message", async () => {
+    const chans = [{ slug: "nsh-i18n", name: "NSH i18n", goal: "NSH 多语言", status: "active", created: ts(-900), last_activity: ts(60), stale: false, count: 0, refs: [], items: [] }];
+    const talk = Array.from({ length: 60 }, (_, i) => ({ id: `c${i}`, ts: ts(i), from: "lead@primary", kind: "notice", text: `Channel line ${i}\n${"Some longer content. ".repeat(6)}`, channel: "nsh-i18n" }));
+    const posts: { text: string; attachments?: string[]; channel?: string }[] = [];
+    const uploads: string[] = [];
+    const app = await open("./App.tsx", { ...desk, network: { ...withUploads(posts, uploads), [`GET ${URL}/api/channels`]: { body: { channels: chans } }, [`GET ${URL}/api/channels/feed?*`]: { body: { events: talk } } } });
+    await app.waitFor("id:side-channel-nsh-i18n");
+    await app.press("id:side-channel-nsh-i18n");
+    await app.waitFor("text:/Channel line 59/");
+    await app.scroll("id:timeline", -3000);
+    await app.waitUntil(() => !app.shows("text:/Channel line 59/"));
+    await app.paste("id:composer", { files: [here("icon.png")] });
+    await app.waitFor("id:attachment");
+    await app.type("id:composer", "see this");
+    await app.submit("id:composer");
+    await app.waitFor("text:see this");
+    await app.waitUntil(() => !app.shows("label:Back to bottom"), { timeout: 2000 });
+    await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
+    expect(posts[0]).toMatchObject({ text: "see this", channel: "nsh-i18n", attachments: ["/media/shot-1.png"] });
   });
 
   test("an image file dropped anywhere on the window attaches", async () => {

@@ -1724,6 +1724,44 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
   );
 }
 
+/** Images attached to a message being written (pasted, dropped, picked); one set per composer. */
+function createAttachments() {
+  const list = signal<Attachment[]>([]);
+  const note = signal<string | null>(null);
+  let seq = 0;
+  function attach(file: Blob, name: string, fromPicker = false) {
+    // the photo picker only returns images, but phones often give them no type or extension; the server reads the bytes
+    const type = imageType(file.type, name) ?? (fromPicker ? "image/jpeg" : null);
+    const problem = attachProblem(type, file.size, list().length);
+    if (problem) return note.set(problem);
+    note.set(null);
+    const typed = file.type === type ? file : new Blob([file], { type: type! });
+    const preview = URL.createObjectURL(typed);
+    list.update((a) => [...a, { id: `a${++seq}`, name: name || `image-${seq}.png`, type: type!, size: file.size, file: typed, preview }]);
+  }
+  function unattach(id: string) {
+    const a = list().find((x) => x.id === id);
+    if (a) URL.revokeObjectURL(a.preview);
+    list.update((l) => l.filter((x) => x.id !== id));
+    note.set(null);
+  }
+  /** Local files (`file:` URLs from a drop or a file manager's copy): read the images among them. */
+  async function attachUris(uris: string[]) {
+    for (const u of uris) {
+      const path = filePath(u);
+      const name = path.split(/[\\/]/).pop() ?? "image";
+      if (!imageType(undefined, name)) { note.set(L("Only images can be sent", "只能发送图片")); continue; }
+      try {
+        const bytes = await fs.readFile(path);
+        attach(new Blob([bytes as Uint8Array<ArrayBuffer>]), name);
+      } catch {
+        note.set(L(`Can’t read ${name}`, `读不到 ${name}`));
+      }
+    }
+  }
+  return { list, note, attach, unattach, attachUris };
+}
+
 function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (folded: Folded | null) => void }) {
   // a task past the status snapshot's newest few is read on its own
   const older = signal<(TaskInfo & { decisions?: string[]; events?: HubEvent[] }) | null>(null);
@@ -1766,18 +1804,26 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
   const note = signal("");
   const hint = signal("");
   let said = 0;
+  // images pasted or dropped on the box go with the message, as in the main chat
+  const files = createAttachments();
   async function say() {
     const v = text().trim();
-    if (!v) return;
+    const sent = files.list();
+    if (!v && !sent.length) return;
     // reads as sent at once; only a failure brings the words back to the box, with the reason
     const id = `local:${++said}`;
-    saying.update((l) => [...l, { id, ts: new Date().toISOString(), from: "owner", kind: "owner", ref: props.id, thread: true, text: v }]);
+    saying.update((l) => [...l, { id, ts: new Date().toISOString(), from: "owner", kind: "owner", ref: props.id, thread: true, text: v, ...(sent.length ? { attachments: sent.map((f) => f.preview) } : {}) }]);
     text.set("");
     note.set("");
+    files.note.set(null);
+    files.list.set([]);
+    // what the owner just said is at the end of the page: go there, as the main chat does
+    setTimeout(() => page?.scrollToEnd({ animated: !reduceMotion() }), 40);
     try {
-      await props.hub.send(v, props.id, [], true);
+      await props.hub.send(v, props.id, sent, true);
     } catch (e) {
       text.update((now) => (now.trim() ? `${v}\n${now}` : v));
+      files.list.update((now) => [...sent, ...now]);
       note.set(String((e as Error)?.message ?? e));
     }
     saying.update((l) => l.filter((x) => x.id !== id));
@@ -1874,6 +1920,30 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
         <If when={hint() && !note()}>
           <Text style={{ fontSize: 13, color: colors.muted }}>{hint()}</Text>
         </If>
+        <If when={files.note()}>
+          <Text testID="task-attach-note" style={{ fontSize: 13, color: colors.danger }}>{files.note()}</Text>
+        </If>
+        <If when={files.list().length}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingHorizontal: 4 }}>
+            <Each of={files.list()} key={(a) => a.id}>
+              {(a) => (
+                <View testID="task-attachment" style={{ width: 56, height: 56 }}>
+                  <Image src={a().preview} style={{ width: 56, height: 56, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }} />
+                  <View
+                    role="button"
+                    accessibilityLabel={L(`Remove ${a().name}`, `移除 ${a().name}`)}
+                    tooltip={touch ? undefined : <Tooltip label={L("Remove", "移除")} />}
+                    onPress={() => files.unattach(a().id)}
+                    hoverStyle={{ opacity: 0.85 }}
+                    style={{ position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.text }}
+                  >
+                    <Icon name="close" size={10} tint={colors.background} />
+                  </View>
+                </View>
+              )}
+            </Each>
+          </View>
+        </If>
         <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8, paddingLeft: 16, paddingRight: 8, paddingVertical: 8, ...composerGlass() }}>
           <Input
             testID="task-composer"
@@ -1882,13 +1952,17 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
             multiline
             value={text()}
             onChange={({ value }) => text.set(value)}
+            onPaste={({ files: pasted, uris }) => {
+              for (const f of pasted) files.attach(f, f.name);
+              if (uris.length) void files.attachUris(uris);
+            }}
             submitBehavior={touch ? "newline" : "submit"}
             onSubmit={() => void say()}
             placeholder={L(`Continue in ${props.id}…`, `在 ${props.id} 里继续说…`)}
             class="placeholder:text-faint"
             style={{ flex: 1, minHeight: 36, maxHeight: 160, paddingVertical: 8, fontSize: 15, lineHeight: 21, color: colors.text, borderWidth: 0, backgroundColor: "transparent" }}
           />
-          <IconButton variant="primary" icon="arrow-up" label={L("Send", "发送")} shortcut="Enter" testID="task-send" disabled={!text().trim()} onPress={() => void say()} />
+          <IconButton variant="primary" icon="arrow-up" label={L("Send", "发送")} shortcut="Enter" testID="task-send" disabled={!text().trim() && !files.list().length} onPress={() => void say()} />
         </View>
       </View>
     </If>
@@ -4294,44 +4368,15 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   }
 
   // Images the owner attaches: pasted, dropped on the window, or picked.
-  const attachments = signal<Attachment[]>([]);
+  const { list: attachments, note: attachNote, attach, unattach: dropAttachment, attachUris } = createAttachments();
   /** The thumbnail whose full-size view is open; it pages through every attached image. */
   const viewing = signal<string | null>(null);
   const viewingIndex = () => Math.max(0, attachments().findIndex((a) => a.id === viewing()));
-  const attachNote = signal<string | null>(null);
   // A file drag over the window: null when none, else the offered files (empty until the shell reports them).
   const dropping = signal<string[] | null>(null);
-  let attachSeq = 0;
-  function attach(file: Blob, name: string, fromPicker = false) {
-    // the photo picker only returns images, but phones often give them no type or extension; the server reads the bytes
-    const type = imageType(file.type, name) ?? (fromPicker ? "image/jpeg" : null);
-    const problem = attachProblem(type, file.size, attachments().length);
-    if (problem) return attachNote.set(problem);
-    attachNote.set(null);
-    const typed = file.type === type ? file : new Blob([file], { type: type! });
-    const preview = URL.createObjectURL(typed);
-    attachments.update((a) => [...a, { id: `a${++attachSeq}`, name: name || `image-${attachSeq}.png`, type: type!, size: file.size, file: typed, preview }]);
-  }
   function unattach(id: string) {
-    const a = attachments().find((x) => x.id === id);
-    if (a) URL.revokeObjectURL(a.preview);
     if (viewing() === id) viewing.set(null);
-    attachments.update((list) => list.filter((x) => x.id !== id));
-    attachNote.set(null);
-  }
-  /** Local files (`file:` URLs from a drop or a file manager's copy): read the images among them. */
-  async function attachUris(uris: string[]) {
-    for (const u of uris) {
-      const path = filePath(u);
-      const name = path.split(/[\\/]/).pop() ?? "image";
-      if (!imageType(undefined, name)) { attachNote.set(L("Only images can be sent", "只能发送图片")); continue; }
-      try {
-        const bytes = await fs.readFile(path);
-        attach(new Blob([bytes as Uint8Array<ArrayBuffer>]), name);
-      } catch {
-        attachNote.set(L(`Can’t read ${name}`, `读不到 ${name}`));
-      }
-    }
+    dropAttachment(id);
   }
   async function pickImages() {
     try {
