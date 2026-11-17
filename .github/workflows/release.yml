@@ -37,7 +37,7 @@ defaults:
 
 jobs:
   package:
-    name: package (${{ matrix.target }})
+    name: package (${{ matrix.target }}, ${{ matrix.channel || 'direct' }})
     strategy:
       fail-fast: false
       matrix:
