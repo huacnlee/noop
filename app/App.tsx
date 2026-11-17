@@ -1260,12 +1260,12 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
                 testID={`reply-to-${ref}`}
                 accessibilityLabel={L(`Preview ${ref}`, `预览 ${ref}`)}
                 hoverStyle={{ opacity: 1 }}
-                style={{ cursor: "pointer", opacity: peek() ? 1 : 0.85, flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%", paddingHorizontal: 4 }}
+                style={{ cursor: "pointer", opacity: peek() ? 1 : 0.85, flexDirection: "row", alignItems: "center", gap: 6, maxWidth: 360, minWidth: 0, overflow: "hidden", paddingHorizontal: 4 }}
               >
                 <Icon name="reply" size={13} tint={colors.faint} />
-                <Text style={{ ...chipText, fontFamily: MONO, fontSize: 12, color: colors.muted }}>{ref}</Text>
+                <Text style={{ ...chipText, flexShrink: 0, fontFamily: MONO, fontSize: 12, color: colors.muted }}>{ref}</Text>
                 <If when={asked()}>
-                  <Text style={{ ...chipText, flexShrink: 1, numberOfLines: 1, fontSize: 13, color: colors.faint }}>{asked()}</Text>
+                  <Text style={{ ...chipText, flexShrink: 1, minWidth: 0, numberOfLines: 1, fontSize: 13, color: colors.faint }}>{asked()}</Text>
                 </If>
               </View>
             }
