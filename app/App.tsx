@@ -67,6 +67,7 @@ import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
 import { setupTray, type TrayChat } from "./tray";
 import { createTimelineWindow } from "./timeline";
+import { ShellUpdate } from "./shell-update";
 import { CHECK_EVERY_MS, createUpdates, shellLine, type ShellInfo, type UpdateState } from "./update";
 import {
   alpha,
@@ -1271,7 +1272,7 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
             }
           >
             {/* No padding on the card: the body scrolls edge to edge, so its scroll bar sits on the card's edge. */}
-            <PopIn style={[popupSurface(), { width: 400, maxWidth: "100%", padding: 0, overflow: "hidden" }]}>
+            <PopIn style={{ ...popupSurface(), width: 400, maxWidth: "100%", padding: 0, overflow: "hidden" }}>
               <View testID={`reply-preview-${ref}`} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingLeft: 14, paddingRight: 6, paddingVertical: 6, minHeight: 44, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
                 <If when={original()}>
                   <Avatar from={original()!.from} small />
@@ -2450,9 +2451,11 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
 const appUpdate = signal<UpdateState>({ kind: "none" });
 const updates = createUpdates(
   {
-    check: checkForUpdate, download: () => downloadUpdate(), install: installAndRestart,
+    check: checkForUpdate,
+    download: (progress) => downloadUpdate((p) => progress?.(p.total && p.total > 0 ? Math.min(100, p.received / p.total * 100) : null)),
+    install: installAndRestart, open: async (url) => { if (!(await openUrl(url)).opened) throw new Error(L("Could not open the update link", "无法打开更新链接")); },
     // OTA: a signed package of the app's code. Phones cannot restart an app, so there it runs from the next launch.
-    packages: { check: checkForPackage, download: () => downloadPackage(), restart: platform.os === "ios" || platform.os === "android" ? null : restartToPackage, running: runningPackage },
+    packages: { check: checkForPackage, download: () => downloadPackage(), restart: platform.os === "ios" || platform.os === "android" ? null : restartToPackage },
   },
   (state) => appUpdate.set(state),
 );
@@ -2480,7 +2483,7 @@ function UpdateRow(props: { onRestart: () => void }) {
     else if (u.kind !== "installing") props.onRestart();
   };
   return (
-    <If when={state().kind !== "none" && state().kind !== "staged"}>
+    <If when={state().kind !== "none" && state().kind !== "staged" && state().kind !== "shell"}>
       <View
         role="button"
         testID="app-update"
@@ -3299,7 +3302,7 @@ function VersionRows(props: { hub: Hub }) {
     <>
       <SetRow first label={L("This app", "本机客户端")} value={client} testID="version-client" />
       <If when={shell}>
-        <SetRow label={L("App shell", "外壳")} value={shell?.tone === "ok" ? shellText : undefined} detail={shell?.tone === "bad" ? shellText : undefined} tone={shell?.tone === "bad" ? "danger" : undefined} testID="version-shell" />
+        <SetRow label={L("App shell", "外壳")} value={shell?.tone === "ok" ? shellText : undefined} detail={shell?.tone === "bad" ? shellText : undefined} tone={shell?.tone === "bad" ? "danger" : undefined} testID="version-shell" below={<ShellUpdate state={appUpdate()} onUpdate={() => void updates.installShell()} />} />
       </If>
       <Each of={hosts()} key={(h) => h.host}>
         {(h) => {

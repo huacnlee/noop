@@ -864,6 +864,38 @@ describe("channel", () => {
     await app.waitFor("id:cancel-task");
   });
 
+  test("settings offers a shell update after OTA without downloading the shell until pressed", async () => {
+    const calls: string[] = [];
+    let downloads = 0;
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: { ...hub([]), [`GET ${URL}/api/settings`]: { status: 500 } },
+      modules: { "nsh/updater": {
+        shellInfo: { version: "0.3.18", build: 18, nshVersion: "0.5.0", packages: true },
+        runningPackage: null,
+        checkForPackage: () => { calls.push("package-check"); return { version: "0.3.19", build: 19 }; },
+        downloadPackage: () => { calls.push("package-download"); },
+        checkForUpdate: () => { calls.push("shell-check"); return { version: "0.3.19", url: "https://example.com/noop.zip", canInstall: true, shell: false }; },
+        downloadUpdate: () => { downloads++; if (downloads === 1) throw new Error("Download interrupted"); },
+        installAndRestart: () => { calls.push("install"); },
+      } },
+    });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-version");
+    await app.waitFor("Update shell to 0.3.19", { timeout: 15000 });
+    expect(calls).toEqual(["package-check", "package-download", "shell-check"]);
+    expect(downloads).toBe(0);
+    expect(app.shows("id:shell-update-dot")).toBe(true);
+    expect(app.shows("id:app-update")).toBe(false);
+    await app.press("label:Update shell to 0.3.19");
+    await app.waitFor("Download interrupted");
+    await app.press("label:Retry shell update");
+    await app.waitUntil(() => calls.includes("install"));
+    expect(downloads).toBe(2);
+    expect(app.dialogs().length).toBe(0);
+  });
+
   test("machines show the code they run, and settings updates them all after a confirm", async () => {
     let updates = 0;
     const app = await open("./App.tsx", {
