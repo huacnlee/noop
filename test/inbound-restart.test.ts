@@ -4,7 +4,7 @@ import { ackInbound, answerFromChat, pendingInbound } from "../src/server";
 
 test("a chat answer taken just before a restart is still there for the next daemon", () => {
   // the old daemon takes the owner's answer, then exits (self-update) before its next tick could handle it
-  const old = Bun.spawnSync(["bun", "-e", 'const s = await import("./src/server"); await s.handleOwnerMessage("D-0001 A"); process.exit(0);'],
+  const old = Bun.spawnSync([process.execPath, "-e", 'const s = await import("./src/server"); await s.handleOwnerMessage("D-0001 A"); process.exit(0);'],
     { cwd: join(import.meta.dir, ".."), env: process.env, stderr: "pipe" });
   expect(old.stderr.toString()).toBe("");
   expect(old.exitCode).toBe(0);
