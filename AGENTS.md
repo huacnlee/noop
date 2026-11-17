@@ -30,3 +30,23 @@ Verify the signature with `codesign --verify --strict`, install with `xcrun devi
 The App Store app is `Noop Agent` (Apple ID `6835723652`) in the "lei zhong" team (provider `1196602372`). Its bundle ID is `dev.huacnlee.noop`, set only when packaging for the App Store: `nsh package app --target ios --id dev.huacnlee.noop --sign <Apple Distribution identity> --profile <App Store profile>`. `app/nsh.json` keeps `dev.noop.app`, which the desktop, Android and sideloaded iPhone builds (above) still use, so their data and the Linux installer are unaffected. Before packaging locally, write the release version into `app/version.ts` as release CI does (`export const CLIENT_VERSION = "1.0.0";`), or Settings shows "This app: dev"; restore the file afterwards. Pass a `--build` higher than any build already uploaded. The iOS build needs an NSH runtime with `Dialog`'s `sheetHeight` / `sheetGrabber` (longbridge/nsh#2253) for the account sheet; until the nightly has it, package with a CLI built from that commit or later and check Settings shows its version. Run the same `scripts/check-ios-sdk.sh` check before uploading with `nsh publish ios --app-id 6835723652 ...` (an App Store Connect API key of that team, kept outside the repo).
 
 App Review signs in with the test account `demo@noop.dev` (App Store Connect's sign-in information): entered as the email on the sign-in screen, "Send code" opens the in-app demo (`app/demo.ts`) at once, with no server, code or 2FA. The server address `demo` with code `DEMO2026` and 2FA `000000` also reaches it. It runs entirely on the device, so never point reviewers at a real Noop server. Keep the demo working when the hub's API changes; `app/demo.test.tsx` covers it.
+
+### Release channels (1.0.1 onward)
+
+All client channels share the release version. Before local packaging, run
+`python3 scripts/prepare-client-release.py --version 1.0.1 --build <next-build> --channel store`
+in an isolated checkout/copy; use `--channel direct` for desktop, Android and sideloaded iOS.
+This sets both the native metadata and Settings version. Store builds retain
+`dev.huacnlee.noop` and use `store-latest.json`; direct builds retain `dev.noop.app`
+and `latest.json`. An existing 1.0.0 Store installation needs the new native Store
+build once to adopt its separate update URL.
+
+Store OTA packages require `NSH_STORE_PACKAGE_CERT` in release CI: a certificate
+for the existing release public key, certified by the existing root specifically
+for `dev.huacnlee.noop`. The direct-channel certificate only authorizes
+`dev.noop.app`; do not reuse it for Store packages. Obtain owner approval before
+extending signing authorization or configuring this secret. The Store manifest
+is signed by the existing release key; NSH fetches its detached signature at
+`latest.json.sig` beside `store-latest.json`. The direct manifest remains unsigned
+and trusted through its GitHub source. CI's Store IPA is unsigned; sign and
+validate the actual distribution IPA before requesting upload approval.

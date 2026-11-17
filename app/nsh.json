@@ -1,7 +1,7 @@
 {
   "name": "Noop",
   "id": "dev.noop.app",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "build": 1,
   "updater": {
     "github": "huacnlee/noop",

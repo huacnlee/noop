@@ -9,6 +9,8 @@ on:
     paths:
       - .github/workflows/release.yml
       - .github/actions/setup-nsh/**
+      - scripts/test-prepare-client-release.py
+      - scripts/prepare-client-release.py
       - scripts/check-ios-sdk.sh
       - scripts/setup-linux-deps.sh
       - install-client.sh
@@ -44,6 +46,7 @@ jobs:
           - { target: windows, os: windows-latest, asset: noop-windows-x86_64.zip, installer: install-client.ps1 }
           - { target: macos, os: macos-15, asset: noop-macos-arm64.zip, installer: install-client.sh }
           - { target: ios, os: xcode-27, asset: noop-ios-unsigned.ipa }
+          - { target: ios, os: xcode-27, asset: noop-ios-store-unsigned.ipa, channel: store }
           - { target: android, os: ubuntu-24.04, asset: noop-android.apk }
           - { target: web, os: ubuntu-24.04, asset: noop-web.tar.gz }
     runs-on: ${{ matrix.os }}
@@ -54,14 +57,21 @@ jobs:
           ref: ${{ env.NSH_REF }}
           target: ${{ matrix.target }}
 
+      - name: Verify release metadata
+        run: python3 scripts/test-prepare-client-release.py
+
       - name: Package
         env:
+          CHANNEL: ${{ matrix.channel || 'direct' }}
           TARGET: ${{ matrix.target }}
           ASSET: ${{ matrix.asset }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
+          version=$(python3 -c 'import json; print(json.load(open("app/nsh.json"))["version"])')
+          [ "$GITHUB_REF_TYPE" != tag ] || version="${GITHUB_REF_NAME#v}"
+          python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel "$CHANNEL"
           args=(--build "$GITHUB_RUN_NUMBER")
           [ "$GITHUB_REF_TYPE" != tag ] || args+=(--app-version "${GITHUB_REF_NAME#v}")
           # Settings › Version shows the release the app was built for.
@@ -212,6 +222,7 @@ jobs:
         env:
           NSH_PACKAGE_KEY: ${{ secrets.NSH_PACKAGE_KEY }}
           NSH_PACKAGE_CERT: ${{ secrets.NSH_PACKAGE_CERT }}
+          NSH_STORE_PACKAGE_CERT: ${{ secrets.NSH_STORE_PACKAGE_CERT }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           printf 'export const CLIENT_VERSION = "%s";\n' "$version" > app/version.ts
@@ -220,6 +231,19 @@ jobs:
           printf '%s\n' "$NSH_PACKAGE_CERT" > "$keys/release.cert"
           (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/release.cert" \
             --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-$version.nshpkg")
+          # The Store bundle ID needs its own root-certified package certificate.
+          test -n "$NSH_STORE_PACKAGE_CERT" || { echo "NSH_STORE_PACKAGE_CERT is required" >&2; exit 1; }
+          printf '%s\n' "$NSH_STORE_PACKAGE_CERT" > "$keys/store.cert"
+          python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel store
+          (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/store.cert" \
+            --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-store-$version.nshpkg")
+          nsh update-manifest --entry app --out "$RUNNER_TEMP/store-manifest" \
+            --package "assets/noop-store-$version.nshpkg" --key "$keys/release.secret" \
+            --link "ios=https://apps.apple.com/app/id6835723652"
+          mv "$RUNNER_TEMP/store-manifest/latest.json" assets/store-latest.json
+          # NSH resolves the detached signature as latest.json.sig next to any manifest URL.
+          mv "$RUNNER_TEMP/store-manifest/latest.json.sig" assets/latest.json.sig
+          python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel direct
           rm -rf "$keys"
       # The apps fetch `releases/latest/download/latest.json`, the versioned archives and the package next to it
       # (nsh/updater). The installers keep using the unversioned assets. An APK cannot replace itself: Android gets a
