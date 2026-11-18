@@ -25,6 +25,8 @@ test("quota walls are still recognised, including reset hints that carry a time"
     "The server is overloaded",
     // Command Code Plan's 402 wording (T-1953): credits exhausted, resets only on renewal — failover now
     "API Error: 402 Command Code Plan: You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
+    // Codex on a workspace plan: the run dies with no result block, so without this it retried as a plain failure
+    "ERROR: Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
   ]) expect(classify(msg)).toBe("quota");
 });
 
