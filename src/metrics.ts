@@ -1,7 +1,7 @@
 // Fleet metrics → fleet/metrics.json; the architect uses them to evolve prompts, rules and memory.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { CODE, P, list, readDoc } from "./core";
-import { judgeAccuracy } from "./autonomy";
+import { judgeAccuracy, proposalPicks } from "./autonomy";
 
 // Which code produced these numbers. Twice now a host reported a healthy fleet while the daemon was still running a
 // checkout pinned 20+ commits back by local edits, so every fix merged upstream was inert there and every figure below
@@ -18,6 +18,23 @@ export function codeState(root = CODE) {
   return { commit, behind_origin: /^\d+$/.test(behind) ? Number(behind) : null, dirty_files: dirty };
 }
 
+function rejectedTaskReason(task: Record<string, string>, batches: Map<string, Record<string, string>>) {
+  if (task.cancelled) return "cancelled";
+  if (/^superseded:T-[^\s/]+$/.test(task.approval ?? "")) return "system_superseded";
+  const batchId = task.approval?.match(/^rejected:(P-[^\s/]+)$/)?.[1];
+  const batch = batchId && batches.get(batchId);
+  if (!batch || !/^owner(?:\([^)]+\))?$/.test(batch.answered_by ?? "")) return "unclassified";
+
+  const items = (batch.items ?? "").split(",");
+  const position = items.indexOf(task.id) + 1;
+  const picks = proposalPicks(batch.answer ?? "", items);
+  if (!task.id || !position || !picks || picks.has(position)) return "unclassified";
+  if (!picks.size) return "owner_batch_none";
+  // A reply that refers to a missing slot gives no reliable selection to attribute to the owner.
+  for (const pick of picks) if (!items[pick - 1]) return "unclassified";
+  return "owner_batch_unselected";
+}
+
 export function computeMetrics(days = 7) {
   const since = Date.now() - days * 86400e3;
   const per: Record<string, { done: number; failed: number; blocked: number; minutes: number[] }> = {};
@@ -29,7 +46,8 @@ export function computeMetrics(days = 7) {
       a[folder]++;
       if (m.started && m.finished) a.minutes.push((Date.parse(m.finished) - Date.parse(m.started)) / 60e3);
     }
-  const decisions = list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => Date.parse(m.answered ?? "") > since);
+  const closed = list(P("decisions", "closed")).map((p) => readDoc(p).meta);
+  const decisions = closed.filter((m) => Date.parse(m.answered ?? "") > since);
   // Cards still waiting on the owner are this fleet's main failure mode, and counting only decisions/closed made them
   // invisible: 14 open cards and 0 answers reported as decisions.total = 0, i.e. as nothing at all.
   const openCards = list(P("decisions", "open"), /^D-.*\.md$/).map((p) => readDoc(p).meta);
@@ -47,11 +65,16 @@ export function computeMetrics(days = 7) {
     const judged = v.done + v.failed;
     return [k, { runs: n, success: judged ? +(v.done / judged).toFixed(2) : null, failed: v.failed, blocked: v.blocked, median_minutes: Math.round(med) }];
   }));
-  const approvals = list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => m.kind === "proposals");
-  const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/).length;
+  const approvals = closed.filter((m) => m.kind === "proposals");
+  const batches = new Map(approvals.map((m) => [m.id, m]));
+  const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/);
+  const reasons = { scope: "all_retained_records", system_superseded: 0, cancelled: 0,
+    owner_batch_none: 0, owner_batch_unselected: 0, unclassified: 0 };
+  for (const path of rejected) reasons[rejectedTaskReason(readDoc(path).meta, batches)]++;
   const out = {
     shadow_judge: judgeAccuracy(),
-    shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])), proposal_batches: approvals.length, proposals_rejected_total: rejected,
+    shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])),
+    proposal_batches: approvals.length, proposals_rejected_total: rejected.length, rejected_task_reasons: reasons,
     window_days: days, generated: new Date().toISOString(), code: codeState(), agents,
     decisions: { total: decisions.length, open: openCards.length,
       oldest_open_days: openAges.length ? Math.round((Date.now() - Math.min(...openAges)) / 86400e3) : 0, by_judge: byWho(/^judge/), by_owner: byWho(/^owner\(/), owner_overrides_of_judge: byWho(/override/),
