@@ -19,8 +19,10 @@ class ReleaseMetadataTest(unittest.TestCase):
                 self.assertEqual((config['id'], config['version'], config['build']), (app_id, '1.0.1', 3))
                 self.assertEqual(config['capabilities'], original['capabilities'])
                 self.assertEqual(config['updater']['packages'], original['updater']['packages'])
-                self.assertEqual('github' in config['updater'], channel == 'direct')
-                self.assertEqual('publicKey' in config['updater'], channel == 'store')
+                self.assertNotIn('github', config['updater'])
+                self.assertIn('publicKey', config['updater'])
+                endpoint = 'store-latest.json' if channel == 'store' else '/direct/latest.json'
+                self.assertTrue(config['updater']['url'].endswith(endpoint))
                 self.assertIn('"1.0.1"', (app / 'version.ts').read_text())
 
     def test_bad_metadata_does_not_mutate_files(self):

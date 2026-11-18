@@ -38,8 +38,8 @@ All client channels share the release version. Before local packaging, run
 in an isolated checkout/copy; use `--channel direct` for desktop, Android and sideloaded iOS.
 This sets both the native metadata and Settings version. Store builds retain
 `dev.huacnlee.noop` and use `store-latest.json`; direct builds retain `dev.noop.app`
-and `latest.json`. An existing 1.0.0 Store installation needs the new native Store
-build once to adopt its separate update URL.
+and fetch the signed direct manifest via /api/updates/direct/latest.json. Legacy Store
+1.0.0 installations fetch the same Store package through the generic latest.json alias.
 
 Store OTA packages require `NSH_STORE_PACKAGE_CERT` in release CI: a certificate
 for the existing release public key, certified by the existing root specifically
@@ -47,6 +47,5 @@ for `dev.huacnlee.noop`. The direct-channel certificate only authorizes
 `dev.noop.app`; do not reuse it for Store packages. Obtain owner approval before
 extending signing authorization or configuring this secret. The Store manifest
 is signed by the existing release key; NSH fetches its detached signature at
-`latest.json.sig` beside `store-latest.json`. The direct manifest remains unsigned
-and trusted through its GitHub source. CI's Store IPA is unsigned; sign and
+`latest.json.sig` beside `store-latest.json`. Publish the signed Store manifest at both store-latest.json and latest.json for legacy Store installations. Direct releases use the signed direct-latest.json and its signature via the direct channel endpoint. CI's Store IPA is unsigned; sign and
 validate the actual distribution IPA before requesting upload approval.

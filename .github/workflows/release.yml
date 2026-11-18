@@ -220,15 +220,17 @@ jobs:
       # app/nsh.json). Installed apps on every platform, iOS and Android included, run it from their next launch when
       # its build is newer than theirs and their NSH runtime is new enough; otherwise they take the whole app below.
       # It has this run's build number, as the apps packaged above do, so only older installs pick it up.
-      - name: Sign the OTA package
+      - name: Sign OTA packages and write channel manifests
         env:
           NSH_PACKAGE_KEY: ${{ secrets.NSH_PACKAGE_KEY }}
           NSH_PACKAGE_CERT: ${{ secrets.NSH_PACKAGE_CERT }}
+          IOS_UPDATE_URL: ${{ vars.IOS_UPDATE_URL }}
           NSH_STORE_PACKAGE_CERT: ${{ secrets.NSH_STORE_PACKAGE_CERT }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           printf 'export const CLIENT_VERSION = "%s";\n' "$version" > app/version.ts
           keys="$RUNNER_TEMP/keys"
+          trap 'rm -rf "$keys"' EXIT
           (umask 077 && mkdir -p "$keys" && printf '%s\n' "$NSH_PACKAGE_KEY" > "$keys/release.secret")
           printf '%s\n' "$NSH_PACKAGE_CERT" > "$keys/release.cert"
           (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/release.cert" \
@@ -246,17 +248,7 @@ jobs:
           # NSH resolves the detached signature as latest.json.sig next to any manifest URL.
           mv "$RUNNER_TEMP/store-manifest/latest.json.sig" assets/latest.json.sig
           python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel direct
-          rm -rf "$keys"
-      # The apps fetch `releases/latest/download/latest.json`, the versioned archives and the package next to it
-      # (nsh/updater). The installers keep using the unversioned assets. An APK cannot replace itself: Android gets a
-      # link for the whole app, and the package for its code.
-      - name: Write the update manifest
-        env:
-          IOS_UPDATE_URL: ${{ vars.IOS_UPDATE_URL }}
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          jq --arg version "$version" '.version = $version' app/nsh.json > "$RUNNER_TEMP/nsh.json"
-          mv "$RUNNER_TEMP/nsh.json" app/nsh.json
+
           # iOS offers a shell update only after a real App Store / TestFlight destination is configured.
           links=()
           if [[ -n "$IOS_UPDATE_URL" ]]; then
@@ -265,9 +257,12 @@ jobs:
               *) echo "IOS_UPDATE_URL must be an App Store or TestFlight HTTPS URL" >&2; exit 1 ;;
             esac
           fi
-          nsh update-manifest assets/noop-"$version"-*.tar.gz assets/noop-"$version"-*.zip --entry app --out assets \
+          nsh update-manifest assets/noop-"$version"-*.tar.gz assets/noop-"$version"-*.zip --entry app --out "$RUNNER_TEMP/direct-manifest" --key "$RUNNER_TEMP/keys/release.secret" \
             --package assets/noop-"$version".nshpkg \
             --link "android=https://github.com/$GITHUB_REPOSITORY/releases/latest/download/noop-android.apk" "${links[@]}"
+          mv "$RUNNER_TEMP/direct-manifest/latest.json" assets/direct-latest.json
+          mv "$RUNNER_TEMP/direct-manifest/latest.json.sig" assets/direct-latest.json.sig
+          cp assets/store-latest.json assets/latest.json
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
