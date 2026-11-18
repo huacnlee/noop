@@ -1860,6 +1860,22 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
   cleanup(() => props.onFold?.(null));
   return (
     <View style={{ flex: 1 }}>
+    <If when={t()}>
+      <View testID="task-toolbar" style={{ flexShrink: 0, borderBottomWidth: 1, borderBottomColor: colors.line }}>
+        <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", paddingHorizontal: props.wide ? 32 : 16, minHeight: 48, flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={{ numberOfLines: 1, flexShrink: 1, minWidth: 0, fontSize: 13, color: t()!.state === "failed" ? colors.danger : t()!.state === "blocked" ? colors.warn : colors.muted }}>{stateLabel()}</Text>
+          <Text style={{ flexShrink: 0, fontFamily: MONO, fontSize: 13, color: colors.muted }}>{props.id}</Text>
+          <View style={{ flexGrow: 1 }} />
+          <If when={cancellable() && !cancelling()}>
+            <IconButton testID="finish-task" label={L("Done", "完成")} icon="check" onPress={() => void finish()} />
+            <IconButton testID="cancel-task" label={L("Cancel task", "取消任务")} icon="close" onPress={() => void cancel()} />
+          </If>
+          <If when={cancelling()}>
+            <Text style={{ fontSize: 13, color: colors.muted }}>{L("Working…", "处理中…")}</Text>
+          </If>
+        </View>
+      </View>
+    </If>
     <Scroll
       testID="task-page"
       ref={(r) => { page = r; }}
@@ -1872,18 +1888,6 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
       <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", paddingHorizontal: props.wide ? 32 : 16, paddingTop: 24, paddingBottom: composerHeight() + 24 }}>
         <If when={t()} else={<Text style={{ fontSize: 15, color: colors.muted }}>{missing() ? L(`Can’t find ${props.id}.`, `找不到 ${props.id}。`) : L("Loading…", "读取中…")}</Text>}>
           <PageHeader testID="task-head">
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Badge label={stateLabel()} variant={t()!.state === "failed" ? "danger" : t()!.state === "blocked" ? "warn" : "neutral"} />
-              <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.muted }}>{t()!.id}</Text>
-              <View style={{ flex: 1 }} />
-              <If when={cancellable() && !cancelling()}>
-                <Button testID="finish-task" label={L("Done", "完成")} variant="ghost" icon="check" onPress={() => void finish()} />
-                <Button testID="cancel-task" label={L("Cancel task", "取消任务")} variant="ghost" icon="close" onPress={() => void cancel()} />
-              </If>
-              <If when={cancelling()}>
-                <Text style={{ fontSize: 13, color: colors.muted }}>{L("Working…", "处理中…")}</Text>
-              </If>
-            </View>
             <Text style={{ userSelect: "text", fontSize: 20, fontWeight: "600", color: colors.text }}>{t()!.title}</Text>
             <Text style={{ fontSize: 14, color: colors.muted }}>
               {[displayName(t()!.agent), t()!.host, t()!.activity?.model ?? t()!.model ?? t()!.cli,

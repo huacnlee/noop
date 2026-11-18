@@ -2266,12 +2266,12 @@ describe("folding page heads", () => {
   }
 
   for (const platform of ["macos", "ios"] as const) {
-    test(`a task's head folds into the bar and its actions come back at the top (${platform})`, async () => {
+    test(`a task's toolbar stays visible as its title folds (${platform})`, async () => {
       const said = Array.from({ length: 40 }, (_, i) => ({ id: `task-said-${i}`, ts: ts(10 + i / 100), from: "dev@linux-box", kind: "notice", ref: "T-0007", thread: true, text: `Task progress ${i}` }));
       const app = await open("./App.tsx", { storage: STORAGE, width: platform === "macos" ? 1200 : 390, height: 800, platform, network: {
         ...hub([], said),
-        [`GET ${URL}/api/status`]: { body: { ...status, active: [{ ...status.active[0], state: "active", started: ts(50) }] } },
-        [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0007", title: "截图检查 gallery", agent: "dev", host: "linux-box", state: "active", started: ts(50), request: "截图检查 gallery", runs: [] } },
+        [`GET ${URL}/api/status`]: { body: { ...status, active: [{ ...status.active[0], state: "parked", started: ts(50) }] } },
+        [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0007", title: "截图检查 gallery", agent: "dev", host: "linux-box", state: "parked", started: ts(50), request: "截图检查 gallery", runs: [] } },
       } });
       await app.waitFor("id:composer");
       if (platform !== "macos") await app.press("label:Menu");
@@ -2283,8 +2283,10 @@ describe("folding page heads", () => {
 
       await app.scroll("id:task-page", 1200);
       await app.waitFor("id:page-title-folded");
+      expect(app.shows("id:finish-task")).toBe(true);
+      expect(app.shows("id:cancel-task")).toBe(true);
       expect(app.shows("label:截图检查 gallery, back to the top")).toBe(true);
-      expect(app.shows("text:T-0007 · In progress")).toBe(true);
+      expect(app.shows("text:T-0007 · Waiting on external result")).toBe(true);
 
       await app.scroll("id:task-page", -20000);
       await app.waitUntil(() => !app.shows("id:page-title-folded"));
