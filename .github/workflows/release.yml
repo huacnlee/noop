@@ -175,8 +175,10 @@ jobs:
           app="$RUNNER_TEMP/verify-x86_64/Noop.app"
           ditto -x -k assets-intel/noop-macos-x86_64.zip "$RUNNER_TEMP/verify-x86_64"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-          lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64
-          codesign --verify --deep --strict "$app"
+          # Report every Mach-O and the signature so a failed check says which file is wrong.
+          find "$app/Contents/MacOS" -type f -exec file {} +
+          lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64 || { echo "::error::$executable is not x86_64"; exit 1; }
+          codesign --verify --deep --strict --verbose=4 "$app" || { echo "::error::codesign verification failed"; exit 1; }
 
       - name: Upload Intel macOS package
         if: matrix.target == 'macos'
