@@ -1014,6 +1014,12 @@ describe("images", () => {
     await app.press("id:file-attachment");
     await app.waitUntil(() => app.openedUrls().length === 1);
     expect(app.openedUrls()).toEqual([`${secure}/media/1794484440793-verify.log?token=tok`]);
+    // a report opens in the reader, whose download button saves the file itself
+    await app.press("id:doc-attachment");
+    await app.waitFor("id:doc-download");
+    await app.press("id:doc-download");
+    await app.waitUntil(() => app.openedUrls().length === 2);
+    expect(app.openedUrls()[1]).toBe(`${secure}/media/1794484440777-report.md?token=tok`);
   });
 
   test("a zoomed image pages through its message's images in a loop", async () => {

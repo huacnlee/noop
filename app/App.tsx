@@ -954,6 +954,8 @@ function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpan
         {btn({ id: "doc-zoom-out", icon: "zoom-out", label: L("Smaller text", "缩小文字"), disabled: step() === 0, onPress: () => step.set(Math.max(0, step() - 1)) })}
         <Text testID="doc-scale" style={{ width: 36, textAlign: "center", fontSize: 11.5, fontVariant: ["tabular-nums"], color: colors.faint }}>{`${Math.round(DOC_SCALES[step()] * 100)}%`}</Text>
         {btn({ id: "doc-zoom-in", icon: "zoom-in", label: L("Larger text", "放大文字"), disabled: step() === DOC_SCALES.length - 1, onPress: () => step.set(Math.min(DOC_SCALES.length - 1, step() + 1)) })}
+        {/* the hub serves Markdown as an attachment (cloud/src/uploads.ts), so opening the file saves it */}
+        {btn({ id: "doc-download", icon: "download", label: L("Download", "下载"), onPress: () => void openUrl(props.doc.src).catch(() => {}) })}
         <If when={props.wide}>
           {btn({ id: "doc-expand", icon: props.expanded ? "minimize" : "maximize", label: props.expanded ? L("Restore reader", "还原阅读栏") : L("Maximize reader", "放大阅读栏"), on: props.expanded, onPress: props.onExpand })}
         </If>
