@@ -1,5 +1,6 @@
 // Builds the prompt for an agent, runs Claude Code / Codex headless, parses the structured result.
 import { existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { codexMessage } from "./codex-output";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -119,7 +120,7 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
   }
   if (cli === "codex") {
     // non-interactive: workspace-write sandbox with network, never ask for approval
-    const cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
+    const cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write",
       "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true"];
     for (const dir of codexWritableDirs()) cmd.push("--add-dir", dir);
     if (c.model) cmd.push("-m", c.model);
@@ -157,7 +158,8 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   void proc.exited.then(() => { if (tid && agentProcs.get(tid) === proc) agentProcs.delete(tid); });
 
   // what the agent is doing: every chunk of output is a sign of life; Claude's stream also names each step
-  const json = cmd.includes("stream-json");
+  const codexJson = cli === "codex" && cmd.includes("--json");
+  const json = cmd.includes("stream-json") || codexJson;
   const act = { at: Date.now(), step: undefined as string | undefined, steps: 0 };
   const inFlight = new Map<string, string>(); // tool_use id → tool name, until its result comes back
   let resultText: string | undefined, assistantText = "";
@@ -169,6 +171,11 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const onLine = (line: string) => {
     let e: any;
     try { e = JSON.parse(line); } catch { return; }
+    if (codexJson) {
+      const text = codexMessage(e);
+      if (text !== undefined) assistantText += text + "\n\n";
+      return;
+    }
     if (e.type === "assistant") {
       for (const c of e.message?.content ?? []) {
         if (c.type === "tool_use") { inFlight.set(c.id, c.name); act.step = toolStep(c.name, c.input); act.steps++; }

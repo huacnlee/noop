@@ -303,3 +303,20 @@ test("checkWaits: a wait that finished while the daemon was down still wakes aft
   expect([...(await checkWaits(Date.now() + 999_999_999, 1000))]).toContain("T-9102");
   rmSync(flag, { force: true });
 });
+
+test("Codex keeps the completed result before an empty hook turn and ignores tool output", async () => {
+  const { codexMessages } = await import("../src/codex-output");
+  const result = '```json\n{"status":"done","summary":"captured"}\n```';
+  const lines = [
+    { type: "item.completed", item: { type: "agent_message", text: result } },
+    { type: "item.completed", item: { type: "command_execution", aggregated_output: '```json\n{"status":"failed"}\n```' } },
+    { type: "item.completed", item: { type: "agent_message", text: "" } },
+    { type: "turn.completed" },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const cfg = { clis: { codex: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
+  const log = `${tmpdir()}/noop-codex-${process.pid}.log`;
+  try {
+    expect(parseResult(await runAgent("codex", "", tmpdir(), cfg, log))).toMatchObject({ status: "done", summary: "captured" });
+    expect(parseResult(codexMessages(lines))).toMatchObject({ status: "done", summary: "captured" });
+  } finally { rmSync(log, { force: true }); }
+});
