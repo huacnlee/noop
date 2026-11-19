@@ -248,6 +248,31 @@ async function loadConfig(): Promise<Boot> {
   return { config: url && token ? { url: normalizeUrl(url), token } : null, suggested, served: !!page.origin, email, ref: page.ref ?? null };
 }
 
+/** Where the real session waits while the owner looks around the demo, so one tap brings it back. */
+const REAL = { url: "hub.real.url", token: "hub.real.token" };
+/** Set by App: swaps the connected hub without going through the login screen. */
+let switchHub: (c: Config) => void = () => {};
+/** Signed in: park the real session and open the on-device demo. In the demo: restore the parked session. */
+async function toggleDemo(cur: Config) {
+  if (isDemo(cur.url)) {
+    const url = await Storage.getItem(REAL.url);
+    const token = await Storage.getItem(REAL.token);
+    if (!url || !token) return;
+    await Storage.removeItem(REAL.url);
+    await Storage.removeItem(REAL.token);
+    await Storage.setItem(KEYS.url, url);
+    await Storage.setItem(KEYS.token, token);
+    switchHub({ url, token });
+  } else {
+    await Storage.setItem(REAL.url, cur.url);
+    await Storage.setItem(REAL.token, cur.token);
+    await Storage.setItem(KEYS.url, DEMO_URL);
+    await Storage.setItem(KEYS.token, DEMO_TOKEN);
+    switchHub({ url: DEMO_URL, token: DEMO_TOKEN });
+  }
+}
+const demoLabel = (cur: Config) => (isDemo(cur.url) ? L("Back to my hub", "回到我的服务器") : L("Switch to demo", "切换到演示"));
+
 type Conn = "connecting" | "live" | "offline" | "unauthorized" | "blocked";
 /** The Worker's IP allow-list (HUB_ALLOW_IPS) turned this device away; `ip` is its address as the Worker saw it. */
 const ipBlocked = (status: number, data: unknown): string | null =>
@@ -3253,6 +3278,7 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               <Text style={{ flex: 1, fontSize: 15, color: colors.text, numberOfLines: 1 }}>{props.hub.cfg.url}</Text>
             </View>
             <View style={{ flexDirection: "row", gap: 8 }}>
+              <Button label={demoLabel(props.hub.cfg)} variant="outline" onPress={() => void toggleDemo(props.hub.cfg)} testID="switch-demo" />
               <Button label={L("Sign out", "退出登录")} variant="danger" onPress={props.onDisconnect} testID="logout" />
             </View>
           </View>
@@ -4010,6 +4036,7 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
           leading={<Indicator status={props.hub.conn() === "live" ? "online" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "error" : "waiting"} />}
           label={props.hub.cfg.url.replace(/^https?:\/\//, "")}
         />
+        <SetRow label={demoLabel(props.hub.cfg)} onPress={() => void toggleDemo(props.hub.cfg)} testID="switch-demo" inset={0} />
         <SetRow label={L("Sign out", "退出登录")} tone="danger" onPress={() => void logout()} testID="logout" inset={0} />
       </Section>
     </Grouped>
@@ -6037,6 +6064,14 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
               <Button testID="verify" label={busy() ? L("Signing in…", "登录中…") : L("Sign in", "登录")} variant="primary" loading={busy()} disabled={code().length !== CODE_LEN || totp().length !== 6} grow onPress={verify} />
             </If>
           </View>
+          <If when={!props.served && step() === "email"}>
+            <View style={{ flexDirection: "row", justifyContent: "center", alignItems: "center", gap: 4 }}>
+              <Text style={{ fontSize: 14, color: colors.muted }}>{L("No Noop server yet?", "还没有 Noop 服务器？")}</Text>
+              <View role="button" testID="try-demo" accessibilityLabel={L("Try the demo", "试用演示")} onPress={enterDemo} hoverStyle={hovered()} style={{ height: 30, justifyContent: "center", paddingHorizontal: 6, borderRadius: 6 }}>
+                <Text style={{ fontSize: 14, fontWeight: "500", color: colors.accent }}>{L("Try the demo", "试用演示")}</Text>
+              </View>
+            </View>
+          </If>
         </View>
       </View>
     </Scroll>
@@ -6097,8 +6132,20 @@ function App() {
     email.set(r.email);
     ready.set(true);
   });
+  switchHub = (c) => {
+    // Unmount the old hub first so its socket closes, then mount the new one.
+    ready.set(false);
+    config.set(null);
+    setTimeout(() => {
+      url.set(c.url);
+      config.set(c);
+      ready.set(true);
+    }, 0);
+  };
   async function forget(message: string) {
     await Storage.removeItem(KEYS.token);
+    await Storage.removeItem(REAL.url);
+    await Storage.removeItem(REAL.token);
     email.set((await Storage.getItem(KEYS.email)) ?? untracked(email));
     notice.set(message);
     config.set(null);

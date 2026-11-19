@@ -49,13 +49,20 @@ describe("demo in the app", () => {
   test("the test account opens a working chat at once, without codes or any network", async () => {
     const app = await open("./App.tsx", { network: {} });
     await app.waitFor("Sign in to Noop");
-    expect(app.shows("id:try-demo")).toBe(false);
     await app.type("id:email", "Demo@noop.dev");
     await app.press("id:send-code");
     await app.waitFor("id:composer");
     await app.waitFor("text:/Merge PR #42/");
     expect(app.storage()["hub.url"]).toBe("http://demo");
     expect(app.storage()["hub.email"]).toBe("demo@noop.dev");
+  });
+
+  test("the visible Try the demo link opens the demo on every platform", async () => {
+    const app = await open("./App.tsx", { network: {} });
+    await app.waitFor("id:try-demo");
+    await app.press("id:try-demo");
+    await app.waitFor("id:composer");
+    expect(app.storage()["hub.url"]).toBe("http://demo");
   });
 
   test("the address demo signs in with the codes it shows", async () => {
