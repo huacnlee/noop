@@ -580,11 +580,11 @@ function wakeParents(host: string, ready = new Set<string>()) {
       // Only wakes without progress count toward parking it as blocked; a changed wait_check is progress.
       const wakes = Number(meta.wakes ?? 0) + (ready.has(meta.id) ? 0 : 1);
       if (tooManyWakes(wakes)) { // cycling without progress: stop waking it, tell the owner once what blocks it
-        writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...meta, wake_at: undefined, wakes: String(wakes), status: "blocked" },
+        writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...meta, wake_at: undefined, wakes: String(wakes), status: "blocked", stuck_notified: "yes" },
           `${body}\nBlocked after ${wakes} wake-ups, still waiting on: ${meta.waiting_on ?? "?"}\n`);
         unlinkSync(p);
         journal(host, L(`🧱 ${meta.id} still not ready after ${wakes} wakes, now blocked: ${meta.waiting_on ?? "?"}`, `🧱 ${meta.id} 唤醒 ${wakes} 次仍未就绪，转为 blocked：${meta.waiting_on ?? "?"}`));
-        void notify(L(`${meta.id} is stuck: ${meta.waiting_on ?? "?"} (woken ${wakes} times, no more automatic retries)`, `${meta.id} 卡住了：${meta.waiting_on ?? "?"}（已唤醒 ${wakes} 次，不再自动重试）`), loadConfig(), { kind: "notice", ref: meta.id });
+        if (!meta.stuck_notified) void notify(L(`${meta.id} is stuck: ${meta.waiting_on ?? "?"} (woken ${wakes} times, no more automatic retries)`, `${meta.id} 卡住了：${meta.waiting_on ?? "?"}（已唤醒 ${wakes} 次，不再自动重试）`), loadConfig(), { kind: "notice", ref: meta.id });
         continue;
       }
       writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, wait_ready: undefined, status: undefined, claimed_by: undefined, resumed: "yes", wakes: String(wakes) },
