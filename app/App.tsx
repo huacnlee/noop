@@ -5157,7 +5157,10 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               keyExtractor={(row) => row.key}
               ref={(r) => { scroller = r; }}
               onLayout={({ bounds }) => { timelineHeight = Math.max(1, bounds.size.height); }}
-              onTouchStartCapture={() => { cancelJump(); if (platform.os === "macos" && focused()) composer?.blur(); }}
+              onTouchStartCapture={() => {
+                cancelJump();
+                if ((platform.os === "ios" || platform.os === "macos") && focused()) composer?.blur();
+              }}
               style={{ flex: 1 }}
               scrollEventThrottle={100}
               keyboardShouldPersistTaps="handled"
