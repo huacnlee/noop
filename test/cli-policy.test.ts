@@ -2,8 +2,9 @@
 // It did not: the planner wrote its choice into the task's `cli` field, allowedClis() read that first, so a member
 // pinned to codex-only kept running Claude for every task the planner called "hard".
 import { expect, test } from "bun:test";
-import { allowedClis, cliHintPatch } from "../src/core";
+import { allowedClis, chooseCli, cliHintPatch, fleetClis } from "../src/core";
 
+const BOTH = ["claude", "codex"];
 const cfg = (agents?: Record<string, unknown>) => ({ clis: agents ? { agents } : {} }) as any;
 
 test("the owner's per-member CLI wins over the planner's hint", () => {
@@ -49,19 +50,39 @@ test("a member's configured order is kept", () => {
 // The write side: what the planner may store on the task afterwards. Reverting `cli_hint` to `cli` here is what
 // caused the original bug, so it is asserted directly.
 test("the planner's suggestion is stored as cli_hint, never as cli", () => {
-  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, "claude")).toEqual({ cli_hint: "claude" });
-  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, "claude")).not.toHaveProperty("cli");
+  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, "claude", BOTH)).toEqual({ cli_hint: "claude" });
+  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, "claude", BOTH)).not.toHaveProperty("cli");
 });
 
 test("no hint is stored for a member with a policy (it would be overruled anyway)", () => {
-  expect(cliHintPatch({ agent: "lead", cli: "auto" }, ["codex"], "claude")).toEqual({});
+  expect(cliHintPatch({ agent: "lead", cli: "auto" }, ["codex"], "claude", BOTH)).toEqual({});
 });
 
 test("no hint is stored on a pinned task", () => {
-  expect(cliHintPatch({ agent: "lead", cli: "claude" }, undefined, "codex")).toEqual({});
+  expect(cliHintPatch({ agent: "lead", cli: "claude" }, undefined, "codex", BOTH)).toEqual({});
 });
 
 test("a malformed suggestion is dropped instead of being coerced to claude", () => {
-  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, "gpt")).toEqual({});
-  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, undefined)).toEqual({});
+  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, "gpt", BOTH)).toEqual({});
+  expect(cliHintPatch({ agent: "lead", cli: "auto" }, undefined, undefined, BOTH)).toEqual({});
+});
+
+// A single-host fleet without codex: the planner suggested codex for a daily report, allowedClis() narrowed the task
+// to ["codex"], chooseCli() found nothing installed, and the task sat in the inbox for 20 hours.
+test("a hint for a CLI no online host has is not stored", () => {
+  expect(cliHintPatch({ agent: "reporter", cli: "auto" }, undefined, "codex", ["claude"])).toEqual({});
+  expect(cliHintPatch({ agent: "reporter", cli: "auto" }, undefined, "claude", ["claude"])).toEqual({ cli_hint: "claude" });
+});
+
+test("a task planned on a claude-only fleet stays runnable by claude", () => {
+  const meta = { agent: "reporter", cli: "auto", ...cliHintPatch({ agent: "reporter", cli: "auto" }, undefined, "codex", ["claude"]) };
+  expect(allowedClis(meta, cfg())).toEqual(["claude", "codex"]);
+  if (Bun.which("claude") && !Bun.which("codex")) expect(chooseCli(meta, cfg())).toBe("claude");
+});
+
+test("fleetClis reads the agent CLIs from the online hosts' caps", () => {
+  expect(fleetClis([["os:macos", "cli:claude", "cli:gh"]])).toEqual(["claude"]);
+  expect(fleetClis([["cli:claude"], ["os:linux", "cli:codex"]])).toEqual(["claude", "codex"]);
+  expect(fleetClis([["cli:gh", "cli:bun"]])).toEqual([]);
+  expect(fleetClis([])).toEqual([]);
 });

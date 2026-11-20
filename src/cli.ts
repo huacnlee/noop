@@ -30,7 +30,7 @@ import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineParkedOnDecision, routineQueued, supersedeProposed } from "./autonomy";
-import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, capOk, idTagFor, isPrimary, isCloudDeployHost, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
@@ -812,7 +812,11 @@ const nap = (ms: number) => Promise.race([Bun.sleep(ms), new Promise<void>((r) =
 async function planNow(cfg: Cfg, host: string) {
   const todo = list(P("tasks", "inbox"), /^T-.*\.md$/).map((p) => ({ p, ...readDoc(p) })).filter((t) => !t.meta.planned).slice(0, 12);
   if (!todo.length) return;
-  const hosts = onlineHosts(cfg).map((h) => `- ${h.host}: ${h.caps.join(",")}`).join("\n");
+  const online = onlineHosts(cfg);
+  const hosts = online.map((h) => `- ${h.host}: ${h.caps.join(",")}`).join("\n");
+  // CLIs some machine can actually run (this host counts even before its first heartbeat lands): a hint for any other
+  // CLI would leave the task unclaimable
+  const clis = fleetClis([hostCaps(cfg), ...online.map((h) => h.caps)]);
   // the owner's per-member CLI policy (Settings → Members → clis.agents): the planner suggests, it may not override it
   const fixed = new Map<string, string[]>();
   for (const t of todo) {
@@ -825,7 +829,7 @@ For each task decide:
 - requires: host capabilities it truly needs, comma-separated, from the hosts' caps below (e.g. "os:macos" for iOS/macOS builds,
   simulators or screenshots; "os:windows"; "" when any host will do). Only require what the work cannot be done without.
 - cli: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews.
-  A suggestion only — never pick against an agent's fixed CLI below.
+  A suggestion only — never pick against an agent's fixed CLI below. Installed in this fleet: ${clis.join(", ") || "(unknown)"}; never suggest another.
 - difficulty: "hard" or "normal".
 ${fixed.size ? `\nAgent CLI (the owner's setting — not yours to change):\n${[...fixed].map(([a, c]) => `- ${a}: fixed to ${c.join(" → ")} (leave cli out)`).join("\n")}\n` : ""}
 
@@ -851,7 +855,7 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
       const hint = v.cli === "codex" || v.cli === "claude" ? v.cli : "";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
       writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req,
-        ...cliHintPatch(t.meta, per, v.cli),
+        ...cliHintPatch(t.meta, per, v.cli, clis),
         ...(v.difficulty === "hard" ? { difficulty: "hard" } : {}), planned: now() }, t.body);
       // what will actually run — plus the planner's raw answer when the owner's policy overruled it, so it stays traceable
       const run = allowedClis(readDoc(t.p).meta, cfg);

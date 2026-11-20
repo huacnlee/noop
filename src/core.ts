@@ -256,12 +256,19 @@ export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
 }
 
 /** What the planner may write back about the CLI: only a `cli_hint`, and only when the task is not pinned and its
- *  agent has no per-member policy — either of those would overrule the suggestion anyway. */
-export function cliHintPatch(meta: Record<string, string>, per: unknown, suggestion: unknown): Record<string, string> {
+ *  agent has no per-member policy — either of those would overrule the suggestion anyway.
+ *  `available` is the set of CLIs installed on some online host (see fleetClis): a hint naming a CLI no machine has
+ *  would narrow allowedClis to a CLI nobody can run, and the task would sit in the inbox forever. */
+export function cliHintPatch(meta: Record<string, string>, per: unknown, suggestion: unknown, available: string[]): Record<string, string> {
   const pinned = meta.cli && meta.cli !== "auto";
   const hint = suggestion === "claude" || suggestion === "codex" ? suggestion : "";
-  if (pinned || (Array.isArray(per) && per.length) || !hint) return {};
+  if (pinned || (Array.isArray(per) && per.length) || !hint || !available.includes(hint)) return {};
   return { cli_hint: hint };
+}
+
+/** The agent CLIs (claude, codex) installed on at least one of these hosts, read from their `cli:*` caps. */
+export function fleetClis(caps: string[][]): string[] {
+  return ["claude", "codex"].filter((c) => caps.some((cs) => cs.includes(`cli:${c}`)));
 }
 
 export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null {
