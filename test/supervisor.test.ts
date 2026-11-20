@@ -228,7 +228,6 @@ test("a blocked task closes quietly once its PRs are merged or closed, even with
   }
 });
 
-import { classify } from "../src/supervisor";
 test("an answered card does not resume a blocked task that already resumed on it", () => {
   const ctx = { now: NOW, online: [], retired: [], primaryOs: "linux", maxAgeHours: 3, maxWakes: 3, decision: () => "closed" as const } as any;
   expect(classify({ folder: "blocked", meta: { id: "T-x", decision: "D-1", resumes: "D-1" } }, ctx)?.action).not.toBe("resume");
