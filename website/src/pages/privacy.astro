@@ -1,0 +1,63 @@
+---
+import '../styles/global.css';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const canonical = new URL(`${base}/privacy/`, Astro.site);
+const updated = 'November 17, 2026';
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="How the Noop apps handle your data." />
+    <meta name="theme-color" content="#101114" />
+    <title>Noop — Privacy Policy</title>
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/png" href={`${base}/icon.png`} />
+    <script is:inline>
+      let mode;
+      try { mode = localStorage.getItem('noop-mode'); } catch {}
+      document.documentElement.dataset.theme = (mode === 'light' || (mode !== 'dark' && matchMedia('(prefers-color-scheme: light)').matches)) ? 'light' : 'dark';
+    </script>
+    <style>
+      main { max-width: 720px; padding-block: 48px 96px; }
+      h1 { font-size: 36px; margin: 32px 0 8px; }
+      h2 { font-size: 20px; margin: 40px 0 8px; }
+      li { color: var(--secondary); margin-bottom: 6px; }
+      .updated { color: var(--muted); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <a href={`${base}/`}>← Noop</a>
+      <h1>Privacy Policy</h1>
+      <p class="updated">Last updated: {updated}</p>
+
+      <p>Noop is a client for a Noop server that you run yourself, on your own computers and your own Cloudflare account. This policy covers the Noop apps for iOS, Android, macOS, Windows and Linux.</p>
+
+      <h2>We do not collect your data</h2>
+      <p>The developer of Noop does not run a service for the apps and does not collect, store, sell or share any of your personal data. The apps contain no analytics, advertising or tracking code, and they do not track you across other apps or websites.</p>
+
+      <h2>Where your data goes</h2>
+      <ul>
+        <li><strong>Your Noop server.</strong> Your email address, the messages you send, tasks, files and images you attach go only to the server address you enter, which you own and operate. Its data lives in your own Cloudflare account and on your own machines.</li>
+        <li><strong>On your device.</strong> The server address, your sign-in session and app preferences are stored on the device and removed when you sign out or delete the app.</li>
+        <li><strong>Dictation.</strong> If you use the microphone button, speech is turned into text by your device's built-in speech recognition, which may be processed by Apple or Google under their own privacy policies. Noop does not record or keep audio.</li>
+        <li><strong>Photos and files.</strong> The app only reads images or files you pick yourself, and only to send them to your server.</li>
+        <li><strong>Notifications.</strong> If you turn on notifications, your server sends them through your platform's push service. You can turn them off at any time.</li>
+      </ul>
+
+      <h2>Demo mode</h2>
+      <p>"Try the demo" runs entirely on your device with made-up data. Nothing you type in the demo leaves your device.</p>
+
+      <h2>Children</h2>
+      <p>Noop is not directed at children under 13 and does not knowingly collect information from them.</p>
+
+      <h2>Changes</h2>
+      <p>If this policy changes, the new version will be published on this page with a new date.</p>
+
+      <h2>Contact</h2>
+      <p>Questions about privacy: open an issue at <a href="https://github.com/huacnlee/noop/issues">github.com/huacnlee/noop</a>.</p>
+    </main>
+  </body>
+</html>

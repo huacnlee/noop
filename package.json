@@ -10,6 +10,7 @@
     "daemon": "bun src/cli.ts daemon",
     "tick": "bun src/cli.ts tick",
     "status": "bun src/cli.ts status",
+    "demo": "bun scripts/demo-server.ts",
     "check": "bunx tsc --noEmit",
     "test": "bun test"
   },

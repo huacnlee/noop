@@ -1,35 +1,39 @@
 #!/usr/bin/env bun
 // hub — CLI + daemon for the agent fleet.
+import { guestCmd } from "./guest";
 import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {
-  type Cfg, P, ROOT, _commitPush, _pull, agentName, chooseCli, claim, commitPush, heartbeat, hostCaps, hostName, journal,
+  type Cfg, P, ROOT, _commitPush, _pull, agentName, asText, chooseCli, claim, commitPush, guardMemory, heartbeat, hostCaps, hostName, journal,
   list, loadConfig, locked, newTask, now, onlineHosts, pickTask, pull, readDoc, remember, writeDoc,
 } from "./core";
-import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, recentJudgeIds, routeDecision } from "./decisions";
+import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
-import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
+import { RUN_LIMIT, STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent, runLimits } from "./runner";
 import { writeRules } from "./rules";
-import { backoffMinutes, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
-import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
+import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, MAX_WAKES, tooManyWakes, waitMeta } from "./waits";
+import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
 import { computeMetrics } from "./metrics";
-import { supervise } from "./supervisor";
+import { writeUsageReport } from "./usage-report";
+import { checkUnrunnable, supervise } from "./supervisor";
 import { collect, LEARN_PROMPT } from "./sessions";
 import { medic } from "./medic";
 import { githubStarved } from "./github";
 import { doctor, visual } from "./visual";
-import { answerFromChat, appendEvent, cancelTask, drainInbound, feed, handleOwnerMessage, mediaDays, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
-import { followUpTarget, reopenTask, type BrainOut, ClaudeModel, SYSTEM, dataActs, localStore, logBrain, think } from "./brain";
-import { runTool } from "../cloud/src/tools";
+import { ackInbound, answerFromChat, appendEvent, cancelTask, feed, handleOwnerMessage, mediaDays, pendingInbound, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
+import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
+import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
-import { judgeAccuracy, level, needsApproval, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
-import { CODE, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
+import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineParkedOnDecision, routineQueued, supersedeProposed } from "./autonomy";
+import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
+import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
+import { shellBash } from "./shell";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
@@ -43,11 +47,18 @@ export function due(every: string, last: string | undefined, t = new Date()): bo
     return !lastT || +t - +lastT >= mins * 60_000;
   }
   const [h, m] = parts.at(-1)!.split(":").map(Number);
-  const target = new Date(t); target.setHours(h, m, 0, 0);
-  if (t < target) return false;
-  const dow = t.getDay();
-  if (parts[0] === "weekdays" && (dow === 0 || dow === 6)) return false;
-  if (parts[0] === "weekly" && ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][dow] !== parts[1].toUpperCase().slice(0, 3)) return false;
+  // Most recent slot at or before t, stepping back over days the schedule excludes.
+  // A machine asleep at 19:00 used to skip that day's routine entirely: `target` was
+  // allowed to move forward with the clock, so the next tick (say 03:00) saw today's
+  // 19:00 still in the future and returned false for the whole day. Catch up instead.
+  let target = new Date(t); target.setHours(h, m, 0, 0);
+  if (t < target) target = new Date(+target - 24 * 60 * 60_000);
+  const onSchedule = (d: Date) => {
+    if (parts[0] === "weekdays") return d.getDay() !== 0 && d.getDay() !== 6;
+    if (parts[0] === "weekly") return ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][d.getDay()] === parts[1].toUpperCase().slice(0, 3);
+    return true;
+  };
+  for (let i = 0; i < 7 && !onSchedule(target); i++) target = new Date(+target - 24 * 60 * 60_000);
   if (!lastT) return +t - +target < 60 * 60_000; // first run ever: only fire near the scheduled time
   return lastT < target;
 }
@@ -56,7 +67,8 @@ export function due(every: string, last: string | undefined, t = new Date()): bo
  * A failing command counts as changed (the agent then looks). */
 export function signalChanged(r: { name: string; signal?: string }, state: Record<string, string>): boolean {
   const key = `${r.name}#signal`;
-  const res = Bun.spawnSync(["bash", "-lc", r.signal!], { cwd: existsSync(ROOT) ? ROOT : undefined, stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+  // Non-login: the service already carries the user's PATH, and sourcing their profile can cost seconds (conda, etc.).
+  const res = Bun.spawnSync([shellBash(), "-c", r.signal!], { cwd: existsSync(ROOT) ? ROOT : undefined, stdout: "pipe", stderr: "pipe", timeout: 60_000 });
   if (res.exitCode !== 0) return true;
   const hash = new Bun.CryptoHasher("sha1").update(res.stdout).digest("hex");
   if (state[key] === hash) return false;
@@ -81,10 +93,36 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
       journal(host, `📚 learn: ${d.turns} owner turns from ${d.sessions} sessions → ${id}`);
       continue;
     }
+    if (r.kind === "usage-report") { // computed by code, posted to the main chat; no task, no model cost
+      state[r.name] = new Date().toISOString();
+      try {
+        const rep = writeUsageReport();
+        appendEvent({ from: "hub", kind: "notice", text: rep.markdown });
+        journal(host, `📊 usage report → ${rep.file}`);
+      } catch (e) { journal(host, `📊 usage report failed: ${(e as Error).message}`); }
+      continue;
+    }
     // scheduler "each": every machine runs its own copy, pinned to it (e.g. the weekly security check of this computer)
     const pin = owner === "each" ? host : undefined;
     const queued = routineQueued(r.name, pin); // a copy queued or running → this run is redundant
-    if (queued) { state[r.name] = new Date().toISOString(); journal(host, `⏰ routine \`${r.name}\` skipped: ${queued} still queued/running`); continue; }
+    if (queued) {
+      state[r.name] = new Date().toISOString();
+      journal(host, `⏰ routine \`${r.name}\` skipped: ${queued} still queued/running`);
+      noteStuckRoutine(cfg, r.name, queued, state);
+      continue;
+    }
+    // opt-in: a copy already parked on an unanswered decision would only be repeated by every later run
+    const parked = r.skip_while_decision_open ? routineParkedOnDecision(r.name, pin) : "";
+    if (parked) {
+      state[r.name] = new Date().toISOString();
+      // once per parked copy, not once per skipped tick: a 10m routine would otherwise fill the journal with the same line
+      const key = `${r.name}#parked`;
+      if (state[key] !== parked) {
+        state[key] = parked;
+        journal(host, `⏰ routine \`${r.name}\` skipped: ${parked} waits on the owner's answer`);
+      }
+      continue;
+    }
     if (r.signal && !signalChanged(r, state)) { state[r.name] = new Date().toISOString(); continue; } // nothing new → no AI run
     if (r.agent === "architect") computeMetrics(r.name === "evolve-deep" ? 30 : 7);
     const prompt = r.readonly ? `${r.prompt}\n\nRead-only routine: observe and report only. Do not change code, PRs, issues or settings; propose any change as a follow-up.` : r.prompt;
@@ -136,9 +174,55 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const gh = await githubStarved(cfg);
     const b = budget(sample(cfg), running, meta.weight === "heavy");
     b.note += gh.note ? `\n${gh.note}` : "";
-    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note), meta.repo || P(), cfg, log, !!meta.gate_override,
+    const limits = runLimits(cfg);
+    const workCfg = limits.checkpointMinutes
+      ? { ...cfg, clis: { ...cfg.clis, timeout_minutes: limits.workMinutes } }
+      : cfg;
+    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note, limits), meta.repo || P(), workCfg, log, !!meta.gate_override,
       { ...b.env, ...accountEnv(acct) });
     if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; } // the owner cancelled it while it ran
+    if (out.includes(RUN_LIMIT)) {
+      const partial = parseResult(out.slice(0, out.indexOf(RUN_LIMIT)));
+      if (partial.status !== "failed") { res = partial; break; }
+      const limitHits = recordRunLimit(meta);
+      if (tooManyWakes(limitHits)) {
+        res = { status: "failed", summary: L(
+          `The task reached its work limit ${limitHits} times; stopped after the ${MAX_WAKES}-resume safety cap`,
+          `任务已 ${limitHits} 次达到工作时限；超过 ${MAX_WAKES} 次恢复的安全上限，已停止`,
+        ) };
+        break;
+      }
+      if (limits.checkpointMinutes) {
+        await locked(async () => {
+          journal(host, L(`💾 ${meta.id} work window ended; saving a checkpoint`, `💾 ${meta.id} 工作窗口结束，开始保存检查点`));
+          await _commitPush(`[${host}] checkpoint ${meta.id}`);
+        });
+        const checkpointLog = P("logs", "runs", `${meta.id}-${Date.now()}-${cli}-checkpoint.log`);
+        const hardAt = Date.parse(limits.hardAt);
+        const remainingMinutes = Math.max(0.1, (hardAt - Date.now()) / 60_000);
+        const resumeAt = hardAt + 5 * 60_000;
+        const resumeMinutes = Math.max(5, Math.ceil((resumeAt - Date.now()) / 60_000));
+        const checkpointCfg = { ...cfg, clis: { ...cfg.clis, timeout_minutes: remainingMinutes } };
+        const checkpointBody = checkpointRecoveryBody(promptBody, log, resumeAt, resumeMinutes);
+        const checkpointLimits = {
+          totalMinutes: remainingMinutes,
+          workMinutes: remainingMinutes,
+          checkpointMinutes: 0,
+          checkpointAt: limits.hardAt,
+          hardAt: limits.hardAt,
+        };
+        const checkpointOut = await runAgent(cli, buildPrompt(meta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
+          meta.repo || P(), checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
+        if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; }
+        const checkpoint = parseResult(checkpointOut);
+        if (checkpoint.status !== "failed" && (checkpoint.status !== "waiting" || checkpoint.wait_check)) {
+          res = checkpoint;
+          break;
+        }
+      }
+      res = checkpointFallback(meta.id, log);
+      break;
+    }
     if (out.includes(STALLED)) { // went quiet and was stopped: run it again from where it got to, up to twice
       const why = out.slice(out.indexOf(STALLED) + STALLED.length).trim();
       const stalls = Number(meta.stalls ?? 0) + 1;
@@ -149,12 +233,12 @@ async function processTask(path: string, cfg: Cfg, host: string) {
             requeue_note: `Your previous run was stopped: ${why}. Continue from where it got to: first check what is already done (branch agent/${meta.id}-*, commits, PRs, comments you posted) and don't redo it. If you are waiting on something slow, return "waiting" instead of sitting idle.` },
             body);
           if (existsSync(path)) unlinkSync(path);
-          journal(host, `🔁 ${meta.id} 没有动静被中止（${why}），接着跑（第 ${stalls} 次）`);
+          journal(host, L(`🔁 ${meta.id} stalled and was aborted (${why}), resuming (attempt ${stalls})`, `🔁 ${meta.id} 没有动静被中止（${why}），接着跑（第 ${stalls} 次）`));
           await _commitPush(`[${host}] ${meta.id} stalled, rerun`);
         });
         return;
       }
-      res = { status: "failed", summary: `连续 ${stalls} 次运行都卡住没有动静（${why}），已停止重试` };
+      res = { status: "failed", summary: L(`${stalls} runs in a row stalled (${why}), no more retries`, `连续 ${stalls} 次运行都卡住没有动静（${why}），已停止重试`) };
       break;
     }
     res = parseResult(out);
@@ -166,7 +250,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
       const was = `${acct.cli}/${acct.name}`;
       await locked(async () => {
         await _pull();
-        journal(host, `🔀 ${meta.id} ${was} ${failure === "quota" ? "额度用完" : "需要登录"}，立即改用 ${next.cli}/${next.name} 在本机重跑`);
+        journal(host, L(`🔀 ${meta.id} ${was} ${failure === "quota" ? "out of quota" : "needs login"}, rerunning here with ${next.cli}/${next.name}`, `🔀 ${meta.id} ${was} ${failure === "quota" ? "额度用完" : "需要登录"}，立即改用 ${next.cli}/${next.name} 在本机重跑`));
         await _commitPush(`[${host}] ${meta.id} switch to ${next.cli}`);
       });
       acct = next;
@@ -187,16 +271,17 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   remember(agent, res.lessons, meta.id);
   const depth = Number(meta.depth ?? 0) + 1;
   const maxDepth = cfg.fleet?.max_followup_depth ?? 4;
-  const ownerWork = meta.origin === "owner" || /^owner/.test(meta.source ?? "");
+  const ownerWork = meta.origin === "owner" || /^owner/.test(meta.source ?? "") || ownerPickedMenu(meta);
   const delegated = res.status === "delegated" && (res.followups?.length ?? 0) > 0;
   const children: string[] = [];
-  for (const f of (res.followups ?? []).slice(0, depth > maxDepth ? 0 : 8)) {
+  const chans = [...new Set([...(meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(res.channels)])].join(",") || undefined;
+  for (const f of followupsOf(res, depth > maxDepth ? 0 : 8)) {
     const id = newTask(f.title, f.body ?? "", { agent: f.agent ?? agent, priority: f.priority ?? meta.priority, repo: f.repo, requires: f.requires, host: f.host,
-      source: `followup:${meta.id}`, extra: { depth: String(depth), ...((f as any).difficulty === "hard" ? { difficulty: "hard" } : {}), ...(ownerWork ? { origin: "owner" } : {}), ...(delegated ? { parent: meta.id } : {}) } });
+      source: `followup:${meta.id}`, extra: { depth: String(depth), ...((f as any).difficulty === "hard" ? { difficulty: "hard" } : {}), ...(ownerWork ? { origin: "owner" } : {}), ...(delegated ? { parent: meta.id } : {}), ...(meta.origin_channel ? { origin_channel: meta.origin_channel } : {}), ...(chans ? { channels: resolveChannels(chans.split(",")).join(",") } : {}) } });
     children.push(id);
     journal(host, `  ↳ ${id} → ${f.agent ?? agent}: ${f.title}`);
   }
-  const done = { ...meta, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined };
+  const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined };
   const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
   const latest = existsSync(path) ? readDoc(path).body : body;
@@ -217,10 +302,10 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const w = waitMeta(res);
     const wakes = Number(meta.wakes ?? 0);
     // the owner's approval covers the whole task: a wait for CI before the approved merge must not revoke it
-    writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, gate_override: meta.gate_override, waiting_since: meta.waiting_since || now(), wake_at: w.wake_at, wait_kind: w.kind, wakes: wakes ? String(wakes) : undefined,
+    writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, gate_override: meta.gate_override, waiting_since: meta.waiting_since || now(), parked_at: now(), wake_at: w.wake_at, wait_kind: w.kind, wakes: wakes ? String(wakes) : undefined,
       waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_base: undefined },
       body + runNote + `\n**Waiting on:** ${res.waiting_on ?? "?"} (${w.kind === "human" ? "wakes on the owner's answer or an event" : `check again ${w.wake_at}`})\n`);
-    journal(host, w.kind === "human" ? `⏳ ${meta.id} 等你处理：${res.waiting_on ?? ""}（不定时唤醒，事件到达再继续）` : `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}，${w.minutes} 分钟后再看`);
+    journal(host, w.kind === "human" ? L(`⏳ ${meta.id} waiting on you: ${res.waiting_on ?? ""} (no timer, continues on the event)`, `⏳ ${meta.id} 等你处理：${res.waiting_on ?? ""}（不定时唤醒，事件到达再继续）`) : L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""}, checking again in ${w.minutes} minutes`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}，${w.minutes} 分钟后再看`));
   } else if (res.status === "needs_decision") {
     const did = openDecision(meta, res, host);
     writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...done, decision: did }, body + runNote);
@@ -243,18 +328,58 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   });
 }
 
+export function checkpointFallback(id: string, log: string, resumeAt = Date.now() + 5 * 60_000): Result {
+  return {
+    status: "waiting",
+    wait_kind: "ci",
+    wait_minutes: 5,
+    wait_check: `test "$(date +%s)" -ge ${Math.floor(resumeAt / 1000)}`,
+    waiting_on: `checkpoint saved after the work limit; resume ${id} from ${log}`,
+    summary: `The work window ended before a structured checkpoint was returned. The transcript is preserved at ${log}; resume by inspecting the existing branch and checkout instead of repeating completed work.`,
+  };
+}
+
+export function checkpointRecoveryBody(body: string, log: string, resumeAt: number, resumeMinutes: number): string {
+  return `${body}\n\n# Checkpoint-only recovery\nThe main work window ended. Do not continue broad implementation. Inspect ${log} and the current checkout, preserve all durable progress (including a commit on the existing agent branch when appropriate), and return a structured result. Prefer \`waiting\` with the real external condition's read-only \`wait_check\`. If there is no external condition, use \`wait_kind: "ci"\`, \`wait_minutes: ${resumeMinutes}\`, and \`wait_check: "test \"$(date +%s)\" -ge ${Math.floor(resumeAt / 1000)}"\` so the daemon resumes from the saved checkpoint instead of rerunning immediately.`;
+}
+
+export function recordRunLimit(meta: Record<string, string>): number {
+  const hits = Number(meta.run_limits ?? 0) + 1;
+  meta.run_limits = String(hits);
+  return hits;
+}
+
+/** The followups this run may spawn: the array the result spec asks for, minus entries with no usable title.
+ *  The model writes this JSON, so an entry can be a bare string, `null`, or a body with no title at all — spawning it
+ *  would write a task whose title is undefined (and used to abort the whole run inside writeDoc). */
+export const followupsOf = (res: ReturnType<typeof parseResult>, limit: number): NonNullable<Result["followups"]> => {
+  const raw = res.followups;
+  return (Array.isArray(raw) ? raw : [])
+    .map((f: any) => (typeof f === "string" ? { title: f } : f && typeof f === "object" ? f : null))
+    .filter((f: any): f is NonNullable<Result["followups"]>[number] => asText(f?.title).trim() !== "")
+    .slice(0, limit)
+    .map((f) => ({ ...f, title: asText(f.title).trim() }));
+};
+
 const FOLLOW_UP = "## Owner follow-up";
 
+/** Chat answers are dropped from the on-disk queue only after the loop: a restart mid-loop hands them to the next daemon
+ * (a card already answered is not answered twice), and one that throws is not replayed every tick. */
 async function handleReplies(cfg: Cfg, host: string) {
+  const queued = pendingInbound();
+  try { await answerReplies(cfg, host, queued); } finally { ackInbound(queued.length); }
+}
+
+async function answerReplies(cfg: Cfg, host: string, queued: ReturnType<typeof pendingInbound>) {
   const open = openDecisionIds();
   const judged = recentJudgeIds();
-  const replies = [...drainInbound(), ...await pollReplies(cfg, new Set([...open, ...judged, ...pendingLoginIds()]))];
+  const replies = [...queued, ...await pollReplies(cfg, new Set([...open, ...judged, ...pendingLoginIds()]))];
   for (const r of replies) {
     if (r.id.startsWith("P-")) {
       if (resolveProposals(r.id, r.answer, `owner(${r.source})`)) {
         journal(host, `${r.id} owner approved: ${r.answer}`);
-        await notify(`${r.id} 已按你的选择排队`, cfg);
-      }
+        await notify(L(`${r.id} queued as you chose`, `${r.id} 已按你的选择排队`), cfg);
+      } else if (open.has(r.id)) await notify(L(`${r.id} is still open: reply with item numbers (\`${r.id} 1,3\`), all or none`, `${r.id} 还没定：请回复编号（\`${r.id} 1,3\`）、all 或 none`), cfg);
       continue;
     }
     if (r.id.startsWith("L-")) {
@@ -265,23 +390,23 @@ async function handleReplies(cfg: Cfg, host: string) {
       const tid = amendDecision(r.id, r.answer, "owner(chat)");
       if (tid) {
         journal(host, `${r.id} owner correction: ${r.answer}`);
-        await notify(`已按你的纠正更新 ${r.id}（${tid}），之前的选择作废`, cfg);
+        await notify(L(`Updated ${r.id} (${tid}) with your correction, the earlier choice no longer applies`, `已按你的纠正更新 ${r.id}（${tid}），之前的选择作废`), cfg);
       } else await handleOwnerMessage(r.answer, undefined, true);
       continue;
     }
     if (open.has(r.id) && r.answer.trim() === IGNORE) {
       ignoreDecision(r.id, `owner(${r.source})`);
       journal(host, `🙈 ${r.id} owner ignored it`);
-      await notify(`已忽略 ${r.id}：任务继续，由 agent 自己判断，不再追问`, cfg);
+      await notify(L(`Ignored ${r.id}: the task continues, the agent decides and will not ask again`, `已忽略 ${r.id}：任务继续，由 agent 自己判断，不再追问`), cfg);
     } else if (open.has(r.id)) {
       closeDecision(r.id, r.answer, `owner(${r.source})`);
       journal(host, `✔ ${r.id} owner answered via ${r.source}: ${r.answer}`);
-      await notify(`收到 ${r.id}：${r.answer} — 任务已重新排队`, cfg);
+      await notify(L(`Got ${r.id}: ${r.answer} — task requeued`, `收到 ${r.id}：${r.answer} — 任务已重新排队`), cfg);
     } else if (r.id.startsWith("D-") && existsSync(P("decisions", "closed", `${r.id}.md`))) {
       // a reply to a card that is already answered: say so in the journal instead of dropping it silently
-      journal(host, `↩️ ${r.id} 已经答过，这次的重复回复被忽略`);
+      journal(host, L(`↩️ ${r.id} was already answered, this duplicate reply is ignored`, `↩️ ${r.id} 已经答过，这次的重复回复被忽略`));
     } else if (/^override\b/i.test(r.answer) && overrideJudge(r.id, r.answer.replace(/^override[\s:：]*/i, ""), r.source, host)) {
-      await notify(`已记录你对 ${r.id} 的纠正，judge 以后会参考；已创建重做任务`, cfg);
+      await notify(L(`Recorded your correction of ${r.id}, the judge will use it from now on; a redo task was created`, `已记录你对 ${r.id} 的纠正，judge 以后会参考；已创建重做任务`), cfg);
     }
   }
 }
@@ -318,7 +443,7 @@ function noteUnservable(cfg: Cfg, host: string) {
     if (Date.now() - since < graceMs || !hosts.some((h) => rest.every((r) => capOk(r, h.caps)))) continue;
     const prefer = [...new Set([...(meta.prefer ?? "").split(","), ...pins].map((x) => x.trim()).filter(Boolean))].join(",");
     writeDoc(p, { ...meta, requires: rest.join(",") || undefined, prefer, parked: undefined }, body);
-    journal(host, `🔀 ${meta.id} ${pins.join("+")} 离线超过 ${Math.round(graceMs / 60_000)} 分钟，改由其他在线机器执行`);
+    journal(host, L(`🔀 ${meta.id} ${pins.join("+")} offline for over ${Math.round(graceMs / 60_000)} minutes, moved to another online machine`, `🔀 ${meta.id} ${pins.join("+")} 离线超过 ${Math.round(graceMs / 60_000)} 分钟，改由其他在线机器执行`));
   }
   for (const p of list(P("tasks", "inbox"), /^T-.*\.md$/)) {
     const { meta, body } = readDoc(p);
@@ -372,7 +497,7 @@ async function drainAndExit(why: string, host: string) {
 
 const UPDATE_DONE = () => P("..", "update-handled");
 /** The owner's "update every machine": once per request, now (not at the hourly check), running work finishing
- *  first. The primary redeploys the Worker and the web app even when its code was already current. */
+ *  first. The cloud deployment host redeploys the Worker and the web app even when its code was already current. */
 async function ownerUpdate(c: Cfg, host: string) {
   let at = "";
   try { at = JSON.parse(readFileSync(UPDATE_REQUEST(), "utf8")).at ?? ""; } catch { return; }
@@ -387,25 +512,25 @@ async function ownerUpdate(c: Cfg, host: string) {
     setUpdateState({ at, state, detail, from });
     await locked(async () => { await _pull(); heartbeat(c, running, sample(c)); await _commitPush(`[${host}] update: ${state}`, { force: true }); }).catch(() => {});
   };
-  await report("updating", "拉取并测试新代码");
+  await report("updating", L("Pulling and testing the new code", "拉取并测试新代码"));
   const updated = await selfUpdate({ force: true, deploy: true }).catch(() => false);
   if (updated) {
     journal(host, `⬆️ updated on the owner's request (was ${before}); restarting${running ? ` after ${running} running task(s)` : ""}`);
-    await report(running ? "waiting" : "restarting", running ? `等 ${running} 个任务跑完后重启` : undefined);
+    await report(running ? "waiting" : "restarting", running ? L(`Restarting after ${running} running task(s) finish`, `等 ${running} 个任务跑完后重启`) : undefined);
     void drainAndExit("self-update", host);
     return;
   }
   const now7 = (Bun.spawnSync(["git", "-C", CODE, "rev-parse", "--short", "HEAD"], { stdout: "pipe" }).stdout.toString().trim()) || before;
   const stale = now7 !== before; // the code moved but this process could not take it (local edits, failing tests)
-  if (isPrimary(c, host) && c.cloud?.url) {
-    await report("deploying", "重新发布线上");
+  if (isCloudDeployHost(c, host) && c.cloud?.url) {
+    await report("deploying", L("Redeploying", "重新发布线上"));
     const cloud = await import("./cloud");
     const err = await cloud.cloudDeploy(c).then((u) => (u ? "" : cloud.lastDeployError || "unknown"), (e) => String(e));
     journal(host, `⬆️ already at ${now7}; ${err ? `redeploying the Worker failed: ${err.replace(/\s+/g, " ").slice(-300)}` : "redeployed the Worker and the web app"}`);
-    await report(err ? "failed" : "current", err ? `代码已是最新，重新发布线上失败：${err.replace(/\s+/g, " ").slice(0, 120)}` : "已重新发布线上");
+    await report(err ? "failed" : "current", err ? L(`Code is current, redeploy failed: ${err.replace(/\s+/g, " ").slice(0, 120)}`, `代码已是最新，重新发布线上失败：${err.replace(/\s+/g, " ").slice(0, 120)}`) : L("Redeployed", "已重新发布线上"));
   } else {
     journal(host, stale ? `⬆️ not updated (still running ${before}; local edits or failing tests)` : `⬆️ already at ${now7}`);
-    await report(stale ? "failed" : "current", stale ? "有本地改动或测试没通过，仍在运行旧代码" : undefined);
+    await report(stale ? "failed" : "current", stale ? L("Local changes or failing tests, still running the old code", "有本地改动或测试没通过，仍在运行旧代码") : undefined);
   }
 }
 
@@ -432,7 +557,7 @@ async function handleFailure(meta: Record<string, string>, body: string, summary
   const ownerCares = meta.origin === "owner" || /^owner/.test(meta.source ?? "") || meta.priority === "urgent";
   if (!ownerCares || cfg.notify?.on_failure === false) return; // routine/internal work: journal only; architect reviews failures
   const reason = summary.split("\n")[0].replace(/\s+/g, " ").slice(0, 140);
-  await notify(`没能完成「${meta.title}」：${reason}。我会在日报里跟进；需要换个做法可以直接告诉我。`, cfg,
+  await notify(L(`Could not finish "${meta.title}": ${reason}. Tell me if you want a different approach.`, `没能完成「${meta.title}」：${reason}。我会在日报里跟进；需要换个做法可以直接告诉我。`), cfg,
     { kind: "notice", ref: meta.id, from: `${agentName(meta.agent || "lead")}@${host}` });
 }
 const GH_HEAVY = new Set(["dispatcher", "reviewer", "ops-watcher", "oss-triage", "release-manager"]);
@@ -446,19 +571,26 @@ function wakeParents(host: string, ready = new Set<string>()) {
     }
     if (meta.wake_at || meta.wait_kind) { // parked on something slow: back to the queue once the time is up, or as soon as its check changes
       if (meta.wake_at && Date.parse(meta.wake_at) > Date.now() && !ready.has(meta.id)) continue;
-      const wakes = Number(meta.wakes ?? 0) + 1;
+      // A CI wait with a wait_check is watched by the daemon for free; waking an agent only to see "still pending" burns a
+      // slot and a wake. Until its check changes, the timer is just a fallback (CHECKED_FALLBACK_MIN after parking).
+      if (!ready.has(meta.id) && meta.wait_check && meta.wait_kind !== "human") {
+        const fallback = (Date.parse(meta.parked_at || meta.waiting_since || "") || 0) + CHECKED_FALLBACK_MIN * 60_000;
+        if (fallback > Date.now()) { writeDoc(p, { ...meta, wake_at: new Date(fallback).toISOString() }, body); continue; }
+      }
+      // Only wakes without progress count toward parking it as blocked; a changed wait_check is progress.
+      const wakes = Number(meta.wakes ?? 0) + (ready.has(meta.id) ? 0 : 1);
       if (tooManyWakes(wakes)) { // cycling without progress: stop waking it, tell the owner once what blocks it
-        writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...meta, wake_at: undefined, wakes: String(wakes), status: "blocked" },
+        writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...meta, wake_at: undefined, wakes: String(wakes), status: "blocked", stuck_notified: "yes" },
           `${body}\nBlocked after ${wakes} wake-ups, still waiting on: ${meta.waiting_on ?? "?"}\n`);
         unlinkSync(p);
-        journal(host, `🧱 ${meta.id} 唤醒 ${wakes} 次仍未就绪，转为 blocked：${meta.waiting_on ?? "?"}`);
-        void notify(`${meta.id} 卡住了：${meta.waiting_on ?? "?"}（已唤醒 ${wakes} 次，不再自动重试）`, loadConfig(), { kind: "notice", ref: meta.id });
+        journal(host, L(`🧱 ${meta.id} still not ready after ${wakes} wakes, now blocked: ${meta.waiting_on ?? "?"}`, `🧱 ${meta.id} 唤醒 ${wakes} 次仍未就绪，转为 blocked：${meta.waiting_on ?? "?"}`));
+        if (!meta.stuck_notified) void notify(L(`${meta.id} is stuck: ${meta.waiting_on ?? "?"} (woken ${wakes} times, no more automatic retries)`, `${meta.id} 卡住了：${meta.waiting_on ?? "?"}（已唤醒 ${wakes} 次，不再自动重试）`), loadConfig(), { kind: "notice", ref: meta.id });
         continue;
       }
-      writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, status: undefined, claimed_by: undefined, resumed: "yes", wakes: String(wakes) },
+      writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, wait_ready: undefined, status: undefined, claimed_by: undefined, resumed: "yes", wakes: String(wakes) },
         `${body}\nResumed after waiting on: ${meta.waiting_on ?? "?"}. Check it now; if still not ready, return "waiting" again.\n`);
       unlinkSync(p);
-      journal(host, `⏰ ${meta.id} 等待结束，重新排队检查`);
+      journal(host, L(`⏰ ${meta.id} wait over, requeued to check`, `⏰ ${meta.id} 等待结束，重新排队检查`));
       continue;
     }
     const kids = (meta.children ?? "").split(",").filter(Boolean);
@@ -481,20 +613,41 @@ const runningIds = new Set<string>();
 /** Waits with a wait_check: the daemon runs it itself (no agent) with backoff 5 → 10 → 20 → 40 minutes; once its exit
  * code differs from the first run, the wait is over. Human waits are checked too: that is how an event (PR merged) wakes them. */
 const waitChecks = new Map<string, { cmd: string; base?: number; next: number; n: number }>();
-export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Set<string>> {
+/** The host that parked a wait (it ran there), from the host_caps it recorded. */
+export const waitHost = (meta: Record<string, string | undefined>) => (meta.host_caps ?? "").split(",").find((c) => c.startsWith("host:"))?.slice(5);
+/** Which host runs a wait's check: the host that parked it always does (its local paths, Xcode, files only exist there);
+ * the primary runs every other check it can run itself. A non-primary host marks its finished waits wait_ready for the primary. */
+export function runsCheckHere(meta: Record<string, string | undefined>, host?: string, primary = true, primaryOs = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux"): boolean {
+  const owner = waitHost(meta);
+  if (host && owner === host) return true;
+  return primary && !checkUnrunnable(meta.wait_check, primaryOs);
+}
+/** Non-primary hosts hand a finished wait to the primary through the synced task file. */
+function markWaitsReady(ids: Set<string>) {
+  for (const id of ids) {
+    const p = P("tasks", "waiting", `${id}.md`);
+    if (!existsSync(p)) continue;
+    const { meta, body } = readDoc(p);
+    if (meta.wait_ready !== "yes") writeDoc(p, { ...meta, wait_ready: "yes" }, body);
+  }
+}
+export async function checkWaits(now = Date.now(), everyMs?: number, host?: string, primary = true): Promise<Set<string>> {
   const ready = new Set<string>();
   const due: [string, string, string][] = [];
   const waiting = new Set<string>();
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta } = readDoc(p);
+    if (meta.wait_ready === "yes") { ready.add(meta.id); continue; } // another host saw its check change
     if (!(meta.wake_at || meta.wait_kind) || !meta.wait_check) continue;
+    if (host !== undefined && !runsCheckHere(meta, host, primary)) continue;
     waiting.add(meta.id);
     const c = waitChecks.get(meta.id);
     if (c && c.cmd === meta.wait_check && c.next > now) continue;
     due.push([meta.id, meta.wait_check, p]);
   }
   await Promise.all(due.map(async ([id, cmd, path]) => {
-    const proc = Bun.spawn(["bash", "-lc", cmd], { stdout: "ignore", stderr: "ignore", cwd: homedir() });
+    // Non-login: the service already carries the user's PATH, and sourcing their profile can cost seconds (conda, etc.).
+    const proc = Bun.spawn([shellBash(), "-c", cmd], { stdout: "ignore", stderr: "ignore", cwd: homedir() });
     const timer = setTimeout(() => proc.kill(), 60_000);
     const code = await proc.exited;
     clearTimeout(timer);
@@ -511,7 +664,9 @@ export async function checkWaits(now = Date.now(), everyMs?: number): Promise<Se
       else if (doc) writeDoc(path, { ...doc.meta, wait_check_base: `${code} ${cmd}` }, doc.body);
     }
     waitChecks.set(id, { cmd, base: base ?? code, next: now + (everyMs ?? backoffMinutes(n) * 60_000), n });
-    if (base !== undefined && code !== base) { ready.add(id); waitChecks.delete(id); }
+    if (base !== undefined && code !== base) {
+      ready.add(id); waitChecks.delete(id);
+    }
   }));
   for (const id of waitChecks.keys()) if (!waiting.has(id)) waitChecks.delete(id);
   return ready;
@@ -526,7 +681,11 @@ const inQuietHours = (cfg: Cfg) => {
   return a < b ? cur >= a && cur < b : cur >= a || cur < b;
 };
 
-function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, string>) {
+/** Did this task end in a decision card (open or already answered)? Decision cards carry the id of the task that raised them. */
+const raisedDecision = (taskId: string) =>
+  ["open", "closed"].some((dir) => list(P("decisions", dir)).some((p) => readDoc(p).meta.task === taskId));
+
+export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, string>) {
   if (cfg.idle?.enabled === false || inQuietHours(cfg)) return;
   const busy = ["inbox", "active"].some((f) => list(P("tasks", f), /^T-.*\.md$/)
     .some((p) => !readDoc(p).meta.parked));
@@ -534,15 +693,22 @@ function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, string>)
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
-  // one menu at a time; re-offer after cooldown even if unanswered
-  const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta).find((m) => m.kind === "menu");
+  // Re-offer after the latest unanswered menu's cooldown, regardless of filename order.
+  const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta)
+    .filter((m) => m.kind === "menu")
+    .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
   const cooldown = (cfg.idle?.cooldown_minutes ?? 180) * 60_000;
   if (pendingMenu && Date.now() - Date.parse(pendingMenu.created) < cooldown) return;
-  if (state.last_menu && Date.now() - Date.parse(state.last_menu) < 15 * 60_000) return;
+  const sinceLast = state.last_menu ? Date.now() - Date.parse(state.last_menu) : Infinity;
+  if (sinceLast < 15 * 60_000) return;
+  // The cooldown above only covers a menu card that is still open. A run that found nothing worth asking raises no card,
+  // so without this the next run fires every 15 minutes, each one a full model run that again answers "nothing new".
+  if (sinceLast < cooldown && state.last_idle_task && !raisedDecision(state.last_idle_task)) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
 Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
+  state.last_idle_task = id;
   journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff drafting a next-steps menu`);
 }
 
@@ -570,7 +736,8 @@ function maybeSupervise(cfg: Cfg, host: string) {
 export async function tick(cfg: Cfg, background = false) {
   const host = hostName(cfg);
   const primary = isPrimary(cfg, host);
-  const ready = primary ? await checkWaits().catch(() => new Set<string>()) : new Set<string>();
+  // Every host runs the checks of waits it parked (local files, Xcode); the primary also runs the rest.
+  const ready = await checkWaits(Date.now(), undefined, host, primary).catch(() => new Set<string>());
   await locked(async () => {
     await _pull();
     try { writeRules(); } catch (e) { console.error(`rules.md: ${e}`); }
@@ -582,7 +749,10 @@ export async function tick(cfg: Cfg, background = false) {
       maybeSupervise(cfg, host);
       await proposeBatch(cfg, host);
       noteUnservable(cfg, host);
-    } else reapStale(cfg, host, true);
+    } else {
+      reapStale(cfg, host, true);
+      markWaitsReady(ready); // the primary wakes them on its next tick
+    }
     await _commitPush(`[${host}] tick`);
   });
   pruneMediaHourly(cfg);
@@ -610,12 +780,12 @@ export async function tick(cfg: Cfg, background = false) {
     if (running >= max) break;
     if (!pickAccount(cfg, ["claude", "codex"].filter((c) => Bun.which(c)))) break;
     if ((await githubStarved(cfg)).starved && list(P("tasks", "inbox"), /^T-.*\.md$/).every((p) => GH_HEAVY.has(readDoc(p).meta.agent))) break;
-    const t = pickTask(cfg, s.loadRatio, canRunHeavy(s, cfg, running));
+    const t = pickTask(cfg, pressureOf(s), canRunHeavy(s, cfg, running));
     if (!t) break;
     const active = await claim(t, host);
     if (!active) { if (tried.has(t)) break; tried.add(t); continue; } // e.g. offline: don't spin on the same task
     running++;
-    const tid = readDoc(active).meta.id;
+    const tid = basename(active, ".md");
     runningIds.add(tid);
     const job = processTask(active, cfg, host)
       .catch((e) => { console.error(e); journal(host, `💥 worker crashed on ${active}: ${e}`); })
@@ -642,13 +812,28 @@ const nap = (ms: number) => Promise.race([Bun.sleep(ms), new Promise<void>((r) =
 async function planNow(cfg: Cfg, host: string) {
   const todo = list(P("tasks", "inbox"), /^T-.*\.md$/).map((p) => ({ p, ...readDoc(p) })).filter((t) => !t.meta.planned).slice(0, 12);
   if (!todo.length) return;
-  const hosts = onlineHosts(cfg).map((h) => `- ${h.host}: ${h.caps.join(",")}`).join("\n");
-  const r = await ask(`You place tasks for an AI agent fleet running on several machines.
+  const online = onlineHosts(cfg);
+  const hosts = online.map((h) => `- ${h.host}: ${h.caps.join(",")}`).join("\n");
+  // CLIs some machine can actually run (this host counts even before its first heartbeat lands): a hint for any other
+  // CLI would leave the task unclaimable
+  const clis = fleetClis([hostCaps(cfg), ...online.map((h) => h.caps)]);
+  // the owner's per-member CLI policy (Settings → Members → clis.agents): the planner suggests, it may not override it
+  const fixed = new Map<string, string[]>();
+  for (const t of todo) {
+    const a = t.meta.agent || "lead", per = cfg.clis?.agents?.[a];
+    if (Array.isArray(per) && per.length) fixed.set(a, per);
+  }
+  const r = await quickAsk(`You place tasks for an AI agent fleet running on several machines.
 For each task decide:
+- channels: zero to three slugs from the channel goals below, or {"name":"...","goal":"..."} for a new work topic.
 - requires: host capabilities it truly needs, comma-separated, from the hosts' caps below (e.g. "os:macos" for iOS/macOS builds,
   simulators or screenshots; "os:windows"; "" when any host will do). Only require what the work cannot be done without.
 - cli: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews.
+  A suggestion only — never pick against an agent's fixed CLI below. Installed in this fleet: ${clis.join(", ") || "(unknown)"}; never suggest another.
 - difficulty: "hard" or "normal".
+${fixed.size ? `\nAgent CLI (the owner's setting — not yours to change):\n${[...fixed].map(([a, c]) => `- ${a}: fixed to ${c.join(" → ")} (leave cli out)`).join("\n")}\n` : ""}
+
+${channelPrompt()}
 
 Online hosts:
 ${hosts || "(unknown)"}
@@ -656,7 +841,7 @@ ${hosts || "(unknown)"}
 Tasks:
 ${todo.map((t) => `- ${t.meta.id} [agent ${t.meta.agent}${t.meta.requires ? `, already requires ${t.meta.requires}` : ""}]: ${t.meta.title} — ${t.body.slice(0, 500).replace(/\s+/g, " ")}`).join("\n")}
 
-Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude", "difficulty": "normal"}, ...}`,
+Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude" or omitted, "difficulty": "normal", "channels": []}, ...}`,
     cfg, P("logs", "runs", `plan-${Date.now()}.log`));
   if (!r || typeof r !== "object") return; // planner unavailable: tasks run unplanned after plan_wait_minutes
   await locked(async () => {
@@ -666,9 +851,15 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
       if (!v || !existsSync(t.p)) continue;
       const req = [...new Set([...(t.meta.requires ?? "").split(","), ...String(v.requires ?? "").split(",")].map((x) => x.trim()).filter(Boolean))].join(",");
       const pinned = t.meta.cli && t.meta.cli !== "auto";
-      writeDoc(t.p, { ...t.meta, requires: req, ...(pinned ? {} : { cli: v.cli === "codex" ? "codex" : "claude" }),
+      const per = fixed.get(t.meta.agent || "lead");
+      const hint = v.cli === "codex" || v.cli === "claude" ? v.cli : "";
+      const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
+      writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req,
+        ...cliHintPatch(t.meta, per, v.cli, clis),
         ...(v.difficulty === "hard" ? { difficulty: "hard" } : {}), planned: now() }, t.body);
-      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${pinned ? t.meta.cli : v.cli}`);
+      // what will actually run — plus the planner's raw answer when the owner's policy overruled it, so it stays traceable
+      const run = allowedClis(readDoc(t.p).meta, cfg);
+      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${run.join(" → ")}${hint && hint !== run[0] ? ` (planner said ${hint})` : ""}`);
     }
     await _commitPush(`[${host}] plan ${todo.length} tasks`);
   });
@@ -689,7 +880,7 @@ async function daemon(cfg: Cfg) {
     for (const dir of ["inbox", "active", "waiting", "blocked", "done", "failed"]) {
       const f = P("tasks", dir, `${tid}.md`);
       if (!existsSync(f)) continue;
-      const { meta, body } = readDoc(f);
+      const { meta } = readDoc(f);
       // waiting on the owner's card: what they write on the task is their answer to it
       if (dir === "blocked" && meta.decision && existsSync(P("decisions", "open", `${meta.decision}.md`))) {
         answerFromChat(String(meta.decision), text, false);
@@ -702,13 +893,7 @@ async function daemon(cfg: Cfg) {
         queueMicrotask(() => void planInbox(cfg, host).then(wakeDaemon).catch(() => {}));
         return String(meta.title ?? tid);
       }
-      const added = `${body}\n\n${FOLLOW_UP} ${now()}\n> ${text.replace(/\n/g, "\n> ")}\n`;
-      if (dir === "waiting") { // parked until its sub-tasks finish: the owner's new message is acted on now, not then
-        const kids = meta.children ? ` Its sub-tasks (${meta.children}) may still be open: check them, don't start them again.` : "";
-        writeDoc(P("tasks", "inbox", `${tid}.md`), { ...meta, claimed_by: undefined, status: undefined, wake_at: undefined, resumed: "yes" },
-          `${added}\nWoken from waiting by the owner's message above: act on it now.${kids}\n`);
-        unlinkSync(f);
-      } else writeDoc(f, meta, added);
+      addFollowUp(f, text, dir === "waiting"); // a waiting one is acted on now, not when its wait ends
       journal(host, `💬 ${tid} owner added${dir === "waiting" ? " (woken from waiting)" : ""}: ${text.slice(0, 80)}`);
       await _commitPush(`[${host}] chat follow-up ${tid}`);
       return String(meta.title ?? tid);
@@ -748,18 +933,18 @@ async function daemon(cfg: Cfg) {
     for (const d of list(P("decisions", "open"))) { // its open cards go too: nothing is left to answer
       const dd = readDoc(d);
       if (dd.meta.task !== tid) continue;
-      writeDoc(P("decisions", "closed", basename(d)), { ...dd.meta, answer: done ? "已完成" : "已取消", answered_by: "owner(app)", answered: now() },
+      writeDoc(P("decisions", "closed", basename(d)), { ...dd.meta, answer: done ? L("Done", "已完成") : L("Cancelled", "已取消"), answered_by: "owner(app)", answered: now() },
         `${dd.body}\n## Closed (owner)\nTask ${tid} was ${done ? "marked done" : "cancelled"} by the owner.\n`);
       unlinkSync(d);
     }
-    journal(host, done ? `✅ ${tid} 你已标记为完成` : `🛑 ${tid} 已按你的要求取消`);
+    journal(host, done ? L(`✅ ${tid} marked done by you`, `✅ ${tid} 你已标记为完成`) : L(`🛑 ${tid} cancelled as you asked`, `🛑 ${tid} 已按你的要求取消`));
     await _commitPush(`[${host}] ${done ? "finish" : "cancel"} ${tid}`);
     return done ? "done" : "cancelled";
   }));
   // A new task from the owner's chat (created by the chat brain, or by create_task over MCP). It carries the channel's
   // recent conversation and the task it continues, so terse follow-ups ("不行，…", "这个细节记下来") keep their meaning.
-  let chatNow: { text: string; chat: string[]; reply?: string; thread?: boolean } | null = null; // the owner message the brain is handling
-  const createOwnerTask = (op: { title: string; details?: string; repo?: string; agent?: string; follows?: string }) => locked(async () => {
+  let chatNow: { text: string; chat: string[]; reply?: string; thread?: boolean; channel?: string } | null = null; // the owner message the brain is handling
+  const createOwnerTask = (op: { title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[] }) => locked(async () => {
     await _pull();
     const m = chatNow;
     const prev = op.follows ?? (m?.reply && !["inbox", "active", "waiting"].some((d) => existsSync(P("tasks", d, `${m.reply}.md`))) ? m.reply : undefined);
@@ -767,11 +952,13 @@ async function daemon(cfg: Cfg) {
     const asked = m ? `The owner (CEO) said in chat:\n\n> ${m.text.replace(/\n/g, "\n> ")}\n` : "The owner asked for this through Noop's MCP connector.\n";
     const context = m && (m.chat.length || m.reply)
       ? (m.reply ? `\nThe owner wrote this as a reply to the team's message about ${m.reply}.\n` : "") +
-        `\n## The channel just before this message\nThe owner writes tersely: words like "this", "不行", "这个细节", "以后都这样" refer to what was just said here.\n\n${m.chat.map((l) => `- ${l}`).join("\n")}\n`
+        `\n## The channel just before this message\nThe owner writes tersely: words like ${L(`"this", "no", "that detail", "always do this"`, `"this", "不行", "这个细节", "以后都这样"`)} refer to what was just said here.\n\n${m.chat.map((l) => `- ${l}`).join("\n")}\n`
       : "";
-    const cont = prevFile && prev ? `\nThis continues ${prev} (${prevFile.split("/").slice(-2, -1)[0]}): read tasks/${prevFile.split("/").slice(-2).join("/")} for what was done and how. If the owner is correcting that result, fix it; if they say to remember something ("记录下来", "以后都这样"), write it as a durable rule/memory for the agent and kind of work it concerns, not just in this task.\n` : "";
+    const cont = prevFile && prev ? `\nThis continues ${prev} (${prevFile.split("/").slice(-2, -1)[0]}): read tasks/${prevFile.split("/").slice(-2).join("/")} for what was done and how. If the owner is correcting that result, fix it; if they say to remember something (${L(`"note this", "always do this"`, `"记录下来", "以后都这样"`)}), write it as a durable rule/memory for the agent and kind of work it concerns, not just in this task.\n` : "";
+    // said inside a channel: the task belongs to it and its results go back there
+    const assignedChannels = [...new Set([...(m?.channel ? [m.channel] : []), ...resolveChannels(op.channels)])].join(",");
     const id = newTask(op.title.slice(0, 80), `${asked}${op.details ? `\n## What the chat understood\n${op.details}\n` : ""}${op.repo ? `\nRepo: ${op.repo}\n` : ""}${context}${cont}\nHandle it like a capable chief of staff (see your profile: "Owner requests").`,
-      { agent: op.agent ?? "lead", source: m ? "owner@chat" : "owner@mcp", priority: "high", extra: { origin: "owner", ...(op.repo ? { repo: op.repo } : {}), ...(prevFile && prev ? { follows: prev } : {}) } });
+      { agent: op.agent ?? "lead", source: m ? "owner@chat" : "owner@mcp", priority: "high", extra: { origin: "owner", ...(m?.channel ? { origin_channel: m.channel } : {}), ...(assignedChannels ? { channels: assignedChannels } : {}), ...(op.repo ? { repo: op.repo } : {}), ...(prevFile && prev ? { follows: prev } : {}) } });
     journal(host, `💬 ${id} from owner ${m ? "chat" : "MCP"}${prevFile ? ` (follows ${prev})` : ""}: ${op.title.slice(0, 80)}`);
     await _commitPush(`[${host}] chat ${id}`);
     // plan it now and wake the loop, so an idle machine starts it within seconds instead of after the next tick or two
@@ -800,29 +987,36 @@ async function daemon(cfg: Cfg) {
   });
   setApplyOp((op) => runTool(store, op?.tool, op));
   const model = new ClaudeModel(String(cfg.router?.model ?? "claude-haiku-5-5"), String(cfg.router?.cli ?? "claude"), (cfg.router?.timeout_seconds ?? 45) * 1000);
-  if (isPrimary(cfg, host) && Bun.which(String(cfg.router?.cli ?? "claude"))) model.warm(SYSTEM);
-  if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered, sentAt, thread }) => {
+  if (isPrimary(cfg, host) && Bun.which(String(cfg.router?.cli ?? "claude"))) model.warm(systemPrompt());
+  if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered, sentAt, thread, channel }) => {
     const got = Date.now();
-    const m = { text, replyTo: reply, answered, chat: recentChat(text), sentAt };
-    chatNow = { text, chat: m.chat, reply, thread };
-    const post = (r: string, ref?: string) => appendEvent({ from: "hub", kind: "system", text: r.slice(0, 2000), ...(ref ? { ref } : {}), ...(thread ? { thread } : {}) });
+    const room = channel ? channels().find((c) => c.slug === channel) : undefined;
+    const m = { text, replyTo: reply, answered, chat: recentChat(text, { channel }), sentAt, ...(room ? { channel: { slug: room.slug, name: room.name, goal: room.goal } } : {}) };
+    chatNow = { text, chat: m.chat, reply, thread, channel: room?.slug };
+    const post = (r: string, ref?: string) => appendEvent({ from: "hub", kind: "system", text: r.slice(0, 2000), ...(ref ? { ref } : {}), ...(thread ? { thread } : {}), ...(room ? { channel: room.slug } : {}) });
     let out: BrainOut;
     try {
       out = await think(m, store, model, post);
-      if (!out.calls.length && !out.reply && out.rounds >= 4) throw new Error("no answer");
+      // out of rounds with no reply and nothing done (only lookups): the message would vanish, so it becomes work
+      if (!out.reply && out.rounds >= 4 && !out.calls.some((c) => isWrite(c.tool) && c.ok)) throw new Error("no answer");
     } catch (err) {
-      // no model (CLI missing, logged out, timeout): the message still becomes work, silently — never lost, never canned
+      // no model (CLI missing, logged out, quota, timeout): the message still becomes work, never lost, never guessed onto some
+      // other task. The owner is told where it went; the reason goes to the journal and brain.jsonl (stderr is not visible)
       console.error(`chat brain: ${err}`);
-      // a terse follow-up without a reply target continues the task the channel was just about
-      const target = reply ?? followUpTarget(text, feed(new Date(Date.now() - 15 * 60_000).toISOString(), 200));
-      const amended = target ? await store.act({ tool: "amend_task", id: target, text }) : null;
-      const r = amended?.ok ? amended : await store.act({ tool: "create_task", title: text.split("\n")[0].slice(0, 80) });
-      out = { reply: "", calls: [{ tool: "fallback", args: {}, ok: !!r.ok, result: r }], rounds: 0, ms: { model: [], total: Date.now() - got }, fallback: true };
+      const routed = await routeWithoutModel(store, { text, reply, why: err });
+      post(routed.note, routed.id);
+      await locked(async () => {
+        await _pull();
+        journal(host, L(`⚠️ chat assistant unavailable (${routed.why}); the owner's message went to ${routed.id ?? "no task"}`, `⚠️ 聊天助手不可用（${routed.why}）；owner 的消息已交给 ${routed.id ?? "无任务"}`));
+        await _commitPush(`[${host}] chat assistant unavailable`);
+      });
+      out = { reply: routed.note, calls: [{ tool: "fallback", args: {}, ok: routed.ok, error: routed.why, result: { id: routed.id, amended: routed.amended } }], rounds: 0, ms: { model: [], total: Date.now() - got }, fallback: true };
     } finally { chatNow = null; }
     logBrain(m, out, got);
   });
   await locked(async () => { // recover tasks this host was running when it died/restarted
     await _pull();
+    guardMemory(host, { full: true }); // a crash may have zero-filled a memory file: restore it before anything reads it
     for (const p of list(P("tasks", "active"), /^T-.*\.md$/)) {
       const { meta, body } = readDoc(p);
       if (meta.claimed_by !== host) continue;
@@ -848,6 +1042,7 @@ async function daemon(cfg: Cfg) {
       if (restartAllowed(force)) { unlinkSync(RESTART_FLAG()); void drainAndExit("restart", host); }
     }
     if (!draining) await ownerUpdate(c, host);
+    await locked(() => guardMemory(host)); // damage sync reported since the last tick; the daily memory snapshot
     try { await tick(c, true); failures = 0; } catch (e) {
       console.error("tick failed", e);
       if (++failures >= 3) void medic(`noop daemon: ${failures} consecutive tick failures on ${host}.\n${(e as Error)?.stack ?? e}`, c, { auto: true, kind: "daemon" });
@@ -866,7 +1061,8 @@ async function daemon(cfg: Cfg) {
 
 async function status(cfg: Cfg, brief = false) {
   if (brief) { // what a person wants to see right after installing
-    const url = cfg.cloud?.url;
+    const url = readHubToml().cloud?.url ?? cfg.cloud?.url;
+    if (!url) return void console.log(`  ✗ ${hostName(cfg)} is not connected to your Noop yet. Run: noop init <noop-url>`);
     const hosts = onlineHosts(cfg).map((h) => h.host);
     console.log(`  ✓ ${hostName(cfg)} is part of your team${hosts.length > 1 ? ` (${hosts.length} machines online)` : ""}`);
     if (url) console.log(`\n  Open ${url}\n  and sign in with the code sent to your email.`);
@@ -919,15 +1115,19 @@ const HELP = `Noop — your own AI team
   noop status                 queue / decision / accounts / resources overview
   noop learn [--full] [--dry]  learn the CEO from local Claude/Codex sessions (digest stays local; principles go to memory)
   noop metrics [days]         per-agent success, judge vs owner decisions (feeds self-evolution)
+  noop usage                  weekly usage report (also posted every Monday by the built-in routine)
   noop agents                 list fleet members
   noop notify "text"          test Slack/Discord
   noop security [--json]      check this Noop deployment (2FA, sessions, OAuth clients, allow-lists) and this machine's Noop setup
   noop 2fa setup              bind (or re-bind) the authenticator app every sign-in requires; noop 2fa confirm <code> · noop 2fa status
+  noop guest join <url> <code> · run · install · uninstall   low-trust guest worker for shared machines (no memory, no machine key)
+  noop guest invite <label> · list · assign <G-id> <T-id> · results [--ack] · revoke <G-id>   (primary side)
   noop revoke-sessions        security valve: sign out every phone, browser and MCP connector at once (machines keep working)
 `;
 
 async function main() {
   const [cmd, ...rest] = Bun.argv.slice(2);
+  if (cmd === "guest") return guestCmd(rest, loadConfig); // a guest machine has no hub config at all
   const cfg = loadConfig();
   setApprovalGate((src) => needsApproval(loadConfig(), src));
   setIdTag(idTagFor(cfg, hostName(cfg))); // every id minted on a non-primary host carries its tag (T-M0001)
@@ -955,7 +1155,7 @@ async function main() {
       return void console.log(force ? "noop restarts as soon as its running tasks finish"
         : "noop restarts once its running tasks finish (at most once per hour; --force to skip the limit)");
     }
-    case "update": return void console.log((await selfUpdate()) ? "updated" : "up to date");
+    case "update": return void console.log((await selfUpdate({ force: true })) ? "updated" : "up to date"); // asked by a person: retry even a release this host rejected
     case "daemon": return daemon(cfg);
     case "tick": return tick(cfg);
     case "add": {
@@ -993,6 +1193,7 @@ async function main() {
       await commitPush(`[${host}] learn ${id}`);
       return console.log(id);
     }
+    case "usage": return void console.log(writeUsageReport().markdown);
     case "metrics": return void console.log(JSON.stringify(computeMetrics(Number(rest[0] ?? 7)), null, 2));
     case "agents":
       for (const p of list(P("agents"), /.*/)) {
@@ -1003,9 +1204,9 @@ async function main() {
     case "login": { // show the pending sign-in code (used when email isn't configured)
       const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
       const r = url ? await fetch(`${url}/api/host/login-code`, { headers: { Authorization: `Bearer ${cfg.server?.token}` } }).catch(() => null) : null;
-      if (!r?.ok) return void console.log("没有待使用的验证码：先在 app 里输入邮箱，点「发送验证码」，再运行 noop login");
+      if (!r?.ok) return void console.log(L("No pending code: enter your email in the app, press Send code, then run noop login", "没有待使用的验证码：先在 app 里输入邮箱，点「发送验证码」，再运行 noop login"));
       const c = (await r.json()) as { email: string; code: string; expires: number };
-      return void console.log(`\n  ${c.email} 的验证码：${c.code}  （${Math.max(1, Math.round((c.expires - Date.now()) / 60000))} 分钟内有效）\n`);
+      return void console.log(L(`\n  Code for ${c.email}: ${c.code}  (valid for ${Math.max(1, Math.round((c.expires - Date.now()) / 60000))} minutes)\n`, `\n  ${c.email} 的验证码：${c.code}  （${Math.max(1, Math.round((c.expires - Date.now()) / 60000))} 分钟内有效）\n`));
     }
     case "security": {
       const { securityReport, formatReport } = await import("./security");
@@ -1016,51 +1217,51 @@ async function main() {
     }
     case "2fa": { // the mandatory second factor; bound from a machine only (the machine key is the root of trust)
       const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
-      if (!url) return void console.log("没有配置 [cloud] url");
+      if (!url) return void console.log(L("[cloud] url is not configured", "没有配置 [cloud] url"));
       const call = (path: string, body?: unknown) => fetch(`${url}${path}`, { method: body === undefined ? "GET" : "POST",
         headers: { Authorization: `Bearer ${cfg.server?.token}`, "x-noop-host": host, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (rest[0] === "status" || !rest[0]) {
         const r = await call("/api/host/2fa");
-        if (!r.ok) { process.exitCode = 1; return void console.log(`查询失败：HTTP ${r.status} ${await r.text()}`); }
+        if (!r.ok) { process.exitCode = 1; const body = await r.text(); return void console.log(L(`Query failed: HTTP ${r.status} ${body}`, `查询失败：HTTP ${r.status} ${body}`)); }
         const d = (await r.json()) as { bound: boolean; since: number | null };
-        return void console.log(d.bound ? `✓ 两步验证已绑定（${new Date(d.since ?? 0).toLocaleString()}）` : "✗ 还没有绑定两步验证：任何人都无法登录。运行 noop 2fa setup");
+        return void console.log(d.bound ? L(`✓ 2FA is bound (${new Date(d.since ?? 0).toLocaleString()})`, `✓ 两步验证已绑定（${new Date(d.since ?? 0).toLocaleString()}）`) : L("✗ 2FA is not bound: nobody can log in. Run noop 2fa setup", "✗ 还没有绑定两步验证：任何人都无法登录。运行 noop 2fa setup"));
       }
       if (rest[0] === "confirm") { // the second half of setup when it can't prompt (no terminal)
         const c = await call("/api/host/2fa/confirm", { totp: String(rest[1] ?? "").trim() });
         const d = (await c.json().catch(() => ({}))) as { error?: string; replaced?: boolean };
         if (!c.ok) { process.exitCode = 1; return void console.log(`✗ ${d.error ?? `HTTP ${c.status}`}`); }
-        return void console.log(d.replaced ? "✓ 已换绑，旧的验证器已失效。" : "✓ 两步验证已开启：以后登录需要邮箱验证码 + 验证器上的数字。");
+        return void console.log(d.replaced ? L("✓ Re-bound, the old authenticator no longer works.", "✓ 已换绑，旧的验证器已失效。") : L("✓ 2FA is on: logging in now needs the email code and the authenticator number.", "✓ 两步验证已开启：以后登录需要邮箱验证码 + 验证器上的数字。"));
       }
-      if (rest[0] !== "setup") return void console.log("usage: noop 2fa setup | noop 2fa confirm <6 位数字> | noop 2fa status");
+      if (rest[0] !== "setup") return void console.log(L("usage: noop 2fa setup | noop 2fa confirm <6 digits> | noop 2fa status", "usage: noop 2fa setup | noop 2fa confirm <6 位数字> | noop 2fa status"));
       const st = (await (await call("/api/host/2fa")).json().catch(() => ({}))) as { bound?: boolean };
-      if (st.bound) console.log("⚠ 已经绑定过：确认后旧的验证器立即失效。");
+      if (st.bound) console.log(L("⚠ Already bound: confirming makes the old authenticator stop working at once.", "⚠ 已经绑定过：确认后旧的验证器立即失效。"));
       const r = await call("/api/host/2fa/setup", {});
-      if (!r.ok) { process.exitCode = 1; return void console.log(`失败：HTTP ${r.status} ${await r.text()}`); }
+      if (!r.ok) { process.exitCode = 1; const body = await r.text(); return void console.log(L(`Failed: HTTP ${r.status} ${body}`, `失败：HTTP ${r.status} ${body}`)); }
       const { secret, uri } = (await r.json()) as { secret: string; uri: string };
-      console.log("\n用验证器 App（Google Authenticator / 1Password / Authy …）扫描二维码：\n");
+      console.log(L("\nScan the QR code with an authenticator app (Google Authenticator / 1Password / Authy …):\n", "\n用验证器 App（Google Authenticator / 1Password / Authy …）扫描二维码：\n"));
       const qr = Bun.which("qrencode") ? await $`qrencode -t ansiutf8 -m 2 ${uri}`.quiet().nothrow() : null;
       if (qr?.exitCode === 0) console.log(qr.stdout.toString());
-      else console.log("（装了 qrencode 就能在这里显示二维码）");
-      console.log(`扫不了就手动输入密钥：${secret.match(/.{1,4}/g)!.join(" ")}\n`);
-      if (!process.stdin.isTTY) return void console.log("扫码后 10 分钟内运行：noop 2fa confirm <验证器上的 6 位数字>");
+      else console.log(L("(install qrencode to show the QR code here)", "（装了 qrencode 就能在这里显示二维码）"));
+      console.log(L(`Or enter the key by hand: ${secret.match(/.{1,4}/g)!.join(" ")}\n`, `扫不了就手动输入密钥：${secret.match(/.{1,4}/g)!.join(" ")}\n`));
+      if (!process.stdin.isTTY) return void console.log(L("Within 10 minutes of scanning, run: noop 2fa confirm <6 digits from the authenticator>", "扫码后 10 分钟内运行：noop 2fa confirm <验证器上的 6 位数字>"));
       for (let i = 0; i < 3; i++) {
-        const code = (prompt("输入验证器 App 上的 6 位数字确认：") ?? "").trim();
+        const code = (prompt(L("Enter the 6 digits from the authenticator app to confirm:", "输入验证器 App 上的 6 位数字确认：")) ?? "").trim();
         if (!code) break;
         const c = await call("/api/host/2fa/confirm", { totp: code });
         const d = (await c.json().catch(() => ({}))) as { ok?: boolean; error?: string; replaced?: boolean };
-        if (c.ok) return void console.log(d.replaced ? "✓ 已换绑，旧的验证器已失效。" : "✓ 两步验证已开启：以后登录需要邮箱验证码 + 验证器上的数字。");
+        if (c.ok) return void console.log(d.replaced ? L("✓ Re-bound, the old authenticator no longer works.", "✓ 已换绑，旧的验证器已失效。") : L("✓ 2FA is on: logging in now needs the email code and the authenticator number.", "✓ 两步验证已开启：以后登录需要邮箱验证码 + 验证器上的数字。"));
         console.log(`✗ ${d.error ?? `HTTP ${c.status}`}`);
       }
       process.exitCode = 1;
-      return void console.log("没有确认，绑定未生效。");
+      return void console.log(L("Not confirmed, the binding did not take effect.", "没有确认，绑定未生效。"));
     }
     case "revoke-sessions": { // a sign-in alert you didn't expect: everyone but the machines is out
       const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
-      if (!url) return void console.log("没有配置 [cloud] url");
+      if (!url) return void console.log(L("[cloud] url is not configured", "没有配置 [cloud] url"));
       const r = await fetch(`${url}/api/host/revoke-sessions`, { method: "POST", headers: { Authorization: `Bearer ${cfg.server?.token}`, "x-noop-host": host } }).catch((e) => e as Error);
-      if (r instanceof Error || !r.ok) { process.exitCode = 1; return void console.log(`撤销失败：${r instanceof Error ? r.message : `HTTP ${r.status} ${await r.text()}`}`); }
+      if (r instanceof Error || !r.ok) { process.exitCode = 1; const why = r instanceof Error ? r.message : `HTTP ${r.status} ${await r.text()}`; return void console.log(L(`Revoke failed: ${why}`, `撤销失败：${why}`)); }
       const { revoked } = (await r.json()) as { revoked: number };
-      return void console.log(`✓ 已撤销 ${revoked} 个登录（手机、浏览器、MCP 连接器）。需要重新用邮箱验证码登录。\n  如果怀疑邮箱被盗，先改邮箱密码，再考虑轮换机器密钥。`);
+      return void console.log(L(`✓ Revoked ${revoked} login(s) (phones, browsers, MCP connectors). Log in again with an email code.\n  If you suspect the mailbox is compromised, change its password first, then consider rotating the machine key.`, `✓ 已撤销 ${revoked} 个登录（手机、浏览器、MCP 连接器）。需要重新用邮箱验证码登录。\n  如果怀疑邮箱被盗，先改邮箱密码，再考虑轮换机器密钥。`));
     }
     case "cloud": {
       if (rest[0] !== "deploy") return void console.log("usage: hub cloud deploy");

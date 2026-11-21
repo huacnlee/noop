@@ -1,12 +1,12 @@
-// When the app looks for a newer version of itself. It downloads quietly and only surfaces once there is something
-// to press, so nothing here interrupts; the restart stays the owner's. No UI, no I/O of its own: nsh/updater is passed in.
+// OTA downloads quietly; optional shell downloads start only on request. Nothing interrupts the user.
+// No UI or I/O of its own: nsh/updater is passed in.
 //
 // A release ships two ways. A signed package (.nshpkg) carries only the app's TSX and reaches every installed app,
 // iOS and Android included, with no store build: it is downloaded and verified in the background and runs from the
 // next launch on, so on a phone the update is silent. Only a release that needs a newer NSH runtime than the
-// installed app has comes as a whole app (an archive the desktop replaces itself with, a link elsewhere).
+// installed app has needs a whole app. When the package already covers the code, the shell is an optional update.
 
-export type FoundUpdate = { version: string; url: string; canInstall: boolean };
+export type FoundUpdate = { version: string; url: string; canInstall: boolean; shell?: boolean };
 export type FoundPackage = { version: string; build: number };
 
 export type PackageApi = {
@@ -16,19 +16,19 @@ export type PackageApi = {
   download: () => Promise<void>;
   /** Restarts into it now; null where the platform cannot restart an app (iOS, Android). */
   restart: (() => Promise<void>) | null;
-  /** The package this run's code came from, or null when it is the app's own. */
-  running?: () => FoundPackage | null;
 };
 
 export type UpdaterApi = {
   check: () => Promise<FoundUpdate | null>;
-  download: () => Promise<void>;
+  download: (progress?: (value: number | null) => void) => Promise<void>;
   install: () => Promise<void>;
+  open?: (url: string) => Promise<void>;
   packages?: PackageApi;
 };
 
 export type UpdateState =
   | { kind: "none" }
+  | { kind: "shell"; version: string; url: string; canInstall: boolean; phase: "available" | "downloading" | "installing" | "failed"; progress?: number | null; message?: string }
   /** Downloaded and verified: a restart applies it (a package's restart when `package`). */
   | { kind: "ready"; version: string; package?: true }
   /** A package downloaded where the app cannot restart itself: it runs from the next launch, nothing to press. */
@@ -43,6 +43,7 @@ export const CHECK_EVERY_MS = 60 * 60 * 1000;
 export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) => void) {
   let state: UpdateState = { kind: "none" };
   let busy = false;
+  let heldPackage: (FoundPackage & { state: UpdateState }) | null = null;
   const set = (next: UpdateState) => {
     state = next;
     onChange(next);
@@ -52,13 +53,19 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
   async function check() {
     // A download waiting for its restart keeps being checked: a newer release replaces it, so the restart lands on
     // the latest instead of one version short (nsh/updater keeps the held download when the same version comes back).
-    if (busy || state.kind === "installing" || state.kind === "failed") return;
+    if (busy || state.kind === "installing" || state.kind === "failed" || (state.kind === "shell" && state.phase !== "available")) return;
     busy = true;
     let downloading = false;
+    let packageState: UpdateState | null = null;
     try {
-      if (await checkPackage()) return;
+      packageState = await checkPackage();
       const found = await api.check();
-      if (!found || runsAtLeast(found.version)) { if (state.kind !== "none") set({ kind: "none" }); return; }
+      if (!found) { if (packageState || state.kind !== "none") set(packageState ?? { kind: "none" }); return; }
+      // A staged OTA or a running package keeps the full shell update an explicit, optional action.
+      if (packageState || found.shell) {
+        set({ kind: "shell", version: found.version, url: found.url, canInstall: found.canInstall, phase: "available" });
+        return;
+      }
       if (!found.canInstall) return set({ kind: "link", version: found.version, url: found.url });
       if (state.kind === "ready" && state.version === found.version) return;
       downloading = true;
@@ -66,6 +73,7 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
       set({ kind: "ready", version: found.version });
     } catch (e) {
       console.warn("update check failed:", String(e));
+      if (packageState) set(packageState);
       // A newer download that failed has already replaced the held one, so there is nothing left to restart into.
       if (downloading && state.kind === "ready") set({ kind: "none" });
     } finally {
@@ -73,33 +81,51 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
     }
   }
 
-  /** True when a package is the update (downloaded now, or already held). A failure falls through to the app check. */
-  async function checkPackage(): Promise<boolean> {
+  /** Packages are checked first and cached by build as well as version. Shell checks do not trigger another OTA download. */
+  async function checkPackage(): Promise<UpdateState | null> {
     const p = api.packages;
-    if (!p) return false;
+    if (!p) return null;
     try {
       const found = await p.check();
-      if (!found) return false;
-      const held = state.kind === "staged" || (state.kind === "ready" && state.package) ? state.version : null;
-      if (held === found.version) return true;
+      if (!found) return heldPackage?.state ?? null;
+      if (heldPackage?.version === found.version && heldPackage.build === found.build) return heldPackage.state;
+      heldPackage = null;
+      if (state.kind === "staged" || (state.kind === "ready" && state.package)) set({ kind: "none" });
       await p.download();
-      set(p.restart ? { kind: "ready", version: found.version, package: true } : { kind: "staged", version: found.version });
-      return true;
+      const next: UpdateState = p.restart ? { kind: "ready", version: found.version, package: true } : { kind: "staged", version: found.version };
+      heldPackage = { ...found, state: next };
+      return next;
     } catch (e) {
       console.warn("package update failed:", String(e));
-      return false;
+      return null;
     }
   }
 
-  /** The whole app's version is the one it was built for, so a run on a package of that release or later is current. */
-  function runsAtLeast(version: string): boolean {
-    const running = api.packages?.running?.();
-    return !!running && compareVersions(running.version, version) >= 0;
+  async function installShell() {
+    if (busy || state.kind !== "shell" || !["available", "failed"].includes(state.phase)) return;
+    const found = state;
+    busy = true;
+    try {
+      if (!found.canInstall) {
+        if (!api.open) throw new Error("Cannot open the update link");
+        await api.open(found.url);
+        set({ ...found, phase: "available", message: undefined });
+        return;
+      }
+      set({ ...found, phase: "downloading", progress: null, message: undefined });
+      await api.download((progress) => set({ ...found, phase: "downloading", progress, message: undefined }));
+      set({ ...found, phase: "installing", message: undefined });
+      await api.install();
+    } catch (e) {
+      set({ ...found, phase: "failed", message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      busy = false;
+    }
   }
 
   /** Exits this run when it works; a failure leaves the app as it was, and the same download can be tried again. */
   async function install() {
-    if (state.kind !== "ready" && state.kind !== "failed") return;
+    if (busy || (state.kind !== "ready" && state.kind !== "failed")) return;
     const { version } = state;
     const restart = state.package ? api.packages?.restart : null;
     set({ kind: "installing", version });
@@ -110,17 +136,7 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
     }
   }
 
-  return { check, install };
-}
-
-/** Compares dotted release numbers (`0.2.10` > `0.2.9`); a missing part counts as 0. */
-export function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map((n) => parseInt(n, 10) || 0), pb = b.split(".").map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (d) return d;
-  }
-  return 0;
+  return { check, install, installShell };
 }
 
 /** `nsh/updater`'s `shellInfo()`: the installed app (its shell) and the NSH runtime built into it. */

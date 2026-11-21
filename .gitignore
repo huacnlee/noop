@@ -6,3 +6,4 @@ logs/
 node_modules/
 .wrangler/
 .claude/
+.dev.vars

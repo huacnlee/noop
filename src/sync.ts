@@ -13,6 +13,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { dirname, join } from "node:path";
 import { hostname } from "node:os";
 import { LAZY_PUSH_MS, PULL_MIN_MS, latestOnly } from "../cloud/src/budget";
+import { isDamaged, nulCount, writeFileDurable } from "./integrity";
 
 export const MAX_FILE = 1_500_000;
 
@@ -26,6 +27,9 @@ export const hubTomlPath = () => process.env.HUB_CONF || join(HOME(), "noop.toml
 const STATE = () => join(HOME(), "sync.json");
 const BASE = () => join(HOME(), "sync-base");
 const LOCK = () => join(HOME(), "sync.lock");
+/** Machine-local folders next to the mirror (integrity.ts recovers from the first, snapshots into the second). */
+export const syncBaseDir = () => BASE();
+export const snapshotDir = () => join(HOME(), "memory-snapshots");
 
 // ------------------------------------------------------------------ machine-local bootstrap config (noop.toml)
 export function readHubToml(): Record<string, any> {
@@ -133,7 +137,7 @@ function loadState(): State {
 function saveState(s: State) {
   mkdirSync(HOME(), { recursive: true });
   const tmp = `${STATE()}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(s));
+  writeFileDurable(tmp, JSON.stringify(s)); // a zero-filled sync.json would make every file look new on the next start
   renameSync(tmp, STATE());
 }
 
@@ -166,9 +170,26 @@ function readLocal(rel: string): Uint8Array | null {
 function writeAtomic(abs: string, data: Uint8Array) {
   mkdirSync(dirname(abs), { recursive: true });
   const tmp = join(dirname(abs), `.sync-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
-  writeFileSync(tmp, data);
+  writeFileDurable(tmp, data); // flush before the rename: otherwise a power loss can leave the new name on zero-filled data
   renameSync(tmp, abs);
 }
+
+// ------------------------------------------------------------------ damaged files (zero-filled by a crash mid-write)
+// A damaged local file is never pushed and never copied into sync-base (that copy is what recovery restores from), and a
+// damaged remote version never replaces a good local file. Each new case is reported once through takeDamageAlerts().
+export type DamageAlert = { path: string; bytes: number; nul: number; side: "local" | "remote" };
+const damageSeen = new Map<string, string>(), damageNew: DamageAlert[] = [];
+const seenKey = (rel: string) => `${HOME()}|${rel}`; // per mirror (tests switch between hosts)
+function noteDamaged(rel: string, data: Uint8Array, side: DamageAlert["side"]) {
+  const sig = `${side}:${data.length}:${hash(data)}`;
+  if (damageSeen.get(seenKey(rel)) === sig) return;
+  damageSeen.set(seenKey(rel), sig);
+  const a = { path: rel, bytes: data.length, nul: nulCount(data), side };
+  damageNew.push(a);
+  console.error(`sync: ${rel} (${side}) is damaged: ${a.nul} of ${a.bytes} bytes are NUL; not syncing it`);
+}
+/** Damage found since the last call (each distinct case once). */
+export function takeDamageAlerts(): DamageAlert[] { return damageNew.splice(0); }
 function setBase(rel: string, data: Uint8Array | null) {
   const f = join(BASE(), rel);
   if (data) writeAtomic(f, data); else rmSync(f, { force: true });
@@ -194,6 +215,8 @@ export function scan(st: State): Change[] {
     if (data.length > MAX_FILE) { console.error(`sync: skipping ${rel} (${data.length} bytes > ${MAX_FILE}); keep large files outside the data folder`); continue; }
     const h = hash(data);
     if (e && e.h === h) { e.m = m; e.s = s; continue; }
+    if (isDamaged(rel, data)) { noteDamaged(rel, data, "local"); continue; } // zero-filled by a crash: keep the good copy upstream and in sync-base
+    damageSeen.delete(seenKey(rel));
     changes.push({ path: rel, base_version: e?.v ?? 0, content: b64(data), _bytes: data, _hash: h });
   }
   for (const [rel, e] of Object.entries(st.files)) if (!seen.has(rel) && !ignored(rel)) changes.push({ path: rel, base_version: e.v, deleted: true });
@@ -275,6 +298,13 @@ function applyRemote(st: State, f: Remote): "ok" | "merged" | "lost" {
   const local = readLocal(f.path);
   const lh = local ? hash(local) : null;
   const remote = f.deleted || f.content == null ? null : unb64(f.content);
+  // A zero-filled version in the Worker (pushed by a machine without this guard) never goes into sync-base. A good local file
+  // stays, recorded as an edit of the remote version, so the next commit pushes it over the damaged one.
+  const badRemote = !!remote && isDamaged(f.path, remote);
+  if (badRemote) {
+    noteDamaged(f.path, remote!, "remote");
+    if (local && !isDamaged(f.path, local)) { st.files[f.path] = { v: f.version, h: f.hash ?? hash(remote!), m: -1, s: -1 }; return "ok"; }
+  }
   const modified = lh !== (e?.h ?? null);
   let outcome: "ok" | "merged" | "lost" = "ok";
   let write: Uint8Array | null = remote;
@@ -284,8 +314,8 @@ function applyRemote(st: State, f: Remote): "ok" | "merged" | "lost" {
     if (outcome === "lost") console.error(`sync: ${f.path} changed remotely and locally — keeping the remote version`);
   }
   if (write) { if (!local || hash(write) !== lh) writeAtomic(abs, write); } else rmSync(abs, { force: true });
-  setBase(f.path, remote);
-  if (remote) st.files[f.path] = { v: f.version, h: f.hash ?? hash(remote), ...(outcome === "merged" ? { m: -1, s: -1 } : stamp(f.path)) };
+  if (!badRemote) setBase(f.path, remote); // else keep the last good copy: integrity.recoverMemory restores from it
+  if (remote) st.files[f.path] = { v: f.version, h: f.hash ?? hash(remote), ...(outcome === "merged" || badRemote ? { m: -1, s: -1 } : stamp(f.path)) }; // badRemote: local is damaged too and gets restored in place, maybe within the same mtime tick and size
   else delete st.files[f.path];
   return outcome;
 }
@@ -295,6 +325,7 @@ async function _pull(st: State, t: Transport): Promise<{ ok: boolean; lost: Set<
   for (let page = 0; page < 10_000; page++) {
     const r = await t(`/api/files/changes?since=${st.rev}`);
     if (!r || r.status !== 200) { if (r) console.error(`sync: pull failed ${r.status} ${JSON.stringify(r.json).slice(0, 200)}`); return { ok: false, lost, seen }; }
+    if (!Array.isArray(r.json?.files) || typeof r.json.rev !== "number") { console.error(`sync: pull got a malformed reply ${JSON.stringify(r.json).slice(0, 200)}`); return { ok: false, lost, seen }; }
     for (const f of r.json.files as Remote[]) { seen.add(f.path); if (applyRemote(st, f) === "lost") lost.add(f.path); }
     st.rev = r.json.rev;
     saveState(st);
@@ -358,6 +389,8 @@ function recordCommitted(st: State, changes: Change[], files: { path: string; ve
     if (c?._bytes) setBase(f.path, c._bytes);
     // edited again while the request was in flight → force a rehash next scan
     if (c?._hash && f.hash !== c._hash) st.files[f.path].m = -1;
+    // a same-size rewrite inside the filesystem's timestamp tick would keep this stamp and never be pushed
+    else if (Date.now() - st.files[f.path].m < 2000) st.files[f.path].m = -1;
   }
 }
 
@@ -405,7 +438,9 @@ export async function resetToUpstream(): Promise<boolean> {
   if (!t) return true;
   return withLock(async () => {
     const st = loadState();
-    revertLocal(scan(st).map((c) => c.path));
+    // scan() leaves out zero-filled files (they are not edits to push), but a reset must discard them too
+    const damaged = walk().filter((rel) => { const d = readLocal(rel); return !!d && isDamaged(rel, d); });
+    revertLocal([...scan(st).map((c) => c.path), ...damaged]);
     for (const e of Object.values(st.files)) e.m = -1;
     return (await _pull(st, t)).ok;
   });

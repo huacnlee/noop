@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { P, list, readDoc, writeDoc } from "../src/core";
 import { sweepPlatform, alreadyAsked, cardFor, checkUnrunnable, classify, groupByCause, supervise, type Ctx, type Task } from "../src/supervisor";
 import { closeDecision, ignoreDecision } from "../src/decisions";
@@ -13,6 +13,13 @@ const ctx = (o: Partial<Ctx> = {}): Ctx => ({ now: NOW, online: [mac, lin, old],
   maxAgeHours: 3, maxWakes: 3, decision: () => undefined, ...o });
 const task = (m: Record<string, string>, folder: "waiting" | "blocked" = "waiting"): Task =>
   ({ folder, meta: { title: m.id, created: new Date(NOW - H).toISOString(), waiting_on: "x", wait_check: "true", ...m } });
+
+// Every test file shares one throwaway hub (see test/preload.ts), and reroute/resume move tasks into
+// tasks/inbox with their host requirement stripped. A leftover there is a pickable task, so a later
+// file's pickTask() test would pick it up instead of its own fixture. Remove what this file created.
+afterAll(() => {
+  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202"]) rmSync(P("tasks", "inbox", `${id}.md`), { force: true });
+});
 
 test("young, normally cycling waits are left alone", () => {
   expect(classify(task({ id: "T-1", requires: "os:linux", wakes: "1" }), ctx())).toBeNull();
@@ -29,6 +36,22 @@ test("flags age, wake count and macOS checks that can never run on the Linux pri
   expect(m.cause).toBe("platform:os:macos");
 });
 
+test("a Windows path under Users is a local path on a Windows primary, not a macOS path", () => {
+  const win = { host: "winbox", caps: ["os:windows", "host:winbox"], seen: "", busy: 0, version: "1" };
+  // Git Bash, MSYS, WSL and drive-letter spellings all contain the text "/Users/" but are ordinary local paths.
+  expect(checkUnrunnable("bash -c 'grep -q DONE /c/Users/testuser/work/chain.log'", "windows")).toBe(false);
+  expect(checkUnrunnable("grep -q DONE C:/Users/testuser/work/chain.log", "windows")).toBe(false);
+  expect(checkUnrunnable("test -f /mnt/c/Users/testuser/a", "linux")).toBe(false);
+  // A real macOS home path is still unrunnable anywhere but macOS, at the start of the command or after a quote or space.
+  expect(checkUnrunnable("/Users/jason/bin/check.sh", "windows")).toBe(true);
+  expect(checkUnrunnable("cat '/Users/jason/a'", "linux")).toBe(true);
+  expect(checkUnrunnable("test -f /Users/jason/a", "windows")).toBe(true);
+  // The incident: a young Windows task whose check reads a Git Bash path was handed back to the inbox ("cannot run on
+  // the primary"), lost its state, and later became a "Windows tasks not advancing" card. It must be left alone.
+  const young = task({ id: "T-1", requires: "os:windows", wakes: "1", wait_check: "bash -c 'grep -q DONE /c/Users/testuser/chain.log'" });
+  expect(classify(young, ctx({ primaryOs: "windows", online: [win] }))).toBeNull();
+});
+
 test("keep going first: retired host → reroute, answered card → resume, no waiting_on → requeue once", () => {
   const r = classify(task({ id: "T-1", requires: "host:omarchy-jason", claimed_by: "omarchy-jason" }), ctx())!;
   expect([r.action, r.requires]).toEqual(["reroute", ""]);
@@ -38,6 +61,43 @@ test("keep going first: retired host → reroute, answered card → resume, no w
   expect(classify(task({ id: "T-4", waiting_on: "", wait_check: "" }), ctx())!.action).toBe("requeue");
   expect(classify(task({ id: "T-4", waiting_on: "", wait_check: "", supervisor_requeued: "yes" }), ctx())!.action).toBe("escalate");
   expect(classify(task({ id: "T-5", children: "T-6" }), ctx())).toBeNull(); // delegated parent
+});
+
+test("a next-steps menu whose card was replaced is parked, never woken to ask again", () => {
+  // 2026-11-19: T-0059 and T-0062 each closed the other's menu card, so every tick one of them was "answered but
+  // did not continue" → resumed → raised a card that replaced the other → 17 cards in 14 hours, none answered.
+  const closed = ctx({ decision: () => "closed" });
+  const m = classify(task({ id: "T-1", decision: "D-9", kind: "menu", source: "idle" }, "blocked"), closed)!;
+  expect(m.action).toBe("park");
+  expect(m.cause).toBe("menu:D-9");
+  // an ordinary task on a closed card still resumes: that path carries a real answer into the run
+  expect(classify(task({ id: "T-2", decision: "D-9" }, "blocked"), closed)!.action).toBe("resume");
+  // a menu task woken by the owner's own answer arrives in the inbox, not blocked; open cards keep it parked
+  expect(classify(task({ id: "T-3", decision: "D-9", kind: "menu" }, "blocked"), ctx({ decision: () => "open" }))).toBeNull();
+});
+
+test("parked on the owner: human waits and blocked waits naming an open card are never clock-escalated", () => {
+  const late = { created: new Date(NOW - 5 * H).toISOString() }; // well past maxAgeHours
+  expect(classify(task({ id: "T-1", ...late, wait_kind: "human" }), ctx())).toBeNull();
+  expect(classify(task({ id: "T-2", ...late, wait_kind: "human" }, "blocked"), ctx())).toBeNull();
+  expect(classify(task({ id: "T-3", ...late, waiting_on: "等待主人答复 decisions/open/D-9.md" }, "blocked"),
+    ctx({ decision: (d) => (d === "D-9" ? "open" : undefined) }))).toBeNull();
+  // an answered card still resumes first (the refresh path), even when parked on the owner
+  const r = classify(task({ id: "T-4", ...late, wait_kind: "human", decision: "D-7" }, "blocked"),
+    ctx({ decision: (d) => (d === "D-7" ? "closed" : undefined) }))!;
+  expect(r.action).toBe("resume");
+  // a wake the runner already scheduled is progress; an overdue one is a stall again
+  expect(classify(task({ id: "T-5", ...late, wake_at: new Date(NOW + H).toISOString() }), ctx())).toBeNull();
+  expect(classify(task({ id: "T-6", ...late, wake_at: new Date(NOW - H).toISOString() }), ctx())!.action).toBe("escalate");
+});
+
+test("a platform card does not sweep in tasks that are parked on the owner", () => {
+  const stuck = task({ id: "T-1", requires: "os:macos", wakes: "4" });
+  const parked = task({ id: "T-2", requires: "os:macos", wait_kind: "human" });
+  const vs = [classify(stuck, ctx())!];
+  expect(vs[0].cause).toBe("platform:os:macos");
+  expect(sweepPlatform([stuck, parked], vs)).toEqual([]); // the human wait is not evidence that macOS is missing
+  expect(sweepPlatform([stuck, task({ id: "T-3", requires: "os:macos" })], vs).map((v) => v.id)).toEqual(["T-3"]);
 });
 
 test("groups by cause: all macOS-desktop tasks share one card", () => {
@@ -88,6 +148,25 @@ test("supervise(): one card per cause, never twice; answering resumes every task
   expect(readFileSync(P("journal", `${new Date().toLocaleDateString("sv-SE")}.md`), "utf8")).toContain("supervisor ran");
 });
 
+test("supervise(): a replaced menu task goes to tasks/rejected instead of coming back as a new card", () => {
+  const id = "T-9501-test";
+  const blocked = P("tasks", "blocked", `${id}.md`);
+  const rejected = P("tasks", "rejected", `${id}.md`);
+  const card = P("decisions", "closed", "D-9501.md");
+  try {
+    mkdirSync(P("tasks", "rejected"), { recursive: true });
+    writeDoc(blocked, { id, title: "Propose next actions (fleet idle)", agent: "chief-of-staff", kind: "menu", source: "idle", decision: "D-9501", created: new Date(NOW).toISOString() }, "menu");
+    writeDoc(card, { id: "D-9501", kind: "menu", task: id, answer: "superseded by D-9502", answered_by: "chief-of-staff" }, "c");
+    const n = supervise({}, "test", NOW, () => "OPEN");
+    expect(n.parked).toBe(1);
+    expect(n.resume).toBe(0);
+    expect(existsSync(blocked)).toBe(false);
+    expect(existsSync(P("tasks", "inbox", `${id}.md`))).toBe(false);
+    expect(readDoc(rejected).meta.approval).toBe("superseded:D-9501");
+    expect(supervise({}, "test", NOW, () => "OPEN").parked).toBe(0); // gone: never parked twice
+  } finally { for (const p of [blocked, rejected, P("tasks", "inbox", `${id}.md`), card]) rmSync(p, { force: true }); }
+});
+
 test("closeDecision on a supervisor card never sets gate_override", () => {
   writeDoc(P("decisions", "open", "D-9001.md"), { id: "D-9001", task: "T-0201", tasks: "T-0201,T-0202", supervisor_cause: "no-wait", question: "q" }, "c");
   for (const id of ["T-0201", "T-0202"]) writeDoc(P("tasks", "blocked", `${id}.md`), { id, title: id, decision: "D-9001" }, "b");
@@ -113,4 +192,76 @@ test("macOS host online + wait_check unrunnable on the primary: hand back to the
   const m = { id: "T-1", requires: "os:macos", created: new Date(NOW - 10 * H).toISOString(), waiting_on: "x", wait_check: "test -f /Users/j/done" };
   expect(classify(task(m), ctx())!.action).toBe("reroute");
   expect(classify(task({ ...m, supervisor_requeued: "yes" }), ctx())!.action).toBe("escalate");
+});
+
+import { trackedPrs } from "../src/supervisor";
+test("trackedPrs reads PR urls from spec and repo #N from title, not from run logs", () => {
+  const body = "PR: https://github.com/huacnlee/noop/pull/182 (branch x)\n\n## Run 2026\nsee https://github.com/longbridge/nsh/pull/9";
+  expect(trackedPrs({ title: "Noop #182：验收并合并", repo: "huacnlee/noop" }, body)).toEqual(["huacnlee/noop#182"]);
+  expect(trackedPrs({ title: "NSH #1846：放大后变糊" }, "no pr yet")).toEqual([]);
+});
+
+
+test("merged PRs wake a task once for acceptance checks instead of completing it", () => {
+  const id = "T-9406-test";
+  const waiting = P("tasks", "waiting", `${id}.md`);
+  const inbox = P("tasks", "inbox", `${id}.md`);
+  const done = P("tasks", "done", `${id}.md`);
+  try {
+    writeDoc(waiting, { id, title: "Verify screenshot", waiting_on: "Need screenshot", wait_kind: "human", created: new Date(NOW).toISOString() }, "PR: https://github.com/huacnlee/noop/pull/182");
+    supervise({}, "test", NOW, () => "OPEN", () => false);
+    expect(existsSync(waiting)).toBe(true);
+    supervise({}, "test", NOW, () => "MERGED", () => false);
+    expect(existsSync(waiting)).toBe(false);
+    expect(existsSync(done)).toBe(false);
+    const resumed = readDoc(inbox);
+    expect(resumed.meta.resumed).toBe("yes");
+    expect(resumed.body).toContain("Check remaining acceptance criteria");
+    rmSync(inbox);
+    writeDoc(waiting, { ...resumed.meta, waiting_on: "Need screenshot" }, resumed.body!);
+    supervise({}, "test", NOW, () => { throw new Error("Must not recheck a handled merge"); }, () => false);
+    expect(existsSync(waiting)).toBe(true);
+    expect(existsSync(inbox)).toBe(false);
+  } finally {
+    for (const path of [waiting, inbox, done]) rmSync(path, { force: true });
+  }
+});
+
+import { approvalPending } from "../src/supervisor";
+test("CI held for approval turns a machine wait into a visible owner wait", () => {
+  expect(approvalPending([{ status: "WAITING" }, { status: "QUEUED" }])).toBe(true);
+  expect(approvalPending([{ status: "COMPLETED", conclusion: "ACTION_REQUIRED" }])).toBe(true);
+  expect(approvalPending([{ status: "IN_PROGRESS" }, { status: "COMPLETED", conclusion: "SUCCESS" }])).toBe(false);
+  const id = "T-9810-test";
+  const waiting = P("tasks", "waiting", `${id}.md`);
+  try {
+    writeDoc(waiting, { id, title: "NSH #2126 review", waiting_on: "CI", wait_kind: "ci", wait_check: "gh pr checks 2126 -R longbridge/nsh", created: new Date(NOW).toISOString() }, "PR: https://github.com/longbridge/nsh/pull/2126");
+    supervise({}, "test", NOW, () => "OPEN", () => true);
+    const m = readDoc(waiting).meta;
+    expect(m.wait_kind).toBe("human");
+    expect(m.waiting_on).toContain("https://github.com/longbridge/nsh/pull/2126");
+    supervise({}, "test", NOW, () => "OPEN", () => { throw new Error("human waits are not rechecked"); });
+  } finally { rmSync(waiting, { force: true }); }
+});
+
+test("a blocked task closes quietly once its PRs are merged or closed, even with children", () => {
+  const id = "T-10394-test";
+  const blocked = P("tasks", "blocked", `${id}.md`);
+  const inbox = P("tasks", "inbox", `${id}.md`);
+  const done = P("tasks", "done", `${id}.md`);
+  try {
+    writeDoc(blocked, { id, title: "NSH #2346：macOS screenshots", status: "blocked", children: "T-H0041", decision: "D-none", resumes: "D-none", waiting_on: "display", created: new Date(NOW).toISOString() }, "PR https://github.com/longbridge/nsh/pull/2346 needs shots");
+    supervise({}, "test", NOW, () => "MERGED", () => false);
+    expect(existsSync(blocked)).toBe(false);
+    expect(existsSync(inbox)).toBe(false);
+    expect(readDoc(done).meta.status).toBe("done");
+  } finally {
+    for (const path of [blocked, inbox, done]) rmSync(path, { force: true });
+  }
+});
+
+test("an answered card does not resume a blocked task that already resumed on it", () => {
+  const ctx = { now: NOW, online: [], retired: [], primaryOs: "linux", maxAgeHours: 3, maxWakes: 3, decision: () => "closed" as const } as any;
+  expect(classify({ folder: "blocked", meta: { id: "T-x", decision: "D-1", resumes: "D-1" } }, ctx)?.action).not.toBe("resume");
+  expect(classify({ folder: "blocked", meta: { id: "T-x", decision: "D-1" } }, ctx)?.action).toBe("resume");
 });

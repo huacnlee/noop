@@ -10,7 +10,7 @@
             email OTP login · Web Push
                 ▲                                  ▲
                 │ outbound HTTPS                   │
-       primary (always-on Linux)            workers (macOS, Windows)
+       primary (macOS / Linux, always on)  workers (macOS, Linux, Windows)
        routines, triage, judge, agents      claim tasks when online
 ```
 
@@ -28,6 +28,7 @@
 | `src/cli.ts` | CLI entry and the daemon loop (`pull → routines → replies → judge → run tasks → push`) |
 | `src/core.ts` | config, local paths (`HOME_DIR`), tasks, claims, journal, `locked()` |
 | `src/sync.ts` | file sync with the Worker (CAS commit, pull, merge of append-only files) |
+| `src/integrity.ts` | torn-write protection: spots zero-filled files, durable writes, restores memory files, daily memory snapshots |
 | `src/runner.ts` | prompt building and running Claude Code / Codex |
 | `src/decisions.ts`, `src/autonomy.ts` | the judge, proposals, graduated autonomy |
 | `src/gates.ts`, `src/github.ts` | hard gates, GitHub quota etiquette |
@@ -41,7 +42,7 @@
 | `app/` | the NSH client; machines download the web package from the latest release (`src/webclient.ts`), and `app/build-web.sh` builds it locally |
 | `templates/` | default config, agents, policies and memory seeded into a new install |
 
-Machine-local files live in `HOME_DIR` (`$NOOP_HOME`, else `~/.noop`, falling back to an existing `~/.agent-hub`): `noop.toml` (Worker URL + machine token), `sync.json`, `data/` (the mirror), accounts, logs.
+Machine-local files live in `HOME_DIR` (`$NOOP_HOME`, else `~/.noop`, falling back to an existing `~/.agent-hub`): `noop.toml` (Worker URL + machine token), `sync.json`, `sync-base/` (last synced content of each file), `memory-snapshots/<day>/` (one copy of the memory files per day, newest 14 kept, never synced), `data/` (the mirror), accounts, logs.
 
 ## Worker API
 
@@ -62,6 +63,6 @@ Auth: the machine token (hosts) or an owner session from email login (clients). 
 ## Agents and safety
 
 - The lead agent owns every task and decides how much process it needs; other roles are spawned as parallel sub-agents.
-- Hard gates (`src/gates.ts`) are enforced through Claude Code's `--disallowedTools`, not model judgment: merge, approve, release, publish, force-push, pushing to main, repo/secret admin, GitHub REST loops. Running one requires an owner decision, which unlocks it for that run only.
+- Hard gates (`src/gates.ts`) are enforced through Claude Code's `--disallowedTools`, not model judgment: merge, approve, release, publish, force-push, pushing to main, repo/secret admin, GitHub REST loops. Running one requires an owner decision, which unlocks the approvable gates (merge, approve, release, publish, push) for that task only; repo deletion, secrets, `rm -rf /` or `~` and `[gates] extra` stay blocked.
 - Anything posted outside Noop carries the agent's signature.
 - Failures are retried; tooling problems go to the medic; the owner is told only about failures of work they asked for, in one plain sentence.

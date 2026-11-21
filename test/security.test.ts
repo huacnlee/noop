@@ -85,3 +85,18 @@ test("TOTP: RFC 6238 vectors, ±1 step, single use", async () => {
   expect(newSecret()).toMatch(/^[A-Z2-7]{32}$/);
   expect(otpauthUri("ABC", "a@b.c")).toBe("otpauth://totp/Noop%3Aa%40b.c?secret=ABC&issuer=Noop&algorithm=SHA1&digits=6&period=30");
 });
+
+test("security check bounds every Worker call with a timeout signal", async () => {
+  const { securityReport } = await import("../src/security");
+  const seen: RequestInit[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = ((_: any, init: any) => { seen.push(init); return Promise.reject(new Error("connect ECONNREFUSED")); }) as any;
+  try {
+    // a Worker that cannot be reached must fail fast instead of hanging the whole command
+    const out = await securityReport({ cloud: { url: "http://127.0.0.1:9" }, server: { token: "k" } } as any, "test-host", true);
+    expect(seen[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(out.some((f) => f.level === "bad" && /Cannot reach|连不上/.test(f.text))).toBe(true);
+  } finally {
+    globalThis.fetch = real;
+  }
+});

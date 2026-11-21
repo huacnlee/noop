@@ -7,7 +7,7 @@
 //   POST /api/messages {text, reply_to?, attachments?}  → owner message: answers D-/P-/L- ids, otherwise becomes a task for `lead`
 //   POST /api/uploads (multipart file)    → { url }   (the owner's images for a message: image/*, ≤ 10 MB)
 //   GET  /api/status                      → queue, decisions, hosts, accounts
-//   POST /api/fleet/update               → every machine updates to the latest code; the primary redeploys the cloud
+//   POST /api/fleet/update               → every machine updates to the latest code; the designated host redeploys the cloud
 //   POST /api/media (multipart file)      → { url }   (workers upload screenshots/recordings here)
 //   GET  /media/<file>                    → attachment
 //   GET  /api/files/list?prefix=  · GET /api/files/read?path=   → read-only rules & memory (same shape as the Worker)
@@ -16,31 +16,60 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { accountsInfo } from "./accounts";
-import { type Cfg, DATA, P, allowedClis, hostName, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
+import { cliCommand, startModel } from "./runner";
+import { type Cfg, DATA, L, P, _commitPush, isEnglish, allowedClis, hostName, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
 import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
-import { parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
+import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
+import { channels, originChannel, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
+import { localSecretList, localSecretPut } from "./secrets";
+import { type McpServer, mcpProblem, mcpServers } from "../app/mcp-servers";
 
 export type Event = {
   id: string; ts: string; from: string; kind: "notice" | "decision" | "menu" | "proposals" | "login" | "owner" | "system";
-  text: string; ref?: string; options?: string[]; attachments?: string[];
+  text: string; ref?: string; client_id?: string; options?: string[]; attachments?: string[];
   /** Said inside a task's own conversation: shown on the task page, not in the main channel. */
   thread?: boolean;
+  /** Said in a channel (its slug): shown in that channel only, never in the main chat. */
+  channel?: string;
 };
 
 export const MEDIA = join(DATA, "..", "media");
 const NSH_WEB = join(import.meta.dir, "..", "app", "dist", "web", "noop"); // built NSH web client
 const FEED_DIR = join(DATA, "..", "feed"); // primary-local (next to the data repo), append-only JSONL per day
-const sockets = new Set<ServerWebSocket<unknown>>();
+/** `status`: the client asked for dashboard frames (?v=2), as the web client always does. */
+type Sock = ServerWebSocket<{ status?: boolean }>;
+const sockets = new Set<Sock>();
+/** Owner clients that asked for status frames get the dashboard pushed, as the Cloudflare hub does; without it their
+ * badge and "waiting for you" list would only change on reconnect. Change-detected, so a quiet hub sends nothing. */
+const STATUS_PUSH_MS = 5_000;
+let statusPushed = "";
+let statusTimer: ReturnType<typeof setInterval> | null = null;
+function pushStatus() {
+  const watching = [...sockets].filter((ws) => ws.data?.status);
+  if (!watching.length) {
+    if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+    statusPushed = "";
+    return;
+  }
+  const s = JSON.stringify({ $status: status() });
+  if (s === statusPushed) return;
+  statusPushed = s;
+  for (const ws of watching) try { ws.send(s); } catch { /* the socket is going away */ }
+}
 type Inbound = { id: string; answer: string; source: string };
-const inbound: Inbound[] = [];
+/** Answers waiting for the daemon's next tick live on disk (primary-local, next to the feed): kept in memory, an answer
+ * that came in just before a restart (self-update) was lost with no receipt, and its card stayed open. */
+const INBOUND = join(DATA, "..", "inbound.json");
+const queue = (items: Inbound[]) => items.length ? writeFileSync(INBOUND, JSON.stringify(items)) : rmSync(INBOUND, { force: true });
+const enqueue = (r: Inbound) => queue([...pendingInbound(), r]);
 /** A chat message goes to the chat brain (src/brain.ts), which replies and acts through noop's tools. `reply`: the task
  * whose message the owner replied to ("T-0125"), or whose page they wrote on; `answered`: the decision the owner answered
  * moments ago (the message may change that answer); `sentAt`: when the owner sent it (for latency). */
-type OwnerTask = (text: string, o: { reply?: string; answered?: string; sentAt?: string; thread?: boolean }) => Promise<void>;
+type OwnerTask = (text: string, o: { reply?: string; answered?: string; sentAt?: string; thread?: boolean; channel?: string }) => Promise<void>;
 let ownerTask: OwnerTask | null = null;
 
 const today = () => new Date().toLocaleDateString("sv-SE");
@@ -51,6 +80,8 @@ export const setMirror = (fn: (e: Event) => void) => { mirror = fn; };
 export function appendEvent(e: Omit<Event, "id" | "ts"> & Partial<Pick<Event, "id" | "ts">>, opts: { mirror?: boolean } = {}): Event {
   mkdirSync(FEED_DIR, { recursive: true });
   const ev: Event = { id: crypto.randomUUID(), ts: new Date().toISOString(), ...e };
+  // results and cards of work started in a channel stay in that channel
+  if (!ev.channel && ev.ref) { const c = originChannel(ev.ref); if (c) ev.channel = c; }
   if (opts.mirror !== false) mirror?.(ev);
   appendFileSync(join(FEED_DIR, `${today()}.jsonl`), JSON.stringify(ev) + "\n");
   for (const ws of sockets) ws.send(JSON.stringify(ev));
@@ -66,9 +97,9 @@ export function feed(since?: string, limit = 300): Event[] {
 
 /** The channel's last few hours as plain lines, oldest first: what a new chat message ("不行", "这个细节记下来") refers to.
  * The message being handled (the owner's last event, `text`) is left out. */
-export function recentChat(text = "", opts: { limit?: number; hours?: number } = {}): string[] {
+export function recentChat(text = "", opts: { limit?: number; hours?: number; channel?: string } = {}): string[] {
   const since = new Date(Date.now() - (opts.hours ?? 6) * 3600_000).toISOString();
-  let evs = feed(since, 200).filter((e) => e.kind !== "login" && e.text?.trim());
+  let evs = feed(since, 2000).filter((e) => e.kind !== "login" && e.text?.trim() && (e.channel ?? "") === (opts.channel ?? "")).slice(-200);
   const last = evs.at(-1);
   if (last?.from === "owner" && last.text.trim() === text.trim()) evs = evs.slice(0, -1);
   return evs.slice(-(opts.limit ?? 12)).map((e) => {
@@ -79,11 +110,15 @@ export function recentChat(text = "", opts: { limit?: number; hours?: number } =
 }
 
 
-/** Replies the daemon should process (same shape as Slack/Discord replies). */
-export const drainInbound = () => inbound.splice(0);
+/** Replies the daemon should process (same shape as Slack/Discord replies), oldest first; they stay queued until
+ * `ackInbound(n)` drops the first n once handled, so a restart in between hands them to the next daemon. */
+export function pendingInbound(): Inbound[] {
+  try { return JSON.parse(readFileSync(INBOUND, "utf8")); } catch { return []; }
+}
+export const ackInbound = (n: number) => queue(pendingInbound().slice(n));
 /** A decision answer from the chat brain: an open card is answered; one answered minutes ago is amended. */
 export function answerFromChat(id: string, answer: string, amend: boolean) {
-  inbound.push({ id, answer, source: amend ? "chat-amend" : "chat" });
+  enqueue({ id, answer, source: amend ? "chat-amend" : "chat" });
   if (!amend) lastAnswer = { id, at: Date.now() };
 }
 
@@ -166,7 +201,7 @@ function hostViews(active: TaskView[], finished: TaskView[]) {
     os: h.caps.find((c) => c.startsWith("os:"))?.slice(3),
     arch: h.caps.find((c) => c.startsWith("arch:"))?.slice(5),
     clis: h.caps.filter((c) => c.startsWith("cli:")).map((c) => c.slice(4)),
-    accounts: cfg && h.host === me ? (() => { try { return accountsInfo(cfg!); } catch { return undefined; } })() : undefined,
+    accounts: cfg && h.host === me ? (() => { try { return accountsInfo(cfg!).map((a) => ({ ...a, model: startModel(a.cli, cliCommand(a.cli, cfg!)) })); } catch { return undefined; } })() : undefined,
     running: active.filter((t) => t.host === h.host).map((t) => ({ id: t.id, title: t.title, agent: t.agent, started: t.started, activity: h.activity?.[t.id] })),
     recent: finished.filter((t) => ran(t, h.host)).slice(0, 8).map((t) => ({ id: t.id, title: t.title, state: t.state, finished: t.finished ?? t.updated })),
   }));
@@ -191,6 +226,7 @@ export function status() {
       return [...open, ...rest.filter((t) => !open.includes(t)).slice(0, 12)].sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? ""));
     })(),
     decisions: list(P("decisions", "open")).map((p) => { const m = readDoc(p).meta; return { id: m.id, kind: m.kind ?? "decision", question: m.question, held: !!m.held, task: m.task }; }),
+    channels_revision: JSON.stringify(channels()),
     hosts: hostViews(active, others.filter((t) => t.state === "done" || t.state === "failed")),
     /** The owner's latest "update every machine" (each host reports its progress on it in `hosts[].update`). */
     update: (() => { try { return { at: String(JSON.parse(readFileSync(UPDATE_REQUEST(), "utf8")).at ?? "") }; } catch { return undefined; } })(),
@@ -198,7 +234,7 @@ export function status() {
 }
 
 // ---------------------------------------------------------------- settings (UI-adjustable, shared via data repo)
-const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days"]; // whitelisted top-level keys
+const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days", "mcp_servers"]; // whitelisted top-level keys
 
 /** What an agent is for, from its profile's first line: "# Name (中文名) — what it does". */
 /** Chinese titles and one-liners for the built-in roles (a profile's own Chinese "(标题)" and text still win where present). */
@@ -224,6 +260,7 @@ export function agentRole(agent: string): { title?: string; about?: string } {
   const zh = ROLE_ZH[agent];
   const title = m ? (m[2] ?? m[1]).trim() : undefined;
   const about = m?.[3]?.trim();
+  if (isEnglish()) return { title: m?.[1]?.trim(), about };
   return {
     title: hasHan(title) ? title : (zh?.title ?? title),
     about: hasHan(about) ? about : (zh?.about ?? about),
@@ -248,7 +285,7 @@ const ROUTINE_DESC: Record<string, string> = {
   "release-wednesday": "周三发布 NSH：准备好一切，发布前问你一次",
 };
 const routineDesc = (r: any) =>
-  String(r.desc ?? ROUTINE_DESC[r.name] ?? String(r.prompt ?? "").split(/(?<=[.。])\s/)[0].slice(0, 120)).trim() || undefined;
+  String((isEnglish() ? (r.builtin ? undefined : r.desc) : r.desc ?? ROUTINE_DESC[r.name]) ?? String(r.prompt ?? "").split(/(?<=[.。])\s/)[0].slice(0, 120)).trim() || undefined;
 
 export function settingsView() {
   const cfg = loadConfig();
@@ -277,6 +314,14 @@ export async function saveSettings(patch: Record<string, unknown>) {
     return o;
   };
   const clean = Object.fromEntries(Object.entries(patch).filter(([k]) => SETTABLE.includes(k)));
+  if ("mcp_servers" in clean) {
+    // the whole list replaces the saved one. The app checks each entry first; here an entry that still fails
+    // (a literal secret above all: the data repo syncs through the cloud) is left out rather than failing the save,
+    // which arrives through the cloud inbox and would otherwise be retried forever.
+    const list: McpServer[] = [];
+    for (const s of mcpServers(clean.mcp_servers)) if (!mcpProblem(s, list)) list.push(s);
+    clean.mcp_servers = list;
+  }
   const next = deep(cur, clean);
   writeFileSync(P("settings.json"), JSON.stringify(next, null, 2) + "\n");
   await settingsHook?.(JSON.stringify(clean));
@@ -298,11 +343,11 @@ export const setApplyOp = (fn: (op: any) => Promise<unknown>) => { opHook = fn; 
 export const applyOp = async (op: any) => (opHook ? opHook(op) : null);
 let updateHook: (() => Promise<number>) | null = null;
 export const setUpdateFleet = (fn: () => Promise<number>) => { updateHook = fn; };
-/** The owner asks every machine to update to the latest code (the primary also redeploys the Worker and the web app). */
+/** The owner asks every machine to update to the latest code (the designated cloud host also redeploys the Worker and the web app). */
 export async function updateFleet(): Promise<string> {
   if (!updateHook) return "not available";
   const n = await updateHook();
-  appendEvent({ from: "hub", kind: "system", text: `已通知 ${n} 台机器更新到最新代码：空闲的马上更新，有任务在跑的等跑完再重启；主控机同时重新发布线上。` });
+  appendEvent({ from: "hub", kind: "system", text: L(`Told ${n} machine(s) to update to the latest code: idle ones update now, busy ones restart after their tasks finish; the designated cloud host also redeploys.`, `已通知 ${n} 台机器更新到最新代码：空闲的马上更新，有任务在跑的等跑完再重启；指定的云端发布机器同时重新发布线上。`) });
   return "ok";
 }
 const AMEND_MS = 5 * 60_000;
@@ -361,7 +406,7 @@ export function withAttachments(text: string, files: string[], missing = 0): str
 
 export async function handleOwnerMessage(
   text: string, reply_to?: string, noAmend = false,
-  att: { paths?: string[]; key?: string; fetch?: FetchAttachment; sentAt?: string; thread?: boolean } = {},
+  att: { paths?: string[]; key?: string; fetch?: FetchAttachment; sentAt?: string; thread?: boolean; channel?: string } = {},
 ) {
   if (att.paths?.length) {
     const files = await saveAttachments(att.key ?? crypto.randomUUID(), att.paths, att.fetch);
@@ -371,13 +416,16 @@ export async function handleOwnerMessage(
   const id = m?.[1] ?? (reply_to && /^[DLP]-[A-Z]?\d{4}$/.test(reply_to) ? reply_to : null);
   // a reply to an agent's message about a task (or a message on its page): it goes to that task, whatever came just before
   const replyTask = !id && reply_to && /^T-\d{4,}$/.test(reply_to) ? reply_to : undefined;
-  if (id) {
-    inbound.push({ id, answer: (m ? m[2] : text).trim(), source: "chat" });
+  const answer = (m ? m[2] : text).trim();
+  // a proposals card takes item numbers, all or none; words ("just the docs one", "1 no 2 yes") go to the brain, which sees the items
+  const words = !!ownerTask && !!id?.startsWith("P-") && !/^(all|none)\b|^[\d\s,，]+$/i.test(answer);
+  if (id && !words) {
+    enqueue({ id, answer, source: "chat" });
     if (id.startsWith("D-")) lastAnswer = { id, at: Date.now() };
   } else if (ownerTask) {
     // everything else goes to the chat brain: it answers, looks things up, and creates or adjusts work through the tools
-    const answered = !noAmend && !replyTask && lastAnswer && Date.now() - lastAnswer.at < AMEND_MS ? lastAnswer.id : undefined;
-    await ownerTask(text, { reply: replyTask, answered, sentAt: att.sentAt, thread: !!(att.thread && replyTask) });
+    const answered = !words && !noAmend && !replyTask && lastAnswer && Date.now() - lastAnswer.at < AMEND_MS ? lastAnswer.id : undefined;
+    await ownerTask(words ? `${id} ${answer}` : text, { reply: replyTask, answered, sentAt: att.sentAt, thread: !!(att.thread && replyTask), ...(att.channel ? { channel: att.channel } : {}) });
   }
 }
 
@@ -425,7 +473,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
   };
   const json = (d: unknown, status = 200) => Response.json(d, { status });
 
-  const server = Bun.serve({
+  const server = Bun.serve<{ status?: boolean }>({
     hostname: s.host ?? "0.0.0.0",
     port: s.port ?? 8787,
     async fetch(req, srv) {
@@ -441,7 +489,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       if (url.pathname === "/manifest.webmanifest")
         return new Response(Bun.file(join(import.meta.dir, "..", "web", "manifest.webmanifest")));
       if (!auth(req)) return json({ error: "unauthorized" }, 401);
-      if (url.pathname === "/api/stream" && srv.upgrade(req)) return undefined as unknown as Response;
+      if (url.pathname === "/api/stream" && srv.upgrade(req, { data: { status: url.searchParams.get("v") === "2" } })) return undefined as unknown as Response;
       if (url.pathname.startsWith("/media/")) {
         const f = join(MEDIA, basename(url.pathname));
         if (!existsSync(f)) return json({ error: "not found" }, 404);
@@ -458,6 +506,12 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         const f = readDataFile(url.searchParams.get("path") ?? "");
         return f ? json(f) : f === null ? json({ error: "path not readable" }, 403) : json({ error: "not found" }, 404);
       }
+      if (url.pathname === "/api/secrets" && req.method === "GET") return json({ secrets: localSecretList() });
+      if (url.pathname === "/api/secrets" && req.method === "PUT") {
+        const b = (await req.json().catch(() => ({}))) as { name?: unknown; value?: unknown };
+        const r = await localSecretPut(loadConfig(), b.name, b.value);
+        return "error" in r ? json(r, 400) : json(r);
+      }
       if (url.pathname === "/api/settings" && req.method === "GET") return json(settingsView());
       if (url.pathname === "/api/settings" && req.method === "PUT") return json(await saveSettings((await req.json()) as Record<string, unknown>));
       if (url.pathname === "/api/tasks" && req.method === "GET") {
@@ -473,6 +527,16 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         const { id, done } = (await req.json().catch(() => ({}))) as { id?: string; done?: boolean };
         if (!id || !/^T-[\w]*\d{4}$/.test(id)) return json({ error: "id required" }, 400);
         return json({ ok: true, result: await cancelTask(id, done === true) });
+      }
+      if (url.pathname === "/api/channels" && req.method === "GET") return json(channelsView(taskStore()));
+      if (url.pathname === "/api/channels/feed" && req.method === "GET") {
+        const c = channelsView(taskStore()).channels.find((c) => c.slug === url.searchParams.get("slug"));
+        return c ? json({ events: channelDigest(feed("", 5000), c.refs ?? [], c.slug) }) : json({ error: "not found" }, 404);
+      }
+      if (url.pathname === "/api/channels" && req.method === "POST") {
+        const { slug, ...patch } = (await req.json().catch(() => ({}))) as { slug?: string; name?: unknown; goal?: unknown; archived?: unknown };
+        const r = await locked(async () => { const r = updateChannel(String(slug ?? ""), patch); if (typeof r !== "string") await _commitPush(`channel ${slug}`); return r; });
+        return typeof r === "string" ? json({ error: r }, 404) : json({ ok: true, channel: r });
       }
       if (url.pathname === "/api/fleet/update" && req.method === "POST") return json({ ok: true, result: await updateFleet() });
       if (url.pathname === "/api/media" && req.method === "POST") {
@@ -497,22 +561,35 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       }
       if (url.pathname === "/api/events" && req.method === "POST") return json(appendEvent(await req.json() as Event));
       if (url.pathname === "/api/messages" && req.method === "POST") {
-        const { text = "", reply_to, attachments, thread: inThread } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown };
+        const { text = "", reply_to, attachments, thread: inThread, client_id, channel: inChannel } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown; client_id?: unknown; channel?: unknown };
+        const channel = typeof inChannel === "string" && inChannel ? channels().find((c) => c.slug === inChannel)?.slug : undefined;
+        if (inChannel !== undefined && inChannel !== "" && !channel) return json({ error: "channel not found" }, 400);
+        if (client_id !== undefined && (typeof client_id !== "string" || !/^[\w:-]{1,100}$/.test(client_id)))
+          return json({ error: "bad client_id" }, 400);
+        if (client_id) {
+          const previous = feed("", Infinity).find((e) => e.kind === "owner" && e.client_id === client_id);
+          if (previous) return json(previous);
+        }
         const files = ownerAttachments(attachments);
         if (files === null) return json({ error: "bad attachments" }, 400);
         if (files.some((p) => !existsSync(join(MEDIA, basename(p))))) return json({ error: "attachment not found" }, 400);
         if (!text.trim() && !files.length) return json({ error: "text required" }, 400);
         const thread = inThread === true && /^T-/.test(reply_to ?? "");
-        const ev = appendEvent({ from: "owner", kind: "owner", text, ref: reply_to, ...(files.length ? { attachments: files } : {}), ...(thread ? { thread } : {}) });
-        await handleOwnerMessage(text, reply_to, false, { paths: files, key: ev.id, thread });
+        const ev = appendEvent({ from: "owner", kind: "owner", text, ref: reply_to, ...(client_id ? { client_id: client_id as string } : {}), ...(files.length ? { attachments: files } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) });
+        await handleOwnerMessage(text, reply_to, false, { paths: files, key: ev.id, thread, channel: ev.channel });
         return json(ev);
       }
       return json({ error: "not found" }, 404);
     },
     websocket: {
-      open(ws) { sockets.add(ws); },
-      close(ws) { sockets.delete(ws); },
-      message() {},
+      open(ws) {
+        sockets.add(ws);
+        if (!ws.data?.status) return;
+        pushStatus(); // the dashboard as of now, then on every change while this client watches
+        statusTimer ??= setInterval(pushStatus, STATUS_PUSH_MS);
+      },
+      close(ws) { sockets.delete(ws); pushStatus(); }, // the last watcher leaving also stops the timer
+      message(ws, m) { if (m === "ping") ws.send("pong"); }, // the app's heartbeat (the cloud hub auto-answers it)
     },
   });
   console.log(`hub server on http://${server.hostname}:${server.port}  (phone: tailscale serve --bg ${server.port})`);

@@ -1,23 +1,78 @@
 // Decisions: agent asks → AI judge (owner's precedents & principles) → only unprecedented taste calls reach the owner.
 import { existsSync, unlinkSync, appendFileSync, writeFileSync } from "node:fs";
 import {
-  type Cfg, P, agentName, journal, list, newTask, nextId, now, precedents, readAll, readDoc, readIf, today, writeDoc,
+  type Cfg, L, P, agentName, journal, list, newTask, nextId, now, precedents, readAll, readDoc, readTail, today, writeDoc,
 } from "./core";
 import { notify } from "./notify";
 import { ask, type Result } from "./runner";
 import { judgeMayDecide } from "./autonomy";
 import { isMergeCard, mergeHeadline } from "./waits";
 
+/** A refreshed next-steps menu replaces the older unanswered one: the old card no longer says what the fleet
+ *  would ask today. Its idle task is parked in tasks/rejected so the blocked queue does not grow one dead task
+ *  per refresh. */
+function supersedeOlderMenus(newTaskId: string, keep: string) {
+  for (const p of list(P("decisions", "open"))) {
+    const { meta, body } = readDoc(p);
+    if (meta.kind !== "menu" || meta.id === keep) continue;
+    writeDoc(P("decisions", "closed", `${meta.id}.md`),
+      { ...meta, answer: "superseded (refreshed)", answered_by: "system", answered: now() },
+      `${body}\n## Answer (system)\nsuperseded (refreshed): replaced by the menu ${newTaskId} raises; its options are stale.\n`);
+    unlinkSync(p);
+    for (const old of cardTasks(meta)) {
+      const t = P("tasks", "blocked", `${old}.md`);
+      if (old === newTaskId || !existsSync(t)) continue;
+      const { meta: tm, body: tb } = readDoc(t);
+      writeDoc(P("tasks", "rejected", `${old}.md`), { ...tm, approval: `superseded:${newTaskId}` },
+        `${tb}\n\n## Note\nsuperseded by ${newTaskId}: a newer next-steps menu replaced this one.\n`);
+      unlinkSync(t);
+    }
+  }
+}
+
 export function openDecision(task: Record<string, string>, res: Result, host: string): string {
-  const id = nextId("D", P("decisions"));
   const opts = res.options?.length ? res.options : ["A: approve", "B: reject"];
+  // One task, one card. A task that asks again (a resumed run, a re-plan, a judge send-back) used to open a
+  // second card for the same question: T-0008 left both D-0008 and D-0007 open within ten minutes, and the
+  // owner's list grew a duplicate nobody could tell apart from the real one. Refresh the open card instead.
+  const prior = list(P("decisions", "open")).map((p) => readDoc(p).meta).find((m) => m.task && m.task === task.id);
+  const id = prior?.id ?? nextId("D", P("decisions"));
+  // A menu asks from a new idle task each round, so the per-task refresh above never fires: on 2026-11-19 five
+  // menu cards (D-0003…D-0007) sat open at once, all asking "what next?", with five blocked tasks behind them.
+  if (task.kind === "menu") supersedeOlderMenus(task.id, id);
   writeDoc(P("decisions", "open", `${id}.md`), {
-    id, task: task.id, agent: task.agent, host, created: now(),
+    id, task: task.id, agent: task.agent, host, created: prior?.created ?? now(),
     question: res.question ?? "", recommendation: res.recommendation ?? "", options: opts.join(" | "),
     attachments: (res.attachments ?? []).join(" | ") || undefined,
     kind: task.kind === "menu" ? "menu" : undefined,
   }, `## Context\n${res.summary}\n\n## Options\n${opts.map((o) => `- ${o}`).join("\n")}\n`);
+  if (task.kind === "menu") supersedeMenus(id);
   return id;
+}
+
+/**
+ * A refreshed next-steps menu replaces the unanswered one before it. The idle loop asks the chief of staff to refresh
+ * a menu the owner has not answered, but the old card stayed open: D-0014 and D-0015 (same items, three hours apart)
+ * both waited overnight and every further refresh would add one more. Close the older menu cards (by the system: no
+ * lesson, not an owner answer) and finish their tasks without running them, so the owner answers one menu.
+ */
+function supersedeMenus(newId: string) {
+  for (const p of list(P("decisions", "open"))) {
+    const { meta, body } = readDoc(p);
+    if (meta.kind !== "menu" || meta.id === newId) continue;
+    const answer = `superseded by ${newId}`;
+    writeDoc(P("decisions", "closed", `${meta.id}.md`), { ...meta, answer, answered_by: "system", answered: now(), superseded_by: newId },
+      `${body}\n## Answer (system)\n${answer}: a refreshed menu replaced this unanswered one.\n`);
+    unlinkSync(p);
+    for (const task of cardTasks(meta)) {
+      const t = P("tasks", "blocked", `${task}.md`);
+      if (!existsSync(t)) continue;
+      const { meta: tm, body: tb } = readDoc(t);
+      writeDoc(P("tasks", "done", `${task}.md`), { ...tm, status: "done", finished: now(), claimed_by: undefined },
+        `${tb}\n\n> ${now()}: menu ${meta.id} ${answer}; closed without running.\n`);
+      unlinkSync(t);
+    }
+  }
 }
 
 type Verdict = { verdict: "decided" | "sent_back" | "hold"; answer?: string; reason: string; cite?: string };
@@ -40,7 +95,7 @@ ${readAll(P("memory"))}
 ${readAll(P("policies"))}
 
 # Corrections the owner made to past judge rulings (highest priority)
-${readIf(P("memory", "judge-feedback.md"), 6000) || "(none)"}
+${readTail(P("memory", "judge-feedback.md"), 6000) || "(none)"}
 
 # Past decisions
 ${precedents(60) || "(none)"}
@@ -102,6 +157,16 @@ export function closeDecision(id: string, answer: string, by: string, note = "")
   }
   }
   return true;
+}
+
+/** A menu task resumed by the owner's own pick: its followups are the items the owner chose, not new proposals.
+ *  A skipped card (ignored) leaves the choice to the agent, so it does not count. */
+export function ownerPickedMenu(task: Record<string, string>): boolean {
+  if (task.kind !== "menu" || !task.resumes) return false;
+  const f = P("decisions", "closed", `${task.resumes}.md`);
+  if (!existsSync(f)) return false;
+  const d = readDoc(f).meta;
+  return d.kind === "menu" && d.task === task.id && /^owner/.test(d.answered_by ?? "") && d.ignored !== "yes";
 }
 
 /** The answer that sets a card aside: the owner skipped it (often just forgot to pick); it is not a rejection. */
@@ -167,10 +232,10 @@ export async function routeDecision(id: string, cfg: Cfg, host: string) {
   }
   if (v && !judgeMayDecide(cfg, meta.agent) && v.verdict !== "hold") { // shadow mode: record, but ask the owner
     journal(host, `👤 shadow-judge on ${id}: would ${v.verdict} "${v.answer ?? v.reason}"`);
-    v = { verdict: "hold", reason: `学习期，judge 认为：${v.verdict === "decided" ? v.answer : "应退回: " + v.reason}` };
+    v = { verdict: "hold", reason: L(`Onboarding period, the judge thinks: ${v.verdict === "decided" ? v.answer : "send back: " + v.reason}`, `学习期，judge 认为：${v.verdict === "decided" ? v.answer : "应退回: " + v.reason}`) };
   }
   if (v && v.verdict !== "hold" && isMergeCard(meta)) { // the judge's answer cannot click merge: hold for the owner
-    journal(host, `👤 ${id} 是合并卡，judge 不代答（judge 认为：${v.answer ?? v.reason}）`);
+    journal(host, L(`👤 ${id} is a merge card, the judge does not answer it (the judge thinks: ${v.answer ?? v.reason})`, `👤 ${id} 是合并卡，judge 不代答（judge 认为：${v.answer ?? v.reason}）`));
     v = { verdict: "hold", reason: "merge card" };
   }
   if (v?.verdict === "decided" && v.answer) {
@@ -188,10 +253,10 @@ export async function routeDecision(id: string, cfg: Cfg, host: string) {
   const menu = meta.kind === "menu";
   const context = body.match(/## Context\n([\s\S]*?)(?=\n## |$)/)?.[1]?.trim() ?? "";
   const text = menu ? [
-    `*${id}* · ${agentName(meta.agent)}：团队空闲了，下一步做哪些？`,
+    L(`*${id}* · ${agentName(meta.agent)}: the team is idle, what should come next?`, `*${id}* · ${agentName(meta.agent)}：团队空闲了，下一步做哪些？`),
     ...opts.map((o) => `${o}`),
-    `建议：*${meta.recommendation || "-"}*`,
-    `回复 \`${id} 1,3\`（可多选）或 \`${id} <其他指示>\``,
+    L(`Recommended: *${meta.recommendation || "-"}*`, `建议：*${meta.recommendation || "-"}*`),
+    L(`Reply \`${id} 1,3\` (several allowed) or \`${id} <other instructions>\``, `回复 \`${id} 1,3\`（可多选）或 \`${id} <其他指示>\``),
   ].join("\n") : [
     // the card already shows the id, the agent and the options as buttons: the question, then the agent's account of
     // what is at stake (what the PR changes, what each choice means). The judge's reason for asking is not news to the owner.
@@ -199,7 +264,7 @@ export async function routeDecision(id: string, cfg: Cfg, host: string) {
     linkRefs(meta.question ?? "", meta.task, [context, ...opts].join("\n")),
     context ? `\n${linkRefs(context, meta.task, [meta.question ?? "", ...opts].join("\n"))}` : "",
     // the app marks this option 推荐 (and drops the line); chat channels show it as written
-    meta.recommendation ? `\n建议：*${meta.recommendation}*` : "",
+    meta.recommendation ? L(`\nRecommended: *${meta.recommendation}*`, `\n建议：*${meta.recommendation}*`) : "",
   ].filter(Boolean).join("\n");
   const ids = await notify(text, cfg, { kind: menu ? "menu" : "decision", ref: id, options: opts,
     attachments: (meta.attachments ?? "").split(" | ").filter(Boolean), from: `${agentName(meta.agent)}@${meta.host}` });

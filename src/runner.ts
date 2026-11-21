@@ -1,12 +1,15 @@
 // Builds the prompt for an agent, runs Claude Code / Codex headless, parses the structured result.
-import { existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { codexMessage } from "./codex-output";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  type Cfg, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, recentJournal, signature,
+  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, readTail, recentJournal, signature,
 } from "./core";
 import { claudeDisallowed } from "./gates";
+import { channelPrompt } from "./channels";
+import { claudeMcpConfig, codexMcpLaunch, mcpServers, usableMcp, withOAuth } from "../app/mcp-servers";
+import { sharedSecrets } from "./secrets";
 
 export type Result = {
   status: "done" | "needs_decision" | "failed" | "delegated" | "waiting";
@@ -20,10 +23,40 @@ export type Result = {
   recommendation?: string;
   lessons?: string[];
   attachments?: string[];
+  channels?: unknown[];
   followups?: { title: string; body?: string; agent?: string; priority?: string; repo?: string; requires?: string; host?: string }[];
 };
 
-const RESULT_SPEC = `Finish the work, then end your final reply with EXACTLY one fenced \`\`\`json block:
+export type RunLimits = {
+  totalMinutes: number;
+  workMinutes: number;
+  checkpointMinutes: number;
+  checkpointAt: string;
+  hardAt: string;
+};
+
+export function runLimits(cfg: Cfg, started = Date.now()): RunLimits {
+  const totalMinutes = Math.max(1, Number(cfg.clis?.timeout_minutes) || 60);
+  const configured = Number(cfg.clis?.checkpoint_minutes);
+  const requested = Number.isFinite(configured) ? Math.max(0, configured) : (totalMinutes >= 30 ? 10 : 0);
+  const checkpointMinutes = Math.min(Math.max(0, totalMinutes - 5), requested);
+  const workMinutes = totalMinutes - checkpointMinutes;
+  return {
+    totalMinutes, workMinutes, checkpointMinutes,
+    checkpointAt: new Date(started + workMinutes * 60_000).toISOString(),
+    hardAt: new Date(started + totalMinutes * 60_000).toISOString(),
+  };
+}
+
+export function deadlinePrompt(limits: RunLimits): string {
+  const reserve = limits.checkpointMinutes
+    ? `The final ${limits.checkpointMinutes} minutes are reserved for emergency checkpoint recovery; the process is stopped at ${limits.hardAt}.`
+    : `The process is stopped at ${limits.hardAt}.`;
+  return `The task has a ${limits.totalMinutes}-minute hard limit. Finish normally or return a structured result before ${limits.checkpointAt}.
+If work may outlive that checkpoint deadline, save durable progress first, then return \`waiting\` with a quick read-only \`wait_check\` whose exit code changes when the wait is over. ${reserve}`;
+}
+
+const RESULT_SPEC = () => `Finish the work, then end your final reply with EXACTLY one fenced \`\`\`json block:
 {
   "status": "done" | "needs_decision" | "failed" | "delegated" | "waiting",   // delegated = you split the work into followups and want to be woken up to consolidate when they finish; waiting = see below
   "waiting_on": "waiting only: what you wait for and how to check it, e.g. CI run https://github.com/o/r/actions/runs/123 (gh run view 123)",
@@ -31,20 +64,21 @@ const RESULT_SPEC = `Finish the work, then end your final reply with EXACTLY one
   "wait_minutes": 15,   // waiting only: latest time to wake you to check again (5-120)
   "wait_check": "waiting only: a quick read-only shell command whose exit code changes when the wait is over, e.g. gh pr checks 123 -R o/r (exits 8 while pending); the daemon runs it every few minutes and wakes you as soon as it changes",
   "summary": "1-3 sentences: what you did / found (links to PRs, commits, files). For needs_decision this is all the owner reads before choosing: say what the PR / change does and what is at stake, the facts they need to choose (not why it needs them, they know)",
-  "question": "needs_decision only: one short sentence (under 30 characters) naming what to decide, e.g. 现在合并 gpui-fast #97 吗？; name PRs/issues with their full URL in summary and options",
+  "question": "needs_decision only: one short sentence (under 30 characters) naming what to decide, e.g. Merge gpui-fast #97 now?; name PRs/issues with their full URL in summary and options",
   "options": ["A: <recommended> — consequence", "B: ... — consequence"],
   "recommendation": "A",
   "lessons": ["durable lesson for your own memory (optional)"],
-  "attachments": ["/abs/path/screenshot.png", "/abs/path/recording.mp4"],   // optional: shown to the owner with the message
+  "attachments": ["/abs/path/screenshot.png", "/abs/path/recording.mp4", "/abs/path/report.md"],   // optional: shown to the owner with the message; a long report goes as a .md file the owner opens in the chat, never as "see file"
+  "channels": ["existing-slug", {"name": "New topic", "goal": "what it is for"}],   // see # Channels; [] when none fits
   "followups": [{"title": "...", "body": "...", "agent": "<agent id>", "priority": "normal", "difficulty": "hard if it needs deep engineering/design work", "requires": "os:macos when it needs macOS/iOS/Xcode (os:windows for Windows); omit otherwise"}]
 }
-Write summary, question and options in the owner's language (Simplified Chinese unless the owner writes otherwise), plain text, no emoji; keep identifiers, links and code as they are.
+Write summary, question and options in the owner's language (${L("English", "Simplified Chinese")} unless the owner writes otherwise), plain text, no emoji; keep identifiers, links and code as they are.
 Only use needs_decision after doing all preparation that does not depend on the answer.
-Never sit idle waiting on something slow (GitHub Actions/CI, a release, a review, a deploy): if the next step needs it, return "waiting" with waiting_on, wait_minutes and wait_check.
+Never sit idle waiting on something slow (GitHub Actions/CI, a release, a review, a deploy): if the next step needs it, return "waiting" with waiting_on, wait_minutes and wait_check. If the PR's workflow runs are held for "Approve and run" (gh run list shows status waiting / action_required, gh pr checks shows nothing), CI will never start by itself: return wait_kind "human" and say in waiting_on that the owner must approve the run, with the PR link.
 Before returning "waiting", do every part of the task that does not depend on the condition (other platforms, docs, tests, screenshots, the next PR): implement and let CI verify rather than wait for a host. Waiting on another PR to merge is not a reason to stop: build on its branch or merge it locally, and note the dependency.
 The machine then runs other work and wakes you later with your notes; check the condition first, then continue from where you left off.`;
 
-export function buildPrompt(meta: Record<string, string>, body: string, cfg: Cfg, resourceNote = ""): string {
+export function buildPrompt(meta: Record<string, string>, body: string, cfg: Cfg, resourceNote = "", limits = runLimits(cfg)): string {
   const agent = meta.agent || "lead";
   const host = meta.claimed_by || "?";
   return `You are **${agentName(agent)}**, a permanent member of ${cfg.owner?.name ?? "the owner"}'s AI agent fleet, running headless on host \`${host}\`.
@@ -52,10 +86,10 @@ The fleet coordinates through the shared hub folder at ${ROOT} (tasks/, journal/
 The hub folder is not a git repository: files you write there (reports/, memory) are synced to the cloud by the daemon after your run. Never git add/commit them, and never report a task as failed because the hub has no git metadata.
 
 # Your profile
-${readIf(P("agents", agent, "profile.md"))}
+${readTail(P("agents", agent, "profile.md"))}
 
 # Your memory
-${readIf(P("agents", agent, "memory.md"), 8000) || "(empty)"}
+${readTail(P("agents", agent, "memory.md"), 8000) || "(empty)"}
 
 # Fleet-wide policy
 ${readAll(P("policies"))}
@@ -81,13 +115,18 @@ Outside the hub you are Noop: never use your agent name (${agentName(agent)}) or
 # Resource budget
 ${resourceNote}
 
+# Run deadline
+${deadlinePrompt(limits)}
+
+${channelPrompt()}
+
 # Task ${meta.id}: ${meta.title}
 Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.agent-hub/work — never inside the hub folder ${ROOT}, which syncs to the cloud   Host capabilities: ${meta.host_caps ?? ""}
 Priority: ${meta.priority}   Source: ${meta.source}
 
 ${body}
 
-${RESULT_SPEC}`;
+${RESULT_SPEC()}`;
 }
 
 function rosterLine(): string {
@@ -99,14 +138,24 @@ function rosterLine(): string {
     }).join("\n");
 }
 
-/** workspace-write only covers the cwd and /tmp; agents also need project checkouts, scratch, the hub and cargo's caches. */
-export function codexWritableDirs(home = homedir()): string[] {
-  const dirs = [join(home, "work"), join(home, ".noop", "work"), join(home, ".agent-hub", "work"), ROOT, join(home, ".cargo")];
+/** workspace-write only covers the cwd and /tmp; agents also need project checkouts, scratch, the hub, its feed
+ *  (where `noop notify` appends) and cargo's caches.
+ *  `workDirs` is the owner's `[resources].work_dirs`: wherever they keep their repos, not only the default `~/work`. */
+export function codexWritableDirs(home = homedir(), workDirs: string[] = [], root = ROOT): string[] {
+  const configured = workDirs.map((d) => d.replace(/^~/, home));
+  const dirs = [join(home, "work"), join(home, ".noop", "work"), join(home, ".agent-hub", "work"), root, join(root, "..", "feed"), join(home, ".cargo"), ...configured];
   const real = dirs.filter((d) => existsSync(d)).map((d) => realpathSync(d));
   return [...new Set(real)];
 }
 
-export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[] {
+/** The owner's shared MCP servers (Settings → MCP) this machine can run: enabled, with every variable they name set
+ *  (by the team's shared keys or this machine's environment). */
+export function sharedMcp(cfg: Cfg, env: Record<string, string | undefined> = process.env) {
+  return usableMcp(withOAuth(mcpServers((cfg as { mcp_servers?: unknown }).mcp_servers), env), env).use;
+}
+
+/** `mcpArgs`: the MCP flags of this run (see `mcpLaunch`); none when left out (status views, model lookups). */
+export function cliCommand(cli: string, cfg: Cfg, gateOverride = false, mcpArgs: string[] = []): string[] {
   const c = cfg.clis?.[cli] ?? {};
   if (Array.isArray(c.command)) return c.command;
   if (cli === "claude") {
@@ -116,17 +165,28 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false): string[
     cmd.push("--settings", JSON.stringify({ attribution: { commit: "", pr: "" }, includeCoAuthoredBy: false }));
     const deny = claudeDisallowed(cfg, gateOverride);
     if (deny.length) cmd.push("--disallowedTools", ...deny);
+    cmd.push(...mcpArgs);
     return cmd;
   }
   if (cli === "codex") {
     // non-interactive: workspace-write sandbox with network, never ask for approval
     const cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write",
       "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true"];
-    for (const dir of codexWritableDirs()) cmd.push("--add-dir", dir);
+    for (const dir of codexWritableDirs(homedir(), cfg.resources?.work_dirs)) cmd.push("--add-dir", dir);
     if (c.model) cmd.push("-m", c.model);
+    cmd.push(...mcpArgs);
     return [...cmd, "-"];
   }
   throw new Error(`unknown cli ${cli}`);
+}
+
+/** The model a CLI is started with: an explicit `--model`/`-m`, else Codex's own config default. */
+export function startModel(cli: string, cmd: string[], codexHome?: string): string | undefined {
+  codexHome ??= process.env.CODEX_HOME ?? join(homedir(), ".codex");
+  const i = cmd.findIndex((c) => c === "--model" || c === "-m");
+  if (i >= 0 && cmd[i + 1]) return cmd[i + 1];
+  if (cli === "codex") return readIf(join(codexHome, "config.toml"), 100000).match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1];
+  return undefined;
 }
 
 /** Running agent processes by task id (so the owner can cancel one). */
@@ -139,20 +199,66 @@ function toolStep(name: string, input: any): string {
   return `${name}${v ? ` · ${String(v).split("\n")[0].slice(0, 120)}` : ""}`;
 }
 
-/** Marker runAgent appends when it stopped a run that went quiet (see stall_minutes). */
-export const STALLED = "\n[stalled]";
+/** One stream-json line as it goes into the run log: base64 images (a Read of a screenshot carries each one twice,
+ * in `source.data` and `tool_use_result.file.base64`) become a short placeholder. Any other line is returned as is. */
+export function stripImages(line: string): string {
+  if (!line.includes('"base64"')) return line;
+  let e: any;
+  try { e = JSON.parse(line); } catch { return line; }
+  let hit = false;
+  const note = (b64: string, type: unknown) => { hit = true; return `[${type ?? "image"}, ${Math.floor(b64.length * 3 / 4)} bytes omitted]`; };
+  const walk = (o: any) => {
+    if (!o || typeof o !== "object") return;
+    if (o.type === "base64" && typeof o.data === "string") o.data = note(o.data, o.media_type);
+    if (typeof o.base64 === "string") o.base64 = note(o.base64, o.type);
+    for (const v of Object.values(o)) walk(v);
+  };
+  walk(e);
+  return hit ? JSON.stringify(e) : line;
+}
 
+/** A run that died before reaching the provider — no tokens spent, no tool ran, so it is safe to spawn again. */
+const UNREACHABLE = /Can't reach the API server|connection_failed|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo/i;
+
+/** Marker for a quiet process that should use the bounded stall-retry path. */
+export const STALLED = "\n[stalled]";
+/** Marker for a process stopped at its work deadline so the caller can run checkpoint recovery. */
+export const RUN_LIMIT = "\n[run-limit]";
+
+/** The MCP flags and environment of one run. Keys (shared ones from the team, or this machine's own variables) never
+ *  go on the command line: Claude reads a private 0600 file that is removed when the run ends, Codex gets them in its
+ *  environment through its env indirections. */
+export async function mcpLaunch(cli: string, cfg: Cfg, secrets?: Record<string, string>): Promise<{ args: string[]; env: Record<string, string>; file?: string }> {
+  if (Array.isArray(cfg.clis?.[cli]?.command)) return { args: [], env: {} };
+  const env = { ...process.env, ...(secrets ?? await sharedSecrets(cfg)) };
+  const list = sharedMcp(cfg, env);
+  if (!list.length) return { args: [], env: {} };
+  if (cli === "codex") return codexMcpLaunch(list, env);
+  const dir = join(HOME_DIR, "run");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // a file left by a daemon that died mid-run: older than any run can last
+  for (const f of readdirSync(dir)) try { const p = join(dir, f); if (Date.now() - statSync(p).mtimeMs > 86_400_000) rmSync(p, { force: true }); } catch {}
+  const file = join(dir, `mcp-${crypto.randomUUID()}.json`);
+  writeFileSync(file, claudeMcpConfig(list, env), { mode: 0o600 });
+  return { args: ["--mcp-config", file], env: {}, file };
+}
+
+/** `retryEmpty` is internal: an empty completion gets exactly one rerun (see the end of the function). */
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
-  extraEnv: Record<string, string> = {}): Promise<string> {
-  const cmd = cliCommand(cli, cfg, gateOverride);
+  extraEnv: Record<string, string> = {}, retryEmpty = true): Promise<string> {
+  const mcp = await mcpLaunch(cli, cfg).catch(() => ({ args: [] as string[], env: {} as Record<string, string>, file: undefined }));
+  const cmd = cliCommand(cli, cfg, gateOverride, mcp.args);
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
   const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
+  // before the spawn: a throw after it would leave the agent running with no timeout, stall watch or drained pipes
+  mkdirSync(P("logs", "runs"), { recursive: true });
   const proc = Bun.spawn(cmd, {
     cwd: existsSync(dir) ? dir : ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     // Claude -p stops background subagents 10 min after the last turn; our own run limit bounds the run instead
-    env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ...extraEnv, HUB_DATA: ROOT },
+    env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ...mcp.env, ...extraEnv, HUB_DATA: ROOT },
   });
+  if (mcp.file) void proc.exited.finally(() => { try { rmSync(mcp.file!, { force: true }); } catch {} });
   const tid = logFile.split("/").pop()!.match(/^([A-Z]-[\w]*?\d{4})-\d{10,}/)?.[1];
   if (tid) agentProcs.set(tid, proc);
   void proc.exited.then(() => { if (tid && agentProcs.get(tid) === proc) agentProcs.delete(tid); });
@@ -160,12 +266,12 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   // what the agent is doing: every chunk of output is a sign of life; Claude's stream also names each step
   const codexJson = cli === "codex" && cmd.includes("--json");
   const json = cmd.includes("stream-json") || codexJson;
-  const act = { at: Date.now(), step: undefined as string | undefined, steps: 0 };
+  const act = { at: Date.now(), step: undefined as string | undefined, steps: 0, model: startModel(cli, cmd, extraEnv.CODEX_HOME) };
   const inFlight = new Map<string, string>(); // tool_use id → tool name, until its result comes back
   let resultText: string | undefined, assistantText = "";
   const touch = () => {
     act.at = Date.now();
-    if (tid) agentActivity.set(tid, { at: new Date(act.at).toISOString(), step: act.step, steps: act.steps });
+    if (tid) agentActivity.set(tid, { at: new Date(act.at).toISOString(), step: act.step, steps: act.steps, model: act.model });
   };
   touch();
   const onLine = (line: string) => {
@@ -176,7 +282,9 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
       if (text !== undefined) assistantText += text + "\n\n";
       return;
     }
+    if (e.type === "system" && e.subtype === "init" && e.model) act.model = String(e.model);
     if (e.type === "assistant") {
+      if (e.message?.model && !e.parent_tool_use_id) act.model = String(e.message.model);
       for (const c of e.message?.content ?? []) {
         if (c.type === "tool_use") { inFlight.set(c.id, c.name); act.step = toolStep(c.name, c.input); act.steps++; }
         else if (c.type === "text" && !e.parent_tool_use_id) assistantText += c.text;
@@ -190,7 +298,13 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
       resultText = resultText === undefined ? text : `${resultText}\n\n${text}`;
     }
   };
-  const read = async (stream: ReadableStream<Uint8Array>, lines: boolean) => {
+  // the log exists from the start and grows with stdout, so a long or killed run still leaves its transcript;
+  // a failed write only loses that early copy, the full log is written again at exit
+  const logPart = (s: string, append = true) => {
+    try { (append ? appendFileSync : writeFileSync)(logFile, s); } catch {}
+  };
+  logPart(`$ ${cmd.join(" ")}\n\n`, false);
+  const read = async (stream: ReadableStream<Uint8Array>, lines: boolean, log = false) => {
     const dec = new TextDecoder();
     let all = "", buf = "";
     for await (const chunk of stream) {
@@ -201,7 +315,8 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
         const parts = buf.split("\n");
         buf = parts.pop()!;
         parts.forEach(onLine);
-      }
+        if (log && parts.length) logPart(parts.map(stripImages).join("\n") + "\n");
+      } else if (log) logPart(t);
       touch();
     }
     if (lines && buf) onLine(buf);
@@ -209,35 +324,101 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   };
 
   let stalled = false, timedOut = false;
-  // hitting the run limit is not a tooling fault: report it like a stall so the task continues where it got to
+  // A work deadline is a checkpoint signal, not a quiet-process stall: the caller gets the reserved recovery window.
   const timer = setTimeout(() => { timedOut = true; proc.kill(); }, timeoutMs);
   // a run that has gone quiet: no output at all, and nothing slow in flight (a sub-agent may work quietly for long)
   const watch = setInterval(() => {
     const slow = [...inFlight.values()].some((n) => /^(Task|Agent)$/.test(n));
     if (!slow && Date.now() - act.at > stallMs) { stalled = true; proc.kill(); }
   }, 30_000);
-  const [raw, err] = await Promise.all([read(proc.stdout, json), read(proc.stderr, false)]);
+  const [raw, err] = await Promise.all([read(proc.stdout, json, true), read(proc.stderr, false)]);
   const code = await proc.exited;
   clearTimeout(timer);
   clearInterval(watch);
   if (tid) agentActivity.delete(tid);
-  mkdirSync(P("logs", "runs"), { recursive: true });
-  writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${raw}\n\n[stderr]\n${err}`);
+  const logged = json ? raw.split("\n").map(stripImages).join("\n") : raw;
+  writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${logged}\n\n[stderr]\n${err}`);
   const out = json ? (resultText ?? assistantText) : raw;
-  if (timedOut) return `${out}${STALLED} hit the ${Math.round(timeoutMs / 60_000)}-minute run limit (clis.timeout_minutes)${act.step ? `; last step: ${act.step}` : ""}; run long builds in the background and return "waiting"`;
+  if (timedOut) return `${out}${RUN_LIMIT} hit the ${Math.round(timeoutMs / 60_000)}-minute work limit${act.step ? `; last step: ${act.step}` : ""}`;
   if (stalled) return `${out}${STALLED} no output for ${Math.round(stallMs / 60_000)} minutes${act.step ? `; last step: ${act.step}` : ""}`;
+  // A provider occasionally answers with an empty completion (no text, no tool call, exit 0) and Claude Code's own
+  // "no visible output" retry gets nothing either. That is a flake of the tool chain, not the task failing: rerun the
+  // same prompt once, and never hand the empty run back to the caller as the task's result.
+  // Do not retry when the run already used a tool or printed visible assistant text: an empty final result can still
+  // sit on top of side effects (a posted comment, a commit), and replaying the prompt would repeat them. `out` is only
+  // the final/assistant text, so also require act.steps === 0 and no accumulated assistantText.
+  // The same holds for a run that never reached the provider: a DNS or connection failure kills every task running at
+  // that moment, and the CLI exits non-zero having burnt no tokens and touched nothing, so replaying is free of side
+  // effects. The second spawn re-resolves DNS and walks the CLI's own connect retries again.
+  const nothingRan = !act.steps && !assistantText.trim();
+  const unreachable = nothingRan && !!code && UNREACHABLE.test(`${out}\n${err}`);
+  if (retryEmpty && nothingRan && (unreachable || (!out.trim() && !code))) {
+    const first = readFileSync(logFile, "utf8");
+    const again = await runAgent(cli, prompt, cwd, cfg, logFile, gateOverride, extraEnv, false);
+    const why = unreachable ? "an unreachable API" : "an empty response";
+    writeFileSync(logFile, `${first}\n\n[retried after ${why}]\n${readFileSync(logFile, "utf8")}`); // keep both attempts
+    return again;
+  }
   return out + (code ? `\n[exit ${code}] ${err.slice(-2000)}` : "");
 }
 
 export function parseResult(out: string): Result {
   const blocks = [...out.matchAll(/```json\s*(\{[\s\S]*?\})\s*```/g)].map((m) => m[1]).reverse();
   for (const b of blocks) {
-    try {
-      const r = JSON.parse(b);
-      if (r.status) return r;
-    } catch {}
+    for (const text of [b, repairJson(b)]) {
+      const r = parsed(text);
+      if (r) return r;
+    }
+  }
+  // codex (and others) sometimes end the reply with a bare JSON object instead of a fenced block
+  const bare = out.match(/\{[\s\S]*\}/);
+  if (bare) {
+    const r = parsed(bare[0]) ?? parsed(repairJson(bare[0]));
+    if (r) return r;
   }
   return { status: "failed", summary: `agent returned no result block. tail: ${out.slice(-300)}` };
+}
+
+function parsed(text: string): Result | null {
+  try {
+    const r = JSON.parse(text);
+    if (!r?.status) return null;
+    // a model may omit the summary (e.g. a menu run that only dispatches followups); never show "undefined" to the owner
+    if (typeof r.summary !== "string" || !r.summary.trim()) {
+      const titles = Array.isArray(r.followups) ? r.followups.map((f: { title?: string }) => f?.title).filter(Boolean) : [];
+      r.summary = titles.length ? `Dispatched ${titles.length}: ${titles.join("; ")}` : `(${r.status}, no summary)`;
+    }
+    return r;
+  } catch { return null; }
+}
+
+/** Models occasionally put a literal line break, a bare `"` or a lone backslash inside a JSON string. Keep the text, make the block parseable.
+ * A `"` inside a string is a stray quote unless the next non-space character can follow a value (`:`, `,`, `}`, `]`, end). */
+function repairJson(json: string): string {
+  let out = "", inString = false, escaped = false;
+  for (let i = 0; i < json.length; i++) {
+    const c = json[i];
+    if (escaped) { out += c; escaped = false; continue; }
+    if (c === "\\") {
+      // a lone backslash, e.g. a Windows path like `D:\`, is not a JSON escape: keep it as a literal backslash
+      if (inString && !/["\\/bfnrtu]/.test(json[i + 1] ?? "")) { out += "\\\\"; continue; }
+      out += c; escaped = true; continue;
+    }
+    if (c === '"') {
+      if (!inString) { inString = true; out += c; continue; }
+      let j = i + 1;
+      while (j < json.length && /\s/.test(json[j])) j++;
+      const next = json[j] ?? "";
+      if (next === "" || next === "," || next === ":" || next === "}" || next === "]") { inString = false; out += c; }
+      else out += '\\"';
+      continue;
+    }
+    if (inString && c === "\n") out += "\\n";
+    else if (inString && c === "\r") out += "\\r";
+    else if (inString && c === "\t") out += "\\t";
+    else out += c;
+  }
+  return out;
 }
 
 /** The models that route each owner message, fastest first: a choice made within seconds, not a judgement.

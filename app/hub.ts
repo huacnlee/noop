@@ -1,10 +1,12 @@
 // noop: the server's shapes and the pure logic of the timeline (no UI, no I/O), shared by App.tsx and the tests.
 import { L } from "./i18n";
+import { isWaiting } from "./badge";
 
 export type Kind = "notice" | "decision" | "menu" | "proposals" | "login" | "owner" | "system";
 
 export type HubEvent = {
   id: string;
+  client_id?: string;
   ts: string;
   from: string;
   kind: Kind;
@@ -13,6 +15,8 @@ export type HubEvent = {
   priority?: string;
   /** Said inside a task's own conversation: on the task page, not in the main channel. */
   thread?: boolean;
+  /** Said in a channel (its slug): shown there only, never in the main chat. */
+  channel?: string;
   options?: string[];
   attachments?: string[];
 };
@@ -26,7 +30,7 @@ export type HostInfo = {
   os?: string;
   arch?: string;
   clis?: string[];
-  accounts?: { cli: string; name: string; state: "ok" | "cooldown" | "login"; until?: string }[];
+  accounts?: { cli: string; name: string; state: "ok" | "cooldown" | "login"; until?: string; model?: string }[];
   running?: { id: string; title: string; agent: string; started?: string; activity?: Activity }[];
   recent?: { id: string; title: string; state?: string; finished?: string }[];
   /** The code the machine runs: its git commit, and that commit on GitHub. */
@@ -37,7 +41,7 @@ export type HostInfo = {
 };
 
 /** A running agent's latest sign of life, and (Claude) the step it took. */
-export type Activity = { at: string; step?: string; steps?: number };
+export type Activity = { at: string; step?: string; steps?: number; model?: string };
 
 /** "最近：Bash · gh pr checks 814 · 2 分钟前"; quiet for 10+ minutes reads as such (the fleet stops it at 20 and runs it again). */
 export function activityLine(a: Activity | undefined, now = Date.now()): { text: string; quiet: boolean } | null {
@@ -60,7 +64,24 @@ export type TaskInfo = {
   steps?: { day?: string; time?: string; host?: string; kind?: string; text: string }[];
 };
 
+/** A task is one chronological conversation, including results missing from the live feed. */
+export function taskConversation(task: TaskInfo, events: HubEvent[]): HubEvent[] {
+  const all = [...events];
+  const same = (text: string) => all.some((e) => e.text.trim() === text.trim());
+  if (task.request && !same(task.request)) all.push({
+    id: `request:${task.id}`, ts: task.created ?? task.started ?? events[0]?.ts ?? "1970-01-01T00:00:00Z",
+    from: "owner", kind: "owner", ref: task.id, text: task.request,
+  });
+  for (const [i, run] of (task.runs ?? []).entries()) {
+    if (!run.summary || same(run.summary)) continue;
+    all.push({ id: `run:${task.id}:${i}:${run.ts}`, ts: run.ts, from: `${task.agent}@${run.host}`,
+      kind: "notice", ref: task.id, text: run.summary });
+  }
+  return all.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+}
+
 export type Status = {
+  channels_revision?: string;
   tasks: Record<"proposed" | "inbox" | "active" | "blocked" | "failed" | "done", number>;
   active: TaskInfo[];
   recent?: TaskInfo[];
@@ -90,9 +111,9 @@ export function choicesOf(e: HubEvent): string[] {
   return [...new Set(o.map((x) => (x.match(/^\s*([A-Z])\s*[:：.]/) ?? [])[1]).filter((x): x is string => !!x))];
 }
 
-/** The option the team recommends ("建议：B" in the text), if any. */
+/** The option the team recommends ("Recommended: B" or "建议：B" in the text), if any. */
 export function recommended(e: HubEvent): string | null {
-  const m = (e.text ?? "").match(/建议：\*?([^*\s　]+)/);
+  const m = (e.text ?? "").match(/(?:建议：|Recommended: )\*?([^*\s　]+)/);
   return m ? m[1].split(/[,，]/)[0] : null;
 }
 
@@ -138,6 +159,44 @@ export function dayLabel(key: string, now = new Date()): string {
   return yy === now.getFullYear() ? L(`${mon} ${dd}`, `${mm} 月 ${dd} 日`) : L(`${mon} ${dd}, ${yy}`, `${yy} 年 ${mm} 月 ${dd} 日`);
 }
 
+/** Days as whole numbers, so the gap between two day keys is a subtraction. */
+const dayNumber = (key: string) => { const [y, m, d] = key.split("-").map(Number); return Date.UTC(y, m - 1, d) / 86400000; };
+
+/** A run of days in a newest-first list: `newest` and `oldest` are day keys, equal for a single day. */
+export type DayGroup<T> = { key: string; newest: string; oldest: string; items: T[] };
+
+/**
+ * Groups a newest-first list by day. A day with fewer than `min` items joins the
+ * nearer of its neighbouring groups (by days apart; the newer one on a tie), so the
+ * list isn't cut into many tiny sections.
+ */
+export function groupByDay<T>(items: T[], dateOf: (t: T) => string, min = 3): DayGroup<T>[] {
+  const groups: DayGroup<T>[] = [];
+  for (const t of items) {
+    const d = dateOf(t) ? dayKey(dateOf(t)) : "";
+    const last = groups[groups.length - 1];
+    if (last && last.oldest === d) last.items.push(t);
+    else groups.push({ key: d, newest: d, oldest: d, items: [t] });
+  }
+  for (;;) {
+    const i = groups.findIndex((g) => g.items.length < min);
+    if (i < 0 || groups.length < 2) break;
+    const gap = (a: string, b: string) => (a && b ? Math.abs(dayNumber(a) - dayNumber(b)) : Infinity);
+    const before = i > 0 ? gap(groups[i - 1].oldest, groups[i].newest) : Infinity;
+    const after = i < groups.length - 1 ? gap(groups[i].oldest, groups[i + 1].newest) : Infinity;
+    const j = before <= after ? i - 1 : i; // merge groups[j] and groups[j + 1]
+    const a = groups[j], b = groups[j + 1];
+    groups.splice(j, 2, { key: `${a.newest}~${b.oldest}`, newest: a.newest, oldest: b.oldest, items: [...a.items, ...b.items] });
+  }
+  return groups;
+}
+
+/** The heading of a day group: one day, or a range like "Nov 8 – Nov 6". */
+export function dayRangeLabel(newest: string, oldest: string, now = new Date()): string {
+  if (!newest) return L("Unknown date", "未知日期");
+  return newest === oldest || !oldest ? dayLabel(newest, now) : `${dayLabel(newest, now)} – ${dayLabel(oldest, now)}`;
+}
+
 /** The timeline's rows: the events with a separator before each new day. */
 export type Row = { key: string; day: string } | { key: string; event: HubEvent };
 export function rows(events: HubEvent[]): Row[] {
@@ -164,7 +223,7 @@ export function merge(events: HubEvent[], incoming: HubEvent[]): HubEvent[] {
 }
 
 /** Decisions waiting for the owner (held decisions and proposals). */
-export const waiting = (s: Status | null) => (s?.decisions ?? []).filter((d) => d.held || d.kind === "proposals");
+export const waiting = (s: Status | null) => (s?.decisions ?? []).filter(isWaiting);
 
 export const osOf = (h: HostInfo) => (h.caps.find((c) => c.startsWith("os:")) ?? "").slice(3);
 export const loadOf = (h: HostInfo) => Math.max(0, Math.min(100, Math.round((h.stats?.loadRatio ?? 0) * 100)));

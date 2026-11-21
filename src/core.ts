@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFile
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import * as sync from "./sync";
+import { recoverMemory, snapshotMemory } from "./integrity";
 import { BUILTIN_ROUTINES } from "./builtin-routines";
 
 /** Framework code (this repo, self-updating). */
@@ -31,6 +32,10 @@ function merge(a: any, b: any): any {
     out[k] = v && typeof v === "object" && !Array.isArray(v) && typeof out[k] === "object" ? merge(out[k], v) : v;
   return out;
 }
+
+/** Owner-facing text in the fleet's language: `[owner] language = "en"` in config.toml gives English, otherwise Simplified Chinese. */
+export const isEnglish = (): boolean => /^en/i.test(String(loadConfig().owner?.language ?? ""));
+export const L = (en: string, zh: string): string => (isEnglish() ? en : zh);
 
 export function loadConfig(): Cfg {
   const read = (f: string) => (existsSync(P(f)) ? Bun.TOML.parse(readFileSync(P(f), "utf8")) : {});
@@ -109,11 +114,16 @@ export function readDoc(path: string): Doc {
   return { meta, body: m[2] };
 }
 
+/** Model output is untrusted: a field the spec says is a string can arrive as a number, object or nothing at all.
+ *  Coerce at the door so one malformed field cannot abort a whole run (it used to take the daemon down). */
+export const asText = (v: unknown): string =>
+  typeof v === "string" ? v : v === undefined || v === null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+
 export function writeDoc(path: string, meta: Record<string, string | undefined>, body: string) {
   mkdirSync(dirname(path), { recursive: true });
   const head = Object.entries(meta).filter(([, v]) => v !== undefined)
     .map(([k, v]) => `${k}: ${String(v).replace(/\n/g, " ")}`).join("\n");
-  writeFileSync(path, `---\n${head}\n---\n${body.trimEnd()}\n`);
+  writeFileSync(path, `---\n${head}\n---\n${asText(body).trimEnd()}\n`);
 }
 
 export const list = (dir: string, re = /\.md$/) =>
@@ -153,6 +163,12 @@ export function nextId(prefix: string, dir: string): string {
 export function isPrimary(cfg: Cfg, host = hostName(cfg)): boolean {
   if (cfg.fleet?.primary) return cfg.fleet.primary === host;
   return !list(P("fleet", "hosts"), /\.json$/).some((p) => basename(p, ".json") !== host);
+}
+
+/** Automatic cloud deployment can run on a credentialed host without moving fleet coordination. */
+export function isCloudDeployHost(cfg: Cfg, host = hostName(cfg)): boolean {
+  const deployHost = String(cfg.cloud?.deploy_host ?? "").trim();
+  return deployHost ? deployHost === host : isPrimary(cfg, host);
 }
 
 /** Id tag for a host: "" on the primary, else [host].id_tag or the host name's first letter, upper-cased. */
@@ -199,14 +215,23 @@ export function matches(meta: Record<string, string>, caps: string[]): boolean {
 export let approvalGate: (source: string) => boolean = () => false;
 export const setApprovalGate = (fn: (source: string) => boolean) => { approvalGate = fn; };
 
+/** Like asText, for the option fields of a task made from model output: absent stays absent, and a list (an agent
+ *  told "leave requires empty" sent `[]`) joins into the comma-separated form the card stores. */
+const optText = (v: unknown): string | undefined =>
+  v === undefined || v === null ? undefined : Array.isArray(v) ? v.map(asText).join(",") : asText(v);
+
 export function newTask(title: string, body = "", o: TaskOpts = {}): string {
+  title = asText(title);
+  body = asText(body);
+  // followups are model-written JSON, so any of these can arrive as a list or a number instead of a string
+  const requires = optText(o.requires), repo = optText(o.repo);
   const id = nextId("T", P("tasks"));
   // work the owner asked for (directly or via a delegated parent) never needs re-approval
   const folder = o.extra?.origin !== "owner" && approvalGate(o.source ?? "owner") ? "proposed" : "inbox";
   writeDoc(P("tasks", folder, `${id}.md`), {
-    id, title, agent: o.agent ?? "lead", cli: o.cli ?? "auto", host: o.host ?? "any",
+    id, title, agent: optText(o.agent) ?? "lead", cli: o.cli ?? "auto", host: optText(o.host) ?? "any",
     // stored at creation so hosts without the repo checked out still know what it needs
-    requires: [...new Set([...(o.requires ?? "").split(","), ...repoRequires(o.repo)].map((x) => x.trim()).filter(Boolean))].join(","), prefer: o.prefer ?? "", weight: o.weight ?? "normal", repo: o.repo ?? "", priority: o.priority ?? "normal", source: o.source ?? "owner",
+    requires: [...new Set([...(requires ?? "").split(","), ...repoRequires(repo)].map((x) => x.trim()).filter(Boolean))].join(","), prefer: o.prefer ?? "", weight: o.weight ?? "normal", repo: repo ?? "", priority: optText(o.priority) ?? "normal", source: o.source ?? "owner",
     created: now(), ...(o.extra ?? {}),
   }, body || title);
   return id;
@@ -214,13 +239,36 @@ export function newTask(title: string, body = "", o: TaskOpts = {}): string {
 
 export const which = (bin: string) => Bun.which(bin) !== null;
 
-/** Which CLI runs a task: the owner's per-agent config wins, else what the planner (an AI call, see planInbox) chose.
- *  Unplanned tasks may use either, Claude first. */
+/** Which CLI runs a task, strongest first:
+ *  1. a CLI pinned on the task itself (`noop add --cli …`, a routine's `cli`): the owner naming one for this task;
+ *  2. the owner's per-member config (Settings → Members → `clis.agents`): policy for that agent, not a suggestion;
+ *  3. `cli_hint`, what the planner (an AI call, see planInbox) suggested for this task — a hint, so it may not
+ *     override policy. It used to be written into `cli`, which made every planned task look owner-pinned;
+ *  4. otherwise either CLI, Claude first.
+ *  The per-member config is checked before the hint on purpose: an owner who sets a member to codex-only in the app
+ *  must not have that silently undone by the planner picking Claude for a task it calls "hard". */
 export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
   if (meta.cli && meta.cli !== "auto") return [meta.cli];
-  const per = cfg.clis?.agents?.[meta.agent || "lead"] as string[] | undefined;
-  if (per) return per;
+  const per = cfg.clis?.agents?.[meta.agent || "lead"];
+  if (Array.isArray(per) && per.length) return per;
+  if (meta.cli_hint === "claude" || meta.cli_hint === "codex") return [meta.cli_hint];
   return ["claude", "codex"];
+}
+
+/** What the planner may write back about the CLI: only a `cli_hint`, and only when the task is not pinned and its
+ *  agent has no per-member policy — either of those would overrule the suggestion anyway.
+ *  `available` is the set of CLIs installed on some online host (see fleetClis): a hint naming a CLI no machine has
+ *  would narrow allowedClis to a CLI nobody can run, and the task would sit in the inbox forever. */
+export function cliHintPatch(meta: Record<string, string>, per: unknown, suggestion: unknown, available: string[]): Record<string, string> {
+  const pinned = meta.cli && meta.cli !== "auto";
+  const hint = suggestion === "claude" || suggestion === "codex" ? suggestion : "";
+  if (pinned || (Array.isArray(per) && per.length) || !hint || !available.includes(hint)) return {};
+  return { cli_hint: hint };
+}
+
+/** The agent CLIs (claude, codex) installed on at least one of these hosts, read from their `cli:*` caps. */
+export function fleetClis(caps: string[][]): string[] {
+  return ["claude", "codex"].filter((c) => caps.some((cs) => cs.includes(`cli:${c}`)));
 }
 
 export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null {
@@ -234,7 +282,8 @@ export type HostBeat = { host: string; caps: string[]; seen: string; busy: numbe
   /** Per running task: when its agent last showed a sign of life and what it was doing. */ activity?: Record<string, Activity> };
 
 /** A running agent's latest sign of life: any output; for Claude also the step it took ("Bash · gh pr checks 814"). */
-export type Activity = { at: string; step?: string; steps: number };
+export type Activity = { at: string; step?: string; steps: number;
+  /** The model actually answering (Claude reports it in its stream; Codex: the one it was started with). */ model?: string };
 /** This process's running agents (written by runAgent, published in the heartbeat). */
 export const agentActivity = new Map<string, Activity>();
 
@@ -259,7 +308,7 @@ export function updateState(): UpdateState | undefined {
   if ((u.state === "restarting" || u.state === "waiting") && Date.parse(u.ts) < STARTED) {
     const rev = runningRev().rev;
     if (rev && rev !== u.from) setUpdateState({ at: u.at, state: "done", detail: rev.slice(0, 7), from: u.from });
-    else setUpdateState({ at: u.at, state: "failed", detail: "重启后仍是旧代码", from: u.from });
+    else setUpdateState({ at: u.at, state: "failed", detail: L("Still on the old code after restart", "重启后仍是旧代码"), from: u.from });
     return updateState();
   }
   return u;
@@ -303,13 +352,16 @@ function yieldToPreferred(meta: Record<string, string>, caps: string[], cfg: Cfg
   return onlineHosts(cfg).some((h) => h.host !== hostName(cfg) && prefer.every((r) => h.caps.includes(r)));
 }
 
+/** A host's CPU pressure as its heartbeat reports it (0-1): measured utilisation when known, else load/cores. */
+const heartPressure = (s: any): number => (s?.cpuBusyPct == null ? (s?.loadRatio ?? 0) : s.cpuBusyPct / 100);
+
 /** Heavy work goes to the least-loaded capable online host. */
 function yieldHeavy(meta: Record<string, string>, cfg: Cfg, myLoad: number, heavyOk: boolean): boolean {
   if (meta.weight !== "heavy") return false;
   if (!heavyOk) return true;
   const me = hostName(cfg);
   return onlineHosts(cfg).some((h) => h.host !== me && matches(meta, h.caps) && h.stats
-    && h.stats.loadRatio + 0.2 < myLoad && h.busy === 0);
+    && heartPressure(h.stats) + 0.2 < myLoad && h.busy === 0);
 }
 
 export function pickTask(cfg: Cfg, myLoad = 0, heavyOk = true): string | null {
@@ -327,6 +379,7 @@ export function pickTask(cfg: Cfg, myLoad = 0, heavyOk = true): string | null {
 export const claim = (path: string, host: string) => locked(() => _claim(path, host));
 async function _claim(path: string, host: string): Promise<string | null> {
   if (!existsSync(path)) return null;
+  const raw = readFileSync(path);
   const { meta, body } = readDoc(path);
   const dest = P("tasks", "active", `${meta.id}.md`);
   writeDoc(dest, { ...meta, claimed_by: host, started: now(), host_caps: hostCaps(loadConfig()).join(",") }, body);
@@ -334,6 +387,8 @@ async function _claim(path: string, host: string): Promise<string | null> {
   if (await _commitPush(`[${host}] claim ${meta.id}: ${meta.title}`)) return dest;
   // undo only our claim (other pending local results stay queued); after a lost race the pull already applied the winner
   sync.revertLocal([relative(DATA, dest), relative(DATA, path)]);
+  // a task queued here and not pushed yet has no synced copy to revert to: put it back rather than delete it
+  if (!readdirSync(P("tasks")).some((d) => existsSync(P("tasks", d, `${meta.id}.md`)))) writeFileSync(path, raw);
   return null;
 }
 
@@ -344,26 +399,80 @@ export function journal(host: string, line: string) {
   appendFileSync(f, `- ${hhmm()} \`${host}\` ${line}\n`);
 }
 
+/** Torn-write protection (src/integrity.ts). A crash can leave a file at full length but zero-filled; sync refuses to push such
+ *  a file. Here: memory files in that state are restored from the last good copy (sync-base, then the daily snapshots) and the
+ *  restore is journaled; any other damaged file sync skipped is journaled once; one snapshot of the memory files per day goes to
+ *  <home>/memory-snapshots (outside the data folder, never synced). `full` checks every memory file (daemon start); otherwise only
+ *  the files sync reported since the last call. Never throws: this must not take the daemon down. Call it inside `locked`. */
+export function guardMemory(host: string, opts: { full?: boolean } = {}) {
+  try {
+    const alerts = sync.takeDamageAlerts();
+    const only = opts.full ? undefined : [...new Set(alerts.map((a) => a.path))];
+    const { restored, unrecovered } = recoverMemory(DATA, sync.syncBaseDir(), sync.snapshotDir(), only);
+    for (const r of restored) journal(host, L(`🩹 ${r.path} was zero-filled by a crash; restored ${r.bytes} bytes from ${r.from} (edits after that copy are lost)`, `🩹 ${r.path} 被崩溃写成全零；已从 ${r.from} 恢复 ${r.bytes} 字节（该副本之后的改动已丢失）`));
+    for (const u of unrecovered) journal(host, L(`⚠️ ${u.path} is damaged (${u.nul} of ${u.bytes} bytes are NUL) and no good copy exists; it is not synced`, `⚠️ ${u.path} 已损坏（${u.bytes} 字节里有 ${u.nul} 个 NUL）且没有可用的好副本；不会同步它`));
+    const handled = new Set([...restored.map((r) => r.path), ...unrecovered.map((u) => u.path)]);
+    for (const a of alerts) {
+      if (handled.has(a.path)) continue;
+      journal(host, a.side === "remote"
+        ? L(`⚠️ the cloud copy of ${a.path} is damaged (${a.nul} of ${a.bytes} bytes are NUL); the local copy replaces it on the next sync`, `⚠️ 云端的 ${a.path} 已损坏（${a.bytes} 字节里有 ${a.nul} 个 NUL）；下次同步用本机副本覆盖它`)
+        : L(`⚠️ ${a.path} is damaged (${a.nul} of ${a.bytes} bytes are NUL); it is not synced`, `⚠️ ${a.path} 已损坏（${a.bytes} 字节里有 ${a.nul} 个 NUL）；不会同步它`));
+    }
+    const snap = snapshotMemory(DATA, sync.snapshotDir(), today());
+    if (snap.skipped.length) journal(host, L(`⚠️ memory snapshot skipped damaged files: ${snap.skipped.join(", ")}`, `⚠️ 记忆快照跳过了损坏的文件：${snap.skipped.join("、")}`));
+  } catch (e) { console.error("memory guard failed", e); }
+}
+
 export function remember(agent: string, lessons: string[] | undefined, source: string) {
-  if (!lessons?.length) return;
+  // a single lesson the model sent as a bare string (not the array the spec asks for) is still a lesson
+  const list = (Array.isArray(lessons) ? lessons : typeof lessons === "string" ? [lessons] : [])
+    .map(asText).map((l) => l.trim()).filter(Boolean);
+  if (!list.length) return;
   const f = P("agents", agent, "memory.md");
   if (!existsSync(f)) { mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, `# ${agent} memory\n\n`); }
-  appendFileSync(f, lessons.map((l) => `- ${l} _(${source}, ${today()})_\n`).join(""));
+  appendFileSync(f, list.map((l) => `- ${l} _(${source}, ${today()})_\n`).join(""));
 }
 
 export const readIf = (p: string, tail = 12000) => (existsSync(p) ? readFileSync(p, "utf8").slice(-tail) : "");
 
-export const readAll = (dir: string, tail = 12000) =>
-  list(dir).map((p) => `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}`).join("\n\n").slice(-tail);
+/** The last `tail` characters of a file, for a prompt. A cut start is announced: the opening of a file is usually where
+ *  its standing rules sit, and dropping it silently leaves the reader with no idea there is more to read. */
+export function readTail(p: string, tail = 12000): string {
+  if (!existsSync(p)) return "";
+  const s = readFileSync(p, "utf8");
+  if (s.length <= tail) return s;
+  return `[… the first ${s.length - tail} of ${s.length} characters are cut; read ${p} for them]\n${s.slice(-tail)}`;
+}
+
+/** Every .md of a folder, joined, last `tail` characters. The files that fall into the cut part are named, so a folder
+ *  that outgrows its budget does not lose whole files (the alphabetically first ones) without a trace. */
+export function readAll(dir: string, tail = 12000): string {
+  const parts = list(dir).map((p) => ({ name: basename(p), text: `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}` }));
+  const joined = parts.map((x) => x.text).join("\n\n");
+  if (joined.length <= tail) return joined;
+  const cut = joined.length - tail;
+  const gone: string[] = [];
+  let partly = "";
+  let at = 0;
+  for (const x of parts) {
+    const end = at + x.text.length;
+    if (end <= cut) gone.push(x.name);
+    else if (at < cut) partly = x.name;
+    at = end + 2; // the blank line between two files
+  }
+  const note = `[… cut to the last ${tail} of ${joined.length} characters; not shown: ${gone.join(", ") || "none"}${partly ? `; partly shown: ${partly}` : ""}; read them in ${dir}]`;
+  return `${note}\n${joined.slice(-tail)}`;
+}
 
 export const recentJournal = (days = 2) =>
   list(P("journal")).slice(-days).map((p) => readFileSync(p, "utf8").slice(-4000)).join("\n");
 
 export function precedents(n = 30): string {
-  return list(P("decisions", "closed")).slice(-n).map((p) => {
-    const { meta } = readDoc(p);
-    return `- ${meta.id} [${meta.agent}] Q: ${meta.question}\n  → **${meta.answer}** (by ${meta.answered_by})`;
-  }).join("\n");
+  // the latest answers, not the last file names: by name every P-… batch and D-C… card sorts after every D-0… card
+  const at = (m: Record<string, string>) => m.answered ?? m.created ?? "";
+  // a menu the system closed because a refreshed one replaced it was never answered: not a precedent
+  return list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => !m.superseded_by).sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)).slice(-n)
+    .map((meta) => `- ${meta.id} [${meta.agent}] Q: ${meta.question}\n  → **${meta.answer}** (by ${meta.answered_by})`).join("\n");
 }
 
 export function signature(agent: string, host: string, cfg: Cfg) {

@@ -1,9 +1,10 @@
 // The shared tool layer (cloud/src/tools.ts) over the local data repo, and the chat brain's loop with a scripted model.
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { type Model, context, dataActs, localStore, reopenTask, parseTurn, think } from "../src/brain";
-import { DATA } from "../src/core";
+import { type Model, addFollowUp, context, dataActs, localStore, reopenTask, parseTurn, think } from "../src/brain";
+import { type Cfg, DATA, readDoc } from "../src/core";
+import { claudeDisallowed } from "../src/gates";
 import { runTool, taskInfo, toolsFor, TOOLS, type WriteOp, listRoutines } from "../cloud/src/tools";
 
 const put = (p: string, s: string) => { mkdirSync(dirname(join(DATA, p)), { recursive: true }); writeFileSync(join(DATA, p), s); };
@@ -139,6 +140,17 @@ test("brain: nothing to say → nothing posted; invalid writes go back to the mo
   expect(out.calls.map((c) => [c.tool, c.ok])).toEqual([["amend_task", false], ["create_task", true]]);
 });
 
+test("brain: a lookup that never ends still answers on the last round", async () => {
+  const { st } = store();
+  const look = '{"calls":[{"tool":"get_task","args":{"id":"T-0184"}}],"reply":""}';
+  const m = scripted([look, look, look, '{"calls":[{"tool":"get_task","args":{"id":"T-0184"}}],"reply":"T-0184 还在跑。"}']);
+  const posted: string[] = [];
+  const out = await think({ text: "T-0184 卡在哪了" }, st, m, (r) => posted.push(r));
+  expect(m.seen[3]).toContain("Last turn");
+  expect(posted).toEqual(["T-0184 还在跑。"]);
+  expect(out.rounds).toBe(4);
+});
+
 test("context: open work, decisions, relevant memory, channel and reply target", () => {
   const { st } = store();
   const c = context(st, { text: "dark mode 不平衡", replyTo: "T-0184", answered: "D-0099", chat: ["owner: hi"] });
@@ -146,6 +158,13 @@ test("context: open work, decisions, relevant memory, channel and reply target",
     "reply to the team's message about T-0184", "answered D-0099"]) expect(c).toContain(s);
   expect(parseTurn('noise {"reply":"hi"} noise')).toEqual({ calls: [], reply: "hi" });
   expect(parseTurn("no json")).toBeNull();
+});
+
+test("context: a proposals card lists its items, so the owner's words can be turned into item numbers", () => {
+  put("decisions/open/P-0007.md", "---\nid: P-0007\nkind: proposals\nquestion: 要做哪几项？\nitems: T-0001,T-0002\n---\n## 待确认\n1. acme-feed：fix late plays（lead）\n2. acme-docs：tidy thresholds（lead）\n");
+  const c = context(store().st, { text: "P-0007 只做 feed 那项" });
+  rmSync(join(DATA, "decisions/open/P-0007.md"));
+  expect(c).toContain("P-0007: 要做哪几项？ — 1. acme-feed：fix late plays（lead） / 2. acme-docs：tidy thresholds（lead）");
 });
 
 test("a finished task reopens under its own id, with its runs as context", () => {
@@ -156,6 +175,32 @@ test("a finished task reopens under its own id, with its runs as context", () =>
   expect(t).toContain("**done** — shipped");
   expect(t).toContain("> 不行\n> 再改");
   expect(t).not.toMatch(/^(finished|status|claimed_by):/m);
+});
+
+test("the owner's words on a task never open its gates; a card's approval stays", () => {
+  const gated = (f: string) => claudeDisallowed({} as Cfg, !!readDoc(join(DATA, f)).meta.gate_override);
+  // waiting: woken to act on the message, every gate still closed, whatever the words say
+  for (const [id, text] of [["T-0310", "What is the status? Do not merge anything."], ["T-0313", "merge it yourself"]]) {
+    put(`tasks/waiting/${id}.md`, `---\nid: ${id}\ntitle: Ship\nagent: lead\nstatus: waiting\nclaimed_by: mac\nwake_at: 2026-11-09\n---\nAsked.\n`);
+    addFollowUp(join(DATA, `tasks/waiting/${id}.md`), text, true);
+    expect(existsSync(join(DATA, `tasks/waiting/${id}.md`))).toBe(false);
+    const w = readDoc(join(DATA, `tasks/inbox/${id}.md`));
+    expect(w.meta.gate_override).toBeUndefined();
+    expect(w.meta.claimed_by).toBeUndefined();
+    expect(w.body).toContain(`> ${text}\n\nWoken from waiting`);
+    expect(gated(`tasks/inbox/${id}.md`)).toEqual(expect.arrayContaining(["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)"]));
+  }
+  // queued: the message is added in place; an approval the owner gave on a card is kept
+  put("tasks/inbox/T-0311.md", "---\nid: T-0311\ntitle: x\nagent: lead\ngate_override: D-0399\n---\nAsked.\n");
+  addFollowUp(join(DATA, "tasks/inbox/T-0311.md"), "also this", false);
+  expect(readDoc(join(DATA, "tasks/inbox/T-0311.md")).meta.gate_override).toBe("D-0399");
+  put("tasks/inbox/T-0314.md", "---\nid: T-0314\ntitle: x\nagent: lead\n---\nAsked.\n");
+  addFollowUp(join(DATA, "tasks/inbox/T-0314.md"), "What is the status? Do not merge anything.", false);
+  expect(gated("tasks/inbox/T-0314.md")).toContain("Bash(gh pr merge:*)");
+  // finished: reopened with every gate closed
+  put("tasks/done/T-0312.md", "---\nid: T-0312\ntitle: x\nagent: lead\nstatus: done\n---\nAsked.\n");
+  reopenTask(join(DATA, "tasks/done/T-0312.md"), "What is the status? Do not merge anything.");
+  expect(gated("tasks/inbox/T-0312.md")).toContain("Bash(gh pr merge:*)");
 });
 
 test("a task's detail names the cards it asked", () => {
@@ -172,15 +217,4 @@ test("list_routines: a change made in settings wins over config.toml, as it does
   };
   const rows = listRoutines({ read: (p: string) => (files[p] === undefined ? undefined : { text: files[p] }) } as any);
   expect(rows.map((r) => [r.name, r.enabled, r.every])).toEqual([["macos-check", false, "1d"], ["nightly", true, "2h"]]);
-});
-
-import { followUpTarget } from "../src/brain";
-test("followUpTarget: terse follow-up continues the task the channel was just about", () => {
-  const now = Date.parse("2026-11-07T05:32:00Z");
-  const ev = [{ from: "Tripitaka", ts: "2026-11-07T05:30:00Z", ref: "T-0738" }, { from: "hub", ts: "2026-11-07T05:30:30Z", ref: "D-0148" }, { from: "owner", ts: "2026-11-07T05:31:00Z" }];
-  expect(followUpTarget("给我中文", ev, now)).toBe("T-0738");
-  expect(followUpTarget("应该转发他的 tweet 来回复", ev, now)).toBe("T-0738");
-  expect(followUpTarget("Noop 的流程，像这种连续的，并没有开始的，不能作为独立任务在任务列表列表显示，不然太繁琐了。改掉这个流程", ev, now)).toBeUndefined();
-  expect(followUpTarget("给我中文", ev, now + 20 * 60_000)).toBeUndefined();
-  expect(followUpTarget("给我中文", [], now)).toBeUndefined();
 });

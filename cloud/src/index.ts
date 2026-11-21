@@ -13,17 +13,23 @@
 //   POST /api/auth/start {email} → mail code · POST /api/auth/verify {email, code} → {session} · POST /api/auth/logout
 // Web Push (owner session): GET /api/push/vapid · POST /api/push/subscribe {subscription, device_label}
 //   · POST /api/push/unsubscribe {endpoint} · POST /api/push/test · POST /api/push/answer {ref, answer}
+// Guest workers (low-trust shared machines): /api/guest/* and /api/guests/* — see guests.ts.
 // MCP (Claude / ChatGPT connectors): /mcp + OAuth 2.1 at /oauth/* and /.well-known/oauth-* — see mcp.ts and docs/mcp.md.
 // Every other /api/* and /media/* needs Bearer <HUB_TOKEN|session> (or ?token= for WebSocket / <img>).
 import { DurableObject } from "cloudflare:workers";
 import { b64dec, b64enc, handleFiles, handleReadFiles, initFilesSchema } from "./files";
 import { FREE, LEAN, SHED, TARGET, latestOnly } from "./budget";
-import { taskHistory, taskInfo } from "./tools";
+import { CHANNEL_SLUG, channelDigest, channelsView, taskHistory, taskInfo } from "./tools";
 import { CODE_RE, newCode, normCode } from "./authcode";
 import { newSecret, otpauthUri, totpMatch } from "./totp";
 import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
 import { sendMail, type SmtpCfg } from "./smtp";
 import { EmailMessage } from "cloudflare:email";
+
+import { GUEST_TOKEN, guestApi, guestJoin, guestWho, guestsAdmin, initGuestSchema } from "./guests";
+import { seal, secretProblem, unseal } from "./secrets";
+import { type OAuthState, PENDING_TTL_MS, authorizeUrl, callbackPage, discover, freshTokens, oauthVar, pkceChallenge, randomToken, register, tokenRequest } from "./mcp-oauth";
+import { mcpServers } from "../../app/mcp-servers";
 
 const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
 async function cfMail(binding: SendEmail, from: string, to: string, subject: string, text: string) {
@@ -34,6 +40,7 @@ async function cfMail(binding: SendEmail, from: string, to: string, subject: str
 }
 import { sendPush, type PushSub, type Vapid } from "./push";
 import { CORS, Mcp } from "./mcp";
+import { L, setLang } from "./i18n";
 import { ipAllowed, parseAllowList } from "./ipallow";
 import { notificationFor, type NotifyRules } from "../../app/notify";
 
@@ -46,6 +53,7 @@ interface Env {
   HUB_VAPID_PUBLIC?: string;  // b64url raw P-256 point
   HUB_VAPID_PRIVATE?: string; // JWK JSON
   HUB_MOVED_TO?: string;    // the hub moved to another Worker (e.g. another account): forward every request there
+  HUB_LANG?: string;        // [owner] language: "en" gives English text, otherwise Simplified Chinese
   HUB_ALLOW_IPS?: string;   // optional source-IP allow-list (IPs / CIDRs, comma or space separated); set → everyone else gets 403
 }
 
@@ -62,7 +70,7 @@ const CODE_TTL = 10 * 60_000, CODE_TRIES = 5, RESEND_MS = 60_000, SENDS_PER_HOUR
 const FAILS_PER_DAY = 20;
 // Owner sessions (app, browser, MCP access tokens) die after this long unused.
 const SESSION_IDLE_MS = 30 * 86_400_000;
-const TOTP_MISSING = "还没有绑定两步验证（验证器 App），任何人都无法登录：先在你的主机上运行 noop 2fa setup";
+const TOTP_MISSING = () => L("2FA (authenticator app) is not bound yet, nobody can log in: run noop 2fa setup on your host first", "还没有绑定两步验证（验证器 App），任何人都无法登录：先在你的主机上运行 noop 2fa setup");
 
 const hex = (b: ArrayBuffer | Uint8Array) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 const sha256 = async (s: string) => hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
@@ -72,10 +80,12 @@ function sameStr(a: string, b: string) { // constant-time for equal lengths
   return d === 0;
 }
 const normEmail = (e: unknown) => typeof e === "string" ? e.trim().toLowerCase() : "";
+const alertTime = () => L(`Time: ${new Date().toISOString()}`, `时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}（北京时间）`);
 const validEmail = (e: string) => e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    setLang(env.HUB_LANG);
     const url = new URL(req.url);
     // Moved: machines still pointing here keep working (and pick up the new [cloud] url from the shared config).
     // IP allow-list (HUB_ALLOW_IPS): checked before anything else, static assets included
@@ -86,31 +96,81 @@ export default {
       if (!ipAllowed(ip, nets)) return ipBlocked(req, ip);
     }
     if (env.HUB_MOVED_TO) return fetch(new Request(env.HUB_MOVED_TO.replace(/\/$/, "") + url.pathname + url.search, req));
+    // NSH requests the signature and relative assets beside the channel manifest.
+    const direct = /^\/api\/updates\/direct\/(latest\.json(?:\.sig)?|noop-[a-z0-9_.-]+)$/.exec(url.pathname);
+    if (direct && (req.method === "GET" || req.method === "HEAD")) {
+      const name = direct[1].startsWith("latest.") ? "direct-" + direct[1] : direct[1];
+      return Response.redirect("https://github.com/huacnlee/noop/releases/latest/download/" + name, 302);
+    }
     const mcp = isMcpPath(url.pathname);
     if (mcp && req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    if (!mcp && HASHED.test(url.pathname) && req.method === "GET") return hashedAsset(req, env, url);
     if (!mcp && !url.pathname.startsWith("/api/") && !url.pathname.startsWith("/media/")) return env.ASSETS.fetch(req);
     if (!env.HUB_TOKEN) return json({ error: "HUB_TOKEN secret not set" }, 500);
     return env.HUB.get(env.HUB.idFromName("hub")).fetch(req);
   },
 };
 
+/** Content-hashed files `nsh bundle` writes (`nsh.73cc16a15e.wasm`, `app.853c5dd616.js`): they never change, and the
+ *  bundle ships a Brotli 11 / gzip 9 copy next to each. Workers Assets only compresses on the fly at low levels
+ *  (the 14 MB runtime went out as 4.3 MB instead of 3.1 MB), so send the precompressed copy as is. */
+const HASHED = /\.[0-9a-f]{10}\.(wasm|m?js|css)$/;
+const TYPES: Record<string, string> = { wasm: "application/wasm", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8" };
+const IMMUTABLE = "public, max-age=31536000, immutable";
+
+async function hashedAsset(req: Request, env: Env, url: URL): Promise<Response> {
+  const accept = req.headers.get("accept-encoding") ?? "";
+  const accepted = new Map(accept.toLowerCase().split(",").map((part) => {
+    const [name, ...params] = part.trim().split(";");
+    const q = params.map((p) => p.trim()).find((p) => p.startsWith("q="));
+    return [name.trim(), q === undefined ? 1 : Number(q.slice(2))] as const;
+  }));
+  const quality = (name: string) => accepted.get(name) ?? accepted.get("*") ?? 0;
+  const type = TYPES[url.pathname.slice(url.pathname.lastIndexOf(".") + 1)];
+  const variants = ([["br", "br"], ["gz", "gzip"]] as const).toSorted((a, b) => quality(b[1]) - quality(a[1]));
+  for (const [ext, enc] of variants) {
+    if (!(quality(enc) > 0)) continue;
+    const res = await env.ASSETS.fetch(new Request(new URL(url.pathname + "." + ext, url), { headers: { "accept-encoding": "identity" } }));
+    if (!res.ok || res.headers.get("content-type")?.toLowerCase().startsWith("text/html")) continue;
+    const headers = new Headers({ "content-type": type, "content-encoding": enc, "cache-control": IMMUTABLE, vary: "accept-encoding" });
+    const etag = res.headers.get("etag");
+    if (etag) headers.set("etag", etag);
+    // `manual`: the body is already encoded, the runtime must not compress it again.
+    return new Response(res.body, { status: 200, headers, encodeBody: "manual" } as ResponseInit);
+  }
+  const res = await env.ASSETS.fetch(req);
+  if (!res.ok) return res;
+  const out = new Response(res.body, res);
+  out.headers.set("cache-control", IMMUTABLE);
+  out.headers.append("vary", "accept-encoding");
+  return out;
+}
+
 /** Turned away by HUB_ALLOW_IPS. The visitor sees its own public IP (nothing else), so the owner can add a phone's
  *  network from the phone itself: JSON for the app and API clients, a small page for a browser. */
 function ipBlocked(req: Request, ip: string): Response {
   const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
-  const msg = `这个网络的出口 IP ${ip || "未知"} 不在允许名单（HUB_ALLOW_IPS）里`;
+  const msg = L(`This network's public IP ${ip || "unknown"} is not on the allow-list (HUB_ALLOW_IPS)`, `这个网络的出口 IP ${ip || "未知"} 不在允许名单（HUB_ALLOW_IPS）里`);
   if (!(req.headers.get("accept") ?? "").includes("text/html"))
     return Response.json({ error: "ip_blocked", ip, message: msg }, { status: 403, headers });
   const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   return new Response(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Noop：IP 未放行</title><style>:root{color-scheme:light dark}body{margin:0;font:16px/1.6 -apple-system,system-ui,sans-serif;background:Canvas;color:CanvasText}
+<title>${L("Noop: IP not allowed", "Noop：IP 未放行")}</title><style>:root{color-scheme:light dark}body{margin:0;font:16px/1.6 -apple-system,system-ui,sans-serif;background:Canvas;color:CanvasText}
 main{max-width:420px;margin:18vh auto;padding:0 16px}h1{font-size:20px;margin:0 0 12px}.ip{font:600 24px/1.3 ui-monospace,Menlo,monospace;user-select:all;padding:12px 14px;border:1px solid #8884;border-radius:8px;word-break:break-all}
-p{color:GrayText;font-size:14px}</style></head><body><main><h1>这个网络还没放行</h1><div class="ip">${esc(ip || "未知")}</div>
-<p>这是你当前网络的出口 IP。要从这里使用 Noop，把它加到 Worker 的 HUB_ALLOW_IPS 里（可以写网段，如 1.2.3.0/24；手机流量常用 IPv6，地址会变，写它的 /64 网段）。</p></main></body></html>`,
+p{color:GrayText;font-size:14px}</style></head><body><main><h1>${L("This network is not allowed yet", "这个网络还没放行")}</h1><div class="ip">${esc(ip || L("unknown", "未知"))}</div>
+<p>${L("This is your current network's public IP. To use Noop from here, add it to the Worker's HUB_ALLOW_IPS (ranges work, e.g. 1.2.3.0/24; mobile data often uses changing IPv6, so add its /64).", "这是你当前网络的出口 IP。要从这里使用 Noop，把它加到 Worker 的 HUB_ALLOW_IPS 里（可以写网段，如 1.2.3.0/24；手机流量常用 IPv6，地址会变，写它的 /64 网段）。")}</p></main></body></html>`,
     { status: 403, headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" } });
 }
 
 const isMcpPath = (p: string) => p === "/mcp" || p.startsWith("/oauth/") || p.startsWith("/.well-known/oauth-") || p === "/.well-known/openid-configuration";
+
+/** Per-route counters: [requests, rowsRead, rowsWritten]. */
+type Usage = { day: string; requests: number; rowsRead: number; rowsWritten: number; routes: Record<string, [number, number, number]> };
+/** "POST /api/files/commit": the route without ids, so a day's breakdown stays a few dozen keys. */
+export const routeKey = (req: Request) => {
+  const p = new URL(req.url).pathname.replace(/\/(T|D)-[\w-]+/g, "/:id").replace(/^\/media\/.*/, "/media/:id");
+  return `${req.method} ${p.length > 40 ? p.slice(0, 40) : p}`;
+};
 
 type Ev = { id: string; ts: string; from: string; kind: string; text: string; ref?: string; [k: string]: unknown };
 
@@ -119,10 +179,13 @@ export class Hub extends DurableObject<Env> {
   mcp: Mcp;
   /** Every cursor since the last settle(): their rowsRead / rowsWritten are what Cloudflare bills. */
   cursors: SqlStorageCursor<Record<string, SqlStorageValue>>[] = [];
-  usage = { day: "", requests: 0, rowsRead: 0, rowsWritten: 0 };
+  usage: Usage = { day: "", requests: 0, rowsRead: 0, rowsWritten: 0, routes: {} };
   usageSaved = 0;
+  /** Rows written since the counters were last persisted: a busy burst is saved before an eviction can drop it. */
+  unsaved = 0;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    setLang(env.HUB_LANG);
     const raw = ctx.storage.sql, cursors = this.cursors;
     this.sql = { exec: (q: string, ...b: SqlStorageValue[]) => { const c = raw.exec(q, ...b); cursors.push(c); return c; }, get databaseSize() { return raw.databaseSize; } } as unknown as SqlStorage;
     // a host keeps one hibernating socket open for "inbox has something"; its keepalive never wakes this object
@@ -135,14 +198,25 @@ export class Hub extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS auth_codes (email TEXT PRIMARY KEY, hash TEXT, expires INTEGER, attempts INTEGER);
       CREATE TABLE IF NOT EXISTS auth_sends (email TEXT, ts INTEGER, sent INTEGER);
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, email TEXT, created INTEGER, last_seen INTEGER, ua TEXT);
-      CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);`);
+      CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);
+      CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, sealed TEXT, updated TEXT);
+      CREATE TABLE IF NOT EXISTS mcp_oauth (name TEXT PRIMARY KEY, sealed TEXT, updated TEXT);
+      CREATE TABLE IF NOT EXISTS mcp_oauth_pending (state TEXT PRIMARY KEY, name TEXT, verifier TEXT, created INTEGER);`);
     initFilesSchema(this.sql);
+    initGuestSchema(this.sql);
     // scope: "owner" (app / browser) or "mcp" (an OAuth access token for a Claude / ChatGPT connector: /mcp only)
     try { this.sql.exec("ALTER TABLE sessions ADD COLUMN scope TEXT"); } catch { /* exists */ }
     try { Object.assign(this.usage, JSON.parse(String(raw.exec("SELECT v FROM kv WHERE k = 'usage'").toArray()[0]?.v ?? "{}"))); } catch { /* fresh */ }
     // events.ref, indexed: a task's conversation is read by ref, never by scanning every event's JSON (rows_read is billed per row)
     try { this.sql.exec("ALTER TABLE events ADD COLUMN ref TEXT"); } catch { /* exists */ }
     this.sql.exec("CREATE INDEX IF NOT EXISTS events_ref ON events (ref)");
+    // Channel feeds use indexed room/ref lookups; opening a room never scans unrelated history.
+    this.sql.exec("CREATE INDEX IF NOT EXISTS events_channel ON events (json_extract(json, '$.channel')) WHERE json_extract(json, '$.channel') IS NOT NULL");
+    // Indexed receipt lookup: one row per retry, no event scan or polling.
+    this.sql.exec("CREATE INDEX IF NOT EXISTS events_client_id ON events (json_extract(json, '$.client_id')) WHERE json_extract(json, '$.client_id') IS NOT NULL");
+    // Event ids are the host's idempotency key (a retried POST must not store the event twice); indexed so every
+    // upload checks one row, not the whole history.
+    this.sql.exec("CREATE INDEX IF NOT EXISTS events_id ON events (json_extract(json, '$.id')) WHERE json_extract(json, '$.id') IS NOT NULL");
     if (this.sql.exec("SELECT v FROM kv WHERE k = 'events_ref_filled'").toArray().length === 0) {
       this.sql.exec("UPDATE events SET ref = json_extract(json, '$.ref') WHERE ref IS NULL");
       this.sql.exec("INSERT OR REPLACE INTO kv (k, v) VALUES ('events_ref_filled', '1')");
@@ -170,38 +244,38 @@ export class Hub extends DurableObject<Env> {
   async checkCode(rawEmail: unknown, rawCode: unknown, rawTotp: unknown, ctx?: { req: Request; via: string }): Promise<{ email?: string; error?: string; status?: number }> {
     const email = normEmail(rawEmail), code = normCode(rawCode), totp = typeof rawTotp === "string" ? rawTotp.replace(/\s/g, "") : "";
     const tf = this.totp();
-    if (!tf) return { error: TOTP_MISSING, status: 403 };
-    if (!validEmail(email) || !CODE_RE.test(code) || !/^\d{6}$/.test(totp)) return { error: "请填写邮箱验证码和两步验证码", status: 400 };
+    if (!tf) return { error: TOTP_MISSING(), status: 403 };
+    if (!validEmail(email) || !CODE_RE.test(code) || !/^\d{6}$/.test(totp)) return { error: L("Enter the email code and the 2FA code", "请填写邮箱验证码和两步验证码"), status: 400 };
     const r = this.sql.exec("SELECT hash, expires, attempts FROM auth_codes WHERE email = ?", email).toArray()[0];
-    if (!r || (r.expires as number) < Date.now()) return { error: "验证码无效或已过期，请重新获取", status: 401 };
-    if ((r.attempts as number) >= CODE_TRIES) return { error: "尝试次数太多，请重新获取验证码", status: 401 };
+    if (!r || (r.expires as number) < Date.now()) return { error: L("The code is invalid or expired, request a new one", "验证码无效或已过期，请重新获取"), status: 401 };
+    if ((r.attempts as number) >= CODE_TRIES) return { error: L("Too many attempts, request a new code", "尝试次数太多，请重新获取验证码"), status: 401 };
     const day = new Date().toISOString().slice(0, 10), fails = this.get("auth_fails");
     const failed = fails?.day === day ? Number(fails.n) || 0 : 0;
-    if (failed >= FAILS_PER_DAY) return { error: "今天验证失败次数太多，已锁定到 UTC 0 点", status: 429 };
+    if (failed >= FAILS_PER_DAY) return { error: L("Too many failed verifications today, locked until 00:00 UTC", "今天验证失败次数太多，已锁定到 UTC 0 点"), status: 429 };
     this.sql.exec("UPDATE auth_codes SET attempts = attempts + 1 WHERE email = ?", email);
     const fail = (error: string) => {
       this.set("auth_fails", { day, n: failed + 1 });
       if (failed + 1 >= FAILS_PER_DAY) {
         this.sql.exec("DELETE FROM auth_codes");
-        this.alert("登录已锁定", [`今天验证已经错了 ${FAILS_PER_DAY} 次，到 UTC 0 点前任何人都无法登录。`, ...(ctx ? this.origin(ctx.req) : []),
-          "", "如果不是你本人在试：有人在猜你的验证码。已有的登录不受影响。"]);
+        this.alert(L("Login locked", "登录已锁定"), [L(`${FAILS_PER_DAY} failed verifications today, nobody can log in until 00:00 UTC.`, `今天验证已经错了 ${FAILS_PER_DAY} 次，到 UTC 0 点前任何人都无法登录。`), ...(ctx ? this.origin(ctx.req) : []),
+          "", L("If this was not you, someone is guessing your codes. Existing logins are not affected.", "如果不是你本人在试：有人在猜你的验证码。已有的登录不受影响。")]);
       }
       return { error, status: 401 };
     };
-    if (!sameStr(await sha256(`${email}:${code}`), r.hash as string)) return fail("邮箱验证码不对");
+    if (!sameStr(await sha256(`${email}:${code}`), r.hash as string)) return fail(L("The email code is wrong", "邮箱验证码不对"));
     // the email code was right: a wrong TOTP keeps it (within its CODE_TRIES), so the owner can retype just the TOTP
     const step = await totpMatch(tf.secret, totp, tf.last ?? -1);
     if (step === null) {
-      if (ctx) this.alert("两步验证码错误", [`有人输对了 ${email} 的邮箱验证码，但两步验证码不对。`, ...this.origin(ctx.req),
-        "", "如果不是你本人：你的邮箱可能已经被盗，请立即修改邮箱密码。"]);
-      return fail("两步验证码不对（或已用过），请看验证器 App 上的最新数字");
+      if (ctx) this.alert(L("Wrong 2FA code", "两步验证码错误"), [L(`Someone entered the correct email code for ${email}, but the wrong 2FA code.`, `有人输对了 ${email} 的邮箱验证码，但两步验证码不对。`), ...this.origin(ctx.req),
+        "", L("If this was not you, your mailbox may be compromised: change its password now.", "如果不是你本人：你的邮箱可能已经被盗，请立即修改邮箱密码。")]);
+      return fail(L("The 2FA code is wrong (or already used), check the latest number in your authenticator app", "两步验证码不对（或已用过），请看验证器 App 上的最新数字"));
     }
     this.set("totp", { ...tf, last: step }); // each code works once
     this.sql.exec("DELETE FROM auth_codes WHERE email = ?", email);
     this.sql.exec("DELETE FROM kv WHERE k = 'cli_code'");
-    if (ctx) this.alert("新登录", [`账号：${email}`, `方式：${ctx.via}`, ...this.origin(ctx.req),
-      "", "如果是你本人，无需处理。",
-      "如果不是你：在你的主机上运行 noop revoke-sessions，立即踢掉所有登录（手机、浏览器、MCP 连接器），再检查这个邮箱是否被盗。"]);
+    if (ctx) this.alert(L("New login", "新登录"), [L(`Account: ${email}`, `账号：${email}`), L(`Method: ${ctx.via}`, `方式：${ctx.via}`), ...this.origin(ctx.req),
+      "", L("If this was you, nothing to do.", "如果是你本人，无需处理。"),
+      L("If this was not you: run noop revoke-sessions on your host to sign out everything at once (phones, browsers, MCP connectors), then check whether this mailbox is compromised.", "如果不是你：在你的主机上运行 noop revoke-sessions，立即踢掉所有登录（手机、浏览器、MCP 连接器），再检查这个邮箱是否被盗。")]);
     return { email };
   }
   /** The bound authenticator, or null (then nobody can sign in). */
@@ -227,17 +301,17 @@ export class Hub extends DurableObject<Env> {
   origin(req: Request): string[] {
     const cf = (req as Request & { cf?: Record<string, unknown> }).cf ?? {};
     const place = [cf.country, cf.region, cf.city].filter(Boolean).join(" ");
-    return [`时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}（北京时间）`,
-      `IP：${req.headers.get("cf-connecting-ip") ?? "未知"}${place ? `（${place}）` : ""}${cf.asOrganization ? ` · ${cf.asOrganization}` : ""}`,
-      `设备：${(req.headers.get("user-agent") ?? "未知").slice(0, 200)}`];
+    return [alertTime(),
+      `IP: ${req.headers.get("cf-connecting-ip") ?? L("unknown", "未知")}${place ? ` (${place})` : ""}${cf.asOrganization ? ` · ${cf.asOrganization}` : ""}`,
+      `${L("Device", "设备")}: ${(req.headers.get("user-agent") ?? L("unknown", "未知")).slice(0, 200)}`];
   }
   /** A security event: mailed to every HUB_OWNER_EMAIL address and put in the feed. Never blocks or fails the request. */
   alert(title: string, lines: string[]) {
     this.append({ from: "hub", kind: "notice", text: `🔐 ${title}\n${lines.filter(Boolean).join("\n")}` });
     const send = this.mailer();
     if (!send) return;
-    const text = `Noop 安全提醒：${title}\n\n${lines.join("\n")}\n`;
-    this.ctx.waitUntil(Promise.all(this.owners().map((to) => send(to, `Noop 安全提醒：${title}`, text)
+    const text = L(`Noop security alert: ${title}\n\n${lines.join("\n")}\n`, `Noop 安全提醒：${title}\n\n${lines.join("\n")}\n`);
+    this.ctx.waitUntil(Promise.all(this.owners().map((to) => send(to, L(`Noop security alert: ${title}`, `Noop 安全提醒：${title}`), text)
       .catch((err) => console.error(`alert mail to ${to}: ${err}`)))));
   }
 
@@ -248,17 +322,26 @@ export class Hub extends DurableObject<Env> {
   flushed = new Map<string, number>();
   today() {
     const day = new Date().toISOString().slice(0, 10);
-    if (this.usage.day !== day) this.usage = { day, requests: 0, rowsRead: 0, rowsWritten: 0 };
+    if (this.usage.day !== day) this.usage = { day, requests: 0, rowsRead: 0, rowsWritten: 0, routes: {} };
+    this.usage.routes ??= {};
     return this.usage;
   }
-  /** Count the rows of every query since the last call; persist the counters every few minutes. */
-  settle(requests = 1) {
+  /** Count the rows of every query since the last call, per route (what `/api/usage` shows so the biggest consumer is
+   *  visible), and persist the counters every minute while busy or after a few hundred unsaved rows: an evicted object
+   *  used to lose up to five minutes of counts on every wake, so the app read far below Cloudflare's own figures. */
+  settle(requests = 1, route = "other") {
     const u = this.today();
     u.requests += requests;
-    for (const c of this.cursors.splice(0)) { u.rowsRead += c.rowsRead; u.rowsWritten += c.rowsWritten; }
-    if (Date.now() - this.usageSaved > 5 * 60_000) {
-      this.usageSaved = Date.now();
-      this.ctx.storage.sql.exec("INSERT OR REPLACE INTO kv (k, v) VALUES ('usage', ?)", JSON.stringify(u)); // unmetered: a few hundred rows a day
+    let r = 0, w = 0;
+    for (const c of this.cursors.splice(0)) { r += c.rowsRead; w += c.rowsWritten; }
+    u.rowsRead += r; u.rowsWritten += w; this.unsaved += w + r / 50;
+    const k = u.routes[route] ??= [0, 0, 0];
+    k[0] += requests; k[1] += r; k[2] += w;
+    const since = Date.now() - this.usageSaved;
+    if (since > 5 * 60_000 || (since > 60_000 && this.unsaved > 50) || this.unsaved > 300) {
+      this.usageSaved = Date.now(); this.unsaved = 0;
+      u.rowsWritten += 2; // this save: the kv row and its primary key (unmetered cursor, counted by hand)
+      this.ctx.storage.sql.exec("INSERT OR REPLACE INTO kv (k, v) VALUES ('usage', ?)", JSON.stringify(u));
     }
   }
   /** The tightest of today's allowances, as a fraction of the free plan. */
@@ -325,10 +408,14 @@ export class Hub extends DurableObject<Env> {
     for (const ws of this.ctx.getWebSockets("host")) try { ws.send('{"type":"inbox"}'); } catch {}
   }
 
-  ownerMessage(text: string, ref?: string, attachments?: string[], thread = false): Ev {
-    const ev = this.append({ from: "owner", kind: "owner", text, ref, ...(attachments?.length ? { attachments } : {}), ...(thread ? { thread } : {}) });
+  ownerMessage(text: string, ref?: string, attachments?: string[], thread = false, clientId?: string, channel?: string): Ev {
+    if (clientId) {
+      const previous = this.sql.exec("SELECT json FROM events WHERE json_extract(json, '$.client_id') = ? LIMIT 1", clientId).toArray()[0];
+      if (previous) return JSON.parse(previous.json as string) as Ev;
+    }
+    const ev = this.append({ from: "owner", kind: "owner", text, ref, ...(clientId ? { client_id: clientId } : {}), ...(attachments?.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) });
     this.toInbox({ type: "message", event: ev });
-    if (!this.hostOnline()) this.append({ from: "hub", kind: "system", text: "收到。团队的电脑暂时都不在线，上线后会马上处理。", ref: ev.id });
+    if (!this.hostOnline()) this.append({ from: "hub", kind: "system", text: L("Got it. The team's machines are all offline right now, this will be handled as soon as one is back.", "收到。团队的电脑暂时都不在线，上线后会马上处理。"), ref: ev.id, ...(channel ? { channel } : {}) });
     return ev;
   }
 
@@ -398,7 +485,7 @@ export class Hub extends DurableObject<Env> {
       return json({ ok: true });
     }
     if (p === "/api/push/test") {
-      const r = await this.pushAll({ title: "Noop", body: "测试通知：手机推送已开通。", kind: "notice", url: "/", tag: "test", options: [], badge: 0 }, "normal", who.session);
+      const r = await this.pushAll({ title: "Noop", body: L("Test notification: phone push is working.", "测试通知：手机推送已开通。"), kind: "notice", url: "/", tag: "test", options: [], badge: 0 }, "normal", who.session);
       return json({ ok: true, ...r });
     }
     return json({ error: "not found" }, 404);
@@ -454,34 +541,34 @@ export class Hub extends DurableObject<Env> {
       if (!validEmail(email)) return json({ error: "invalid email" }, 400);
       const owners = this.owners();
       // Only the allow-list may sign in: anyone else is told so at once, with no code, no mail and no row written.
-      if (owners.length && !owners.includes(email)) return json({ error: "这个邮箱不允许登录" }, 403);
-      if (!this.totp()) return json({ error: "totp_not_setup", message: TOTP_MISSING }, 403); // no mail for a sign-in that can't finish
+      if (owners.length && !owners.includes(email)) return json({ error: L("This email is not allowed to log in", "这个邮箱不允许登录") }, 403);
+      if (!this.totp()) return json({ error: "totp_not_setup", message: TOTP_MISSING() }, 403); // no mail for a sign-in that can't finish
       // No email set up yet: the code is shown on the owner's own machine instead (`noop login`, needs the machine key).
       const send = this.mailer(), cli = !send;
       this.sql.exec("DELETE FROM auth_sends WHERE ts < ?", now - 3600_000);
             const recent = this.sql.exec("SELECT COUNT(*) AS n FROM auth_sends WHERE email = ? AND ts > ?", email, now - RESEND_MS).one().n as number;
-      if (recent) return json({ error: "请稍等一分钟再重新获取验证码" }, 429);
+      if (recent) return json({ error: L("Wait a minute before requesting another code", "请稍等一分钟再重新获取验证码") }, 429);
       const sent = this.sql.exec("SELECT COUNT(*) AS n FROM auth_sends WHERE sent = 1").one().n as number;
-      if (sent >= SENDS_PER_HOUR) return json({ error: "验证码发送太频繁，请一小时后再试" }, 429);
+      if (sent >= SENDS_PER_HOUR) return json({ error: L("Too many codes sent, try again in an hour", "验证码发送太频繁，请一小时后再试") }, 429);
       const isOwner = owners.includes(email) || (cli && !owners.length);
       this.sql.exec("INSERT INTO auth_sends (email, ts, sent) VALUES (?, ?, ?)", email, now, isOwner ? 1 : 0);
-      if (!isOwner) return json({ error: "这个邮箱不允许登录" }, 403); // no allow-list and email set up: nobody is the owner
+      if (!isOwner) return json({ error: L("This email is not allowed to log in", "这个邮箱不允许登录") }, 403); // no allow-list and email set up: nobody is the owner
       const code = newCode();
       this.sql.exec("INSERT OR REPLACE INTO auth_codes (email, hash, expires, attempts) VALUES (?, ?, ?, 0)", email, await sha256(`${email}:${code}`), now + CODE_TTL);
       if (cli) { this.set("cli_code", { email, code, expires: now + CODE_TTL }); return json({ ok: true, delivery: "cli" }); }
       try {
-        const subject = `Noop 登录验证码：${code}`;
-        const text = `你的 Noop 登录验证码是：\n\n    ${code}\n\n10 分钟内有效。\n\n如果不是你本人操作，请忽略这封邮件。\n`;
+        const subject = L(`Noop login code: ${code}`, `Noop 登录验证码：${code}`);
+        const text = L(`Your Noop login code is:\n\n    ${code}\n\nValid for 10 minutes.\n\nIf this was not you, ignore this email.\n`, `你的 Noop 登录验证码是：\n\n    ${code}\n\n10 分钟内有效。\n\n如果不是你本人操作，请忽略这封邮件。\n`);
         await send!(email, subject, text);
       } catch (err) {
         console.error(`auth mail failed: ${err}`);
         this.sql.exec("DELETE FROM auth_codes WHERE email = ?", email);
-        return json({ error: "验证码邮件发送失败，请稍后再试" }, 502);
+        return json({ error: L("Sending the code email failed, try again later", "验证码邮件发送失败，请稍后再试") }, 502);
       }
       return json({ ok: true });
     }
     if (p === "/api/auth/verify") {
-      const r = await this.checkCode(body?.email, body?.code, (body as { totp?: unknown } | null)?.totp, { req, via: "App / 浏览器登录" });
+      const r = await this.checkCode(body?.email, body?.code, (body as { totp?: unknown } | null)?.totp, { req, via: L("App / browser login", "App / 浏览器登录") });
       if (!r.email) return json({ error: r.error }, r.status ?? 401);
       return json({ session: await this.newSession(r.email, req.headers.get("user-agent") ?? "") });
     }
@@ -496,8 +583,77 @@ export class Hub extends DurableObject<Env> {
     return json({ error: "not found" }, 404);
   }
 
+  // ------------------------------------------------------------ MCP OAuth (mcp-oauth.ts)
+  mcpHttpServer(name: string) {
+    const st = this.get("settings") as { current?: { mcp_servers?: unknown } } | undefined;
+    return mcpServers(st?.current?.mcp_servers).find((s) => s.name === name && s.type === "http");
+  }
+  mcpOAuthNames(): string[] {
+    return this.sql.exec("SELECT name FROM mcp_oauth").toArray().map((r) => r.name as string);
+  }
+  async mcpOAuthRead(name: string): Promise<OAuthState | null> {
+    const r = this.sql.exec("SELECT sealed FROM mcp_oauth WHERE name = ?", name).toArray()[0];
+    const v = r ? await unseal(this.env.HUB_TOKEN, `mcp-oauth:${name}`, r.sealed as string) : null;
+    try { return v ? (JSON.parse(v) as OAuthState) : null; } catch { return null; }
+  }
+  async mcpOAuthWrite(name: string, s: OAuthState) {
+    this.sql.exec("INSERT OR REPLACE INTO mcp_oauth (name, sealed, updated) VALUES (?, ?, ?)", name, await seal(this.env.HUB_TOKEN, `mcp-oauth:${name}`, JSON.stringify(s)), new Date().toISOString());
+  }
+  /** The access token to hand a machine now (refreshed when it ends soon), or null. */
+  async mcpOAuthToken(name: string): Promise<string | null> {
+    const s = await this.mcpOAuthRead(name);
+    if (!s?.tokens) return null;
+    const { tokens, changed } = await freshTokens(fetch, s);
+    if (changed && tokens) await this.mcpOAuthWrite(name, { ...s, tokens });
+    return tokens?.access_token ?? null;
+  }
+  /** What the app shows: signed in or not, until when; never a token. */
+  async mcpOAuthList() {
+    const out: { name: string; signed_in: boolean; expires_at?: number; renewable: boolean; updated: string }[] = [];
+    for (const r of this.sql.exec("SELECT name, updated FROM mcp_oauth ORDER BY name").toArray()) {
+      const s = await this.mcpOAuthRead(r.name as string);
+      const t = s?.tokens;
+      out.push({ name: r.name as string, signed_in: !!t && (!t.expires_at || t.expires_at > Date.now() || !!t.refresh_token), ...(t?.expires_at ? { expires_at: t.expires_at } : {}), renewable: !!t?.refresh_token, updated: r.updated as string });
+    }
+    return out;
+  }
+  async mcpOAuthStart(name: string, origin: string): Promise<Response> {
+    const server = this.mcpHttpServer(name);
+    if (!server?.url) return json({ error: L("No remote MCP server with that name", "没有这个名称的远程 MCP 服务") }, 404);
+    const redirect = `${origin}/api/mcp-oauth/callback`;
+    const found = await discover(fetch, server.url);
+    if (!found) return json({ error: L("This server does not support signing in with OAuth", "这个服务不支持 OAuth 登录") }, 422);
+    const prev = await this.mcpOAuthRead(name);
+    // reuse the registered client while the server's endpoints are unchanged
+    const client = prev && prev.meta.token_endpoint === found.meta.token_endpoint ? prev.client : await register(fetch, found.meta, redirect);
+    if (!client) return json({ error: L("This server does not allow registering Noop as a client", "这个服务不允许 Noop 自动注册为客户端") }, 422);
+    const s: OAuthState = { meta: found.meta, resource: found.resource, client, ...(prev?.tokens ? { tokens: prev.tokens } : {}) };
+    await this.mcpOAuthWrite(name, s);
+    const state = randomToken(), verifier = randomToken(48);
+    this.sql.exec("DELETE FROM mcp_oauth_pending WHERE created < ?", Date.now() - PENDING_TTL_MS);
+    this.sql.exec("INSERT INTO mcp_oauth_pending (state, name, verifier, created) VALUES (?, ?, ?, ?)", state, name, verifier, Date.now());
+    return json({ url: authorizeUrl(s, redirect, state, await pkceChallenge(verifier)) });
+  }
+  async mcpOAuthCallback(url: URL): Promise<Response> {
+    const fail = (text: string) => callbackPage(false, L("Sign-in failed", "登录失败"), text);
+    const state = url.searchParams.get("state") ?? "";
+    const row = this.sql.exec("SELECT name, verifier, created FROM mcp_oauth_pending WHERE state = ?", state).toArray()[0];
+    this.sql.exec("DELETE FROM mcp_oauth_pending WHERE state = ?", state); // one use
+    if (!row || Date.now() - (row.created as number) > PENDING_TTL_MS) return fail(L("This sign-in link expired. Start again from Noop.", "登录链接已失效，请回到 Noop 重新开始。"));
+    const name = row.name as string;
+    const code = url.searchParams.get("code");
+    if (!code) return fail(url.searchParams.get("error_description") ?? url.searchParams.get("error") ?? L("No authorization code", "没有收到授权码"));
+    const s = await this.mcpOAuthRead(name);
+    if (!s) return fail(L("Start again from Noop.", "请回到 Noop 重新开始。"));
+    const tokens = await tokenRequest(fetch, s, { grant_type: "authorization_code", code, redirect_uri: `${url.origin}/api/mcp-oauth/callback`, code_verifier: row.verifier as string });
+    if (!tokens) return fail(L("The server did not issue a token.", "服务没有签发令牌。"));
+    await this.mcpOAuthWrite(name, { ...s, tokens });
+    this.append({ from: "hub", kind: "notice", text: L(`Signed in to MCP server ${name}; every machine uses it from its next task.`, `已登录 MCP 服务 ${name}，各机器下一个任务起即可使用。`) });
+    return callbackPage(true, L(`Signed in to ${name}`, `已登录 ${name}`), L("Every machine can use it now. You can close this page.", "所有机器都可以使用了，可以关闭这个页面。"));
+  }
+
   async fetch(req: Request): Promise<Response> {
-    try { return await this.handle(req); } finally { this.settle(); }
+    try { return await this.handle(req); } finally { this.settle(1, routeKey(req)); }
   }
 
   async handle(req: Request): Promise<Response> {
@@ -505,12 +661,24 @@ export class Hub extends DurableObject<Env> {
     const p = url.pathname, m = req.method;
 
     if (p.startsWith("/api/auth/")) return this.auth(p, req);
+    // guest workers (guests.ts): a one-time code joins; a guest token reaches /api/guest/* and nothing else
+    if (p === "/api/guest/join" && m === "POST") return guestJoin(this.sql, req, (text) => this.append({ from: "hub", kind: "notice", text }));
+    const gt = this.credential(req, url);
+    if (GUEST_TOKEN.test(gt)) {
+      const g = await guestWho(this.sql, gt);
+      if (!g) return json({ error: "unauthorized" }, 401);
+      return guestApi(this.sql, req, url, g, (id, guest) => this.append({ from: "hub", kind: "notice", ref: id, text: L(`Guest machine ${guest} returned the result of ${id} (not reviewed).`, `访客机器 ${guest} 交回了 ${id} 的结果（未经审查）。`) }));
+    }
+    // the browser lands here after signing in to an MCP server: no session, the one-time state is the credential
+    if (p === "/api/mcp-oauth/callback" && m === "GET") return this.mcpOAuthCallback(url);
     if (isMcpPath(p)) return this.mcp.fetch(req, await this.who(req, url));
     const who = await this.who(req, url);
     if (!who) return json({ error: "unauthorized" }, 401);
     // a connector's OAuth token is for /mcp only: never the owner API (settings, machine key via /api/host/join, …)
     if (who !== "machine" && who.scope === "mcp") return json({ error: "forbidden" }, 403);
     if (p.startsWith("/api/push/")) return this.push(p, req, who);
+    const ga = await guestsAdmin(this.sql, req, url, who === "machine" ? "machine" : "owner");
+    if (ga) return ga;
     if ((p === "/api/files/list" || p === "/api/files/read") && m === "GET") { // owner (and machine) read of READABLE prefixes
       const r = handleReadFiles(this.sql, url);
       if (r) return r;
@@ -543,7 +711,7 @@ export class Hub extends DurableObject<Env> {
     //   POST /api/host/2fa/confirm {totp} → binds the pending secret once a code from the app matches it
     if (p.startsWith("/api/host/2fa")) {
       if (who !== "machine") return json({ error: "forbidden" }, 403);
-      const host = req.headers.get("x-noop-host") ?? "持有机器密钥的主机";
+      const host = req.headers.get("x-noop-host") ?? L("a host holding the machine key", "持有机器密钥的主机");
       if (p === "/api/host/2fa" && m === "GET") { // also what `noop security` can't see from config.toml: the live allow-list
         const t = this.totp(), allow = parseAllowList(this.env.HUB_ALLOW_IPS);
         return json({ bound: !!t, since: t?.bound ?? null, allow_ips: this.env.HUB_ALLOW_IPS?.trim() ? allow.nets.length : null });
@@ -556,14 +724,14 @@ export class Hub extends DurableObject<Env> {
       if (p === "/api/host/2fa/confirm" && m === "POST") {
         const { totp } = (await req.json().catch(() => ({}))) as { totp?: unknown };
         const pend = this.get("totp_pending");
-        if (!pend?.secret || pend.expires < Date.now()) return json({ error: "没有待确认的绑定（10 分钟内有效），重新运行 noop 2fa setup" }, 400);
+        if (!pend?.secret || pend.expires < Date.now()) return json({ error: L("No binding waiting for confirmation (valid for 10 minutes), run noop 2fa setup again", "没有待确认的绑定（10 分钟内有效），重新运行 noop 2fa setup") }, 400);
         const step = await totpMatch(pend.secret, totp);
-        if (step === null) return json({ error: "两步验证码不对：确认手机时间准确，输入验证器 App 上的最新数字" }, 400);
+        if (step === null) return json({ error: L("The 2FA code is wrong: check your phone's clock and enter the latest number in the authenticator app", "两步验证码不对：确认手机时间准确，输入验证器 App 上的最新数字") }, 400);
         const was = !!this.totp();
         this.set("totp", { secret: pend.secret, last: step, bound: Date.now() });
         this.sql.exec("DELETE FROM kv WHERE k = 'totp_pending'"); this.mem.delete("totp_pending");
-        this.alert(was ? "两步验证已换绑" : "两步验证已开启", [`操作方：${host}`, `时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}（北京时间）`,
-          "", was ? "旧的验证器从现在起失效。如果不是你本人操作：有人拿到了你的机器密钥，立即检查你的主机。" : "从现在起，登录需要邮箱验证码 + 验证器 App 上的两步验证码。"]);
+        this.alert(L(was ? "2FA re-bound" : "2FA turned on", was ? "两步验证已换绑" : "两步验证已开启"), [L(`By: ${host}`, `操作方：${host}`), alertTime(),
+          "", L(was ? "The old authenticator no longer works. If this was not you, someone has your machine key: check your host now." : "From now on, logging in needs the email code and the 2FA code from your authenticator app.", was ? "旧的验证器从现在起失效。如果不是你本人操作：有人拿到了你的机器密钥，立即检查你的主机。" : "从现在起，登录需要邮箱验证码 + 验证器 App 上的两步验证码。")]);
         return json({ ok: true, replaced: was });
       }
       return json({ error: "not found" }, 404);
@@ -576,7 +744,7 @@ export class Hub extends DurableObject<Env> {
     if (p === "/api/host/join" && m === "POST") { // a new machine, approved by the owner's login, gets the machine key
       if (who === "machine") return json({ error: "forbidden" }, 403);
       const { host } = (await req.json().catch(() => ({}))) as { host?: string };
-      this.append({ from: "hub", kind: "notice", text: `新机器 ${String(host ?? "?").slice(0, 60)} 已加入团队。` });
+      this.append({ from: "hub", kind: "notice", text: L(`New machine ${String(host ?? "?").slice(0, 60)} joined the team.`, `新机器 ${String(host ?? "?").slice(0, 60)} 已加入团队。`) });
       return json({ token: this.env.HUB_TOKEN });
     }
     if (p === "/api/host/revoke-sessions" && m === "POST") {
@@ -589,7 +757,7 @@ export class Hub extends DurableObject<Env> {
       this.sql.exec("DELETE FROM oauth_refresh");
       this.sql.exec("DELETE FROM oauth_codes");
       this.sql.exec("DELETE FROM auth_codes");
-      this.alert("所有登录已撤销", [`${n} 个登录（手机、浏览器、MCP 连接器）已被踢下线，需要重新用邮箱验证码登录。`, `操作方：${req.headers.get("x-noop-host") ?? "持有机器密钥的主机"}`]);
+      this.alert(L("All logins revoked", "所有登录已撤销"), [L(`${n} login(s) (phones, browsers, MCP connectors) were signed out and need to log in again with an email code.`, `${n} 个登录（手机、浏览器、MCP 连接器）已被踢下线，需要重新用邮箱验证码登录。`), L(`By: ${req.headers.get("x-noop-host") ?? "a host holding the machine key"}`, `操作方：${req.headers.get("x-noop-host") ?? "持有机器密钥的主机"}`)]);
       return json({ ok: true, revoked: n });
     }
     // Moving the hub to another Cloudflare account, one page at a time (media blobs are large):
@@ -641,13 +809,17 @@ export class Hub extends DurableObject<Env> {
     }
 
     if (p === "/api/messages" && m === "POST") {
-      const { text = "", reply_to, attachments, thread } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown };
+      const { text = "", reply_to, attachments, thread, client_id, channel } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown; client_id?: unknown; channel?: unknown };
+      const room = typeof channel === "string" && channel ? channelsView(this.mcp.store()).channels.find((c) => c.slug === channel)?.slug : undefined;
+      if (channel !== undefined && channel !== "" && !room) return json({ error: "channel not found" }, 400);
+      if (client_id !== undefined && (typeof client_id !== "string" || !/^[\w:-]{1,100}$/.test(client_id)))
+        return json({ error: "bad client_id" }, 400);
       const files = ownerAttachments(attachments);
       if (files === null) return json({ error: "bad attachments" }, 400);
       if (files.some((f) => !this.sql.exec("SELECT 1 FROM media WHERE id = ? LIMIT 1", f.slice(7)).toArray().length))
         return json({ error: "attachment not found" }, 400);
       if (!text.trim() && !files.length) return json({ error: "text required" }, 400);
-      return json(this.ownerMessage(text, reply_to, files, thread === true && /^T-/.test(reply_to ?? "")));
+      return json(this.ownerMessage(text, reply_to, files, thread === true && /^T-/.test(reply_to ?? ""), client_id as string | undefined, room));
     }
 
     // The owner's images for a message (paste / drop / pick in the app): images only, ≤ 10 MB, kept with the media.
@@ -666,6 +838,44 @@ export class Hub extends DurableObject<Env> {
 
     if (p === "/api/status") return json(this.statusView());
 
+    // shared secrets (cloud/src/secrets.ts): the owner writes, only machines read values back
+    if (p === "/api/secrets" && m === "GET") {
+      return json({ secrets: this.sql.exec("SELECT name, updated FROM secrets ORDER BY name").toArray() });
+    }
+    if (p === "/api/secrets" && m === "PUT") {
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      const { name, value } = (await req.json().catch(() => ({}))) as { name?: unknown; value?: unknown };
+      const bad = secretProblem(name, value);
+      if (bad) return json({ error: bad }, 400);
+      if (value === null || value === "") this.sql.exec("DELETE FROM secrets WHERE name = ?", name as string);
+      else this.sql.exec("INSERT OR REPLACE INTO secrets (name, sealed, updated) VALUES (?, ?, ?)", name as string, await seal(this.env.HUB_TOKEN, name as string, value as string), new Date().toISOString());
+      return json({ secrets: this.sql.exec("SELECT name, updated FROM secrets ORDER BY name").toArray() });
+    }
+    if (p === "/api/secrets/values" && m === "GET") {
+      if (who !== "machine") return json({ error: "forbidden" }, 403);
+      const out: Record<string, string> = {};
+      for (const r of this.sql.exec("SELECT name, sealed FROM secrets").toArray()) {
+        const v = await unseal(this.env.HUB_TOKEN, r.name as string, r.sealed as string);
+        if (v !== null) out[r.name as string] = v;
+      }
+      for (const name of this.mcpOAuthNames()) {
+        const t = await this.mcpOAuthToken(name);
+        if (t) out[oauthVar(name)] = t;
+      }
+      return Response.json({ values: out }, { headers: { "Cache-Control": "no-store" } });
+    }
+    // signing in to remote MCP servers (mcp-oauth.ts): the owner starts and signs out, machines get tokens above
+    if (p === "/api/mcp-oauth" && m === "GET") return json({ servers: await this.mcpOAuthList() });
+    if (p === "/api/mcp-oauth/start" && m === "POST") {
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      const { name } = (await req.json().catch(() => ({}))) as { name?: unknown };
+      return this.mcpOAuthStart(String(name ?? ""), url.origin);
+    }
+    if (p === "/api/mcp-oauth" && m === "DELETE") {
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      this.sql.exec("DELETE FROM mcp_oauth WHERE name = ?", url.searchParams.get("name") ?? "");
+      return json({ servers: await this.mcpOAuthList() });
+    }
     if (p === "/api/settings" && m === "GET") return json(this.get("settings") ?? { current: {}, effective: {}, options: {} });
     if (p === "/api/tasks" && m === "GET") {
       return json(taskHistory(this.mcp.store(), { query: url.searchParams.get("q") ?? "", offset: Number(url.searchParams.get("offset")), limit: Number(url.searchParams.get("limit")) }));
@@ -683,6 +893,20 @@ export class Hub extends DurableObject<Env> {
       const { id, done } = (await req.json().catch(() => ({}))) as { id?: string; done?: boolean };
       if (!id || !/^T-[\w]*\d{4}$/.test(id)) return json({ error: "id required" }, 400);
       this.toInbox({ type: "cancel", id, done: done === true });
+      return json({ ok: true });
+    }
+    if (p === "/api/channels" && m === "GET") return json(channelsView(this.mcp.store()));
+    if (p === "/api/channels/feed" && m === "GET") { // the channel's digest, however far back the app's feed doesn't reach
+      const c = channelsView(this.mcp.store()).channels.find((c) => c.slug === url.searchParams.get("slug"));
+      if (!c) return json({ error: "not found" }, 404);
+      const rows = this.sql.exec("SELECT json FROM events WHERE ref IN (SELECT value FROM json_each(?)) OR json_extract(json, '$.channel') = ? ORDER BY seq DESC LIMIT 5000", JSON.stringify(c.refs ?? []), c.slug).toArray().reverse();
+      return json({ events: channelDigest(rows.map((r) => JSON.parse(r.json as string)), c.refs ?? [], c.slug) });
+    }
+    if (p === "/api/channels" && m === "POST") { // owner: edit a channel's goal / archive it; the primary writes the file
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      const { slug, goal, archived } = (await req.json().catch(() => ({}))) as { slug?: string; goal?: unknown; archived?: unknown };
+      if (!slug || !CHANNEL_SLUG.test(slug)) return json({ error: "slug required" }, 400);
+      this.toInbox({ type: "channel", slug, ...(typeof goal === "string" ? { goal: goal.slice(0, 500) } : {}), ...(typeof archived === "boolean" ? { archived } : {}) });
       return json({ ok: true });
     }
     if (p === "/api/fleet/update" && m === "POST") { // owner: every machine updates to the latest code; the primary acts on it
@@ -724,6 +948,12 @@ export class Hub extends DurableObject<Env> {
       const e = (await req.json()) as Partial<Ev>;
       // over budget, routine fleet chatter is dropped (still in the local journal); what the owner must see still goes through
       if (this.level() === "shed" && SHEDDABLE.has(String(e.kind ?? ""))) return json({ dropped: "write budget" });
+      // the event id is the idempotency key: a host that never saw the reply (timeout, Worker restart, a retry after a
+      // dropped response) posts the same event again, and storing it twice shows the same message twice in the chat.
+      // Same rule ownerMessage already applies to client_id. The check and the insert below run without an await in
+      // between, so two requests carrying one id cannot both get past it.
+      if (typeof e.id === "string" && this.sql.exec("SELECT 1 FROM events WHERE json_extract(json, '$.id') = ? LIMIT 1", e.id).toArray().length)
+        return json({ duplicate: true });
       return json(this.append(e));
     }
     if (p === "/api/host/state" && m === "PUT") {
@@ -771,13 +1001,13 @@ export class Hub extends DurableObject<Env> {
     return json({ error: "not found" }, 404);
   }
 
-  webSocketMessage() { this.settle(1 / 20); } // incoming frames bill as 1/20 of a request (pings are auto-answered)
+  webSocketMessage() { this.settle(1 / 20, "ws"); } // incoming frames bill as 1/20 of a request (pings are auto-answered)
   webSocketClose(ws: WebSocket) {
     try { ws.close(); } catch {}
     const tags = this.ctx.getTags(ws);
     if (tags.includes("host")) { this.touchHost(); this.pushStatus(); }
     if (tags.includes("owner")) this.tellWatchers();
-    this.settle(0);
+    this.settle(0, "ws");
   }
 }
 

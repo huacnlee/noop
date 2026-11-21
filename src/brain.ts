@@ -8,8 +8,10 @@
 // owner messages reach this daemon over the existing owner→fleet inbox (long-polled, so within milliseconds), and the
 // reply goes back as a normal feed event.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { channelPrompt } from "./channels";
+import { homedir } from "node:os";
 import { join, relative } from "node:path";
-import { DATA, HOME_DIR, P, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
+import { DATA, HOME_DIR, L, P, loadConfig, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
 import { type Ev, type FileRow, type ToolStore, type WriteOp, isWrite, listDecisions, listRoutines, listTasks, editMemoryEntry, runTool, toolsFor, writeOp } from "../cloud/src/tools";
 
 // ---------------------------------------------------------------- the local tool store (the data repo on this machine)
@@ -44,6 +46,19 @@ export function reopenTask(file: string, text: string) {
   const { meta, body } = readDoc(file);
   writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, status: undefined, finished: undefined, wake_at: undefined, decision: undefined, attempt: undefined, resumed: "yes" },
     `${body}\n\n## Owner follow-up ${now()}\n> ${text.replace(/\n/g, "\n> ")}\n\nReopened by the owner's message above: the earlier runs are your context, act on it now.\n`);
+  unlinkSync(file);
+}
+
+/** The owner added to an open task: a queued or running one gets it on top of its request (a running one reruns with it after),
+ * a waiting one is woken to act on it now. Their words never open a gate: only an answered card does (decisions.ts), and an
+ * approval a card already gave stays (gates.ts). */
+export function addFollowUp(file: string, text: string, waiting: boolean) {
+  const { meta, body } = readDoc(file);
+  const added = `${body}\n\n## Owner follow-up ${now()}\n> ${text.replace(/\n/g, "\n> ")}\n`;
+  if (!waiting) return writeDoc(file, meta, added);
+  const kids = meta.children ? ` Its sub-tasks (${meta.children}) may still be open: check them, don't start them again.` : "";
+  writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, status: undefined, wake_at: undefined, resumed: "yes" },
+    `${added}\nWoken from waiting by the owner's message above: act on it now.${kids}\n`);
   unlinkSync(file);
 }
 
@@ -163,29 +178,29 @@ export class ClaudeModel implements Model {
 const BRAIN_TOOLS = toolsFor("brain");
 const MAX_ROUNDS = 4;
 
-export const SYSTEM = `You are Noop: the front of the owner's AI agent team, answering in the team chat channel the way a sharp
-chief of staff would in a chat app. The owner (Jason, CEO) writes tersely, usually in Chinese.
+export const systemPrompt = () => `You are Noop: the front of the owner's AI agent team, answering in the team chat channel the way a sharp
+chief of staff would in a chat app. The owner (${loadConfig().owner?.name ?? "the owner"}, CEO) writes tersely, usually in ${L("English", "Chinese")}.
 
 You act through tools. Each turn, answer with exactly ONE JSON object and nothing else:
 {"calls": [{"tool": "<name>", "args": {…}}], "reply": "<what you say in the channel, or empty>"}
 
 How to decide:
 - Chit-chat, thanks, a quick question you can answer from the context below: just reply (no calls).
-- A status question ("X 怎么样了", "现在在跑什么"): answer from the context if it is there; otherwise call read tools with
+- A status question (${L(`"how is X going", "what is running"`, `"X 怎么样了", "现在在跑什么"`)}): answer from the context if it is there; otherwise call read tools with
   reply "" — you get their results next turn and answer then.
 - Real work (code, PR review, release prep, investigation, anything that takes more than a minute): create_task with a
   clear title and the owner's request in details (quote it; add the context that the agent needs, e.g. which PR/repo,
   and "follows" when it continues or corrects a task from the channel). Agents do the work; you never claim to do it.
-- About an existing task, open or finished (corrections, "不行", "再…", more requirements): amend_task on it with the owner's
+- About an existing task, open or finished (corrections, ${L(`"no", "again…"`, `"不行", "再…"`)}, more requirements): amend_task on it with the owner's
   words, not a new task. A task is one conversation: amending a finished one reopens it under the same id. When it is
   waiting on the owner's decision card, the text answers that card. Use create_task with follows=<that task> only for
   clearly separate new work.
-- "记住/以后都这样/记下来" or a standing rule for how the fleet should work: remember it (pick the file that fits;
+- ${L(`"remember / always do this / note this"`, `"记住/以后都这样/记下来"`)} or a standing rule for how the fleet should work: remember it (pick the file that fits;
   agents/<name>/memory.md when it only concerns one agent's kind of work). If it also asks for work, do both.
 - A complaint or change request about a product (Noop, NSH, ...) is work, not a rule: create_task only, never remember it.
   Read it together with the owner's previous messages: one in a series of product changes belongs to that series. When
   you cannot tell, do not remember; say what you took it as, so the owner can correct you.
-- A memory is wrong, outdated or should go ("删掉那条", "记错了"): find it with read_memory (query), then edit_memory; only when the
+- A memory is wrong, outdated or should go (${L(`"delete that one", "that is wrong"`, `"删掉那条", "记错了"`)}): find it with read_memory (query), then edit_memory; only when the
   owner asks. Without text it deletes the entry.
 - Answering or changing the answer to a decision card: answer_decision. Stop/drop a task only when clearly asked: cancel_task.
   Priority / who does it: set_priority / reassign_task.
@@ -193,9 +208,10 @@ How to decide:
   with a decision card.
 
 The reply:
-- In the owner's language; one or two short sentences (a list only when asked for one); specific, like a person. Say what you did or found ("记下了：…", "T-0184 在 macbook 上跑，
-  正在写测试"). Never a template, never process promises ("做完带结果回来", "需要你拍板时…"), no filler.
-- Empty when there is nothing useful to say (a bare "A", "ok", "好的", or when the action speaks for itself).
+- In the owner's language; one or two short sentences (a list only when asked for one); specific, like a person. Say what you did or found ${L(`("Noted: …", "T-0184 is running on the macbook,
+  writing tests")`, `("记下了：…", "T-0184 在 macbook 上跑，
+  正在写测试")`)}. Never a template, never process promises ${L(`("will report back when done", "when you need to decide…")`, `("做完带结果回来", "需要你拍板时…")`)}, no filler.
+- Empty when there is nothing useful to say (a bare "A", ${L(`"ok", "thanks",`, `"ok", "好的",`)} or when the action speaks for itself).
 - Never invent facts: if you did not see it in the context or a tool result, look it up or say you don't know.
 
 Tools (args as JSON; [w] = write):
@@ -213,6 +229,8 @@ export type BrainIn = {
   chat?: string[];
   /** When the owner sent it (feed ts), for latency. */
   sentAt?: string;
+  /** Said inside a channel: the discussion and the work it starts stay there. */
+  channel?: { slug: string; name: string; goal: string };
 };
 export type BrainOut = { reply: string; calls: { tool: string; args: any; ok: boolean; result?: any; error?: string }[]; rounds: number; ms: { first_reply?: number; model: number[]; total: number }; fallback?: boolean };
 
@@ -229,6 +247,8 @@ export function context(st: ToolStore, m: BrainIn): string {
   const s = st.status() ?? {};
   return [
     `Now: ${new Date().toISOString()}`,
+    channelPrompt(),
+    "When calling create_task, set channels by these goals. Existing slugs or {name, goal} for a new work topic; [] for none.",
     `Routines: ${listRoutines(st).map((r) => `${r.name} (${r.every ?? r.at ?? "?"}, ${r.agent}${r.enabled ? "" : ", off"})`).join("; ") || "(none)"}`,
     `Machines online: ${(s.hosts ?? []).filter((h: any) => h.online !== false).map((h: any) => h.host).join(", ") || "unknown"}`,
     `Open tasks:\n${open.map((t) => `- ${t.id} [${t.state}${t.agent ? `, ${t.agent}` : ""}${t.host ? ` on ${t.host}` : ""}${t.priority ? `, ${t.priority}` : ""}] ${t.title}`).join("\n") || "(none)"}`,
@@ -238,6 +258,7 @@ export function context(st: ToolStore, m: BrainIn): string {
     mem.length ? `Memory lines that may be relevant (read_memory for more):\n${mem.join("\n")}` : "",
     ids.length ? `Tasks mentioned in the channel: ${ids.join(", ")}` : "",
     `The channel just before (oldest first):\n${(m.chat ?? []).join("\n") || "(empty)"}`,
+    m.channel ? `The owner wrote this inside the channel #${m.channel.name} (\`${m.channel.slug}\`), goal: ${m.channel.goal || "(none)"}. Read it in that context; the conversation above is this channel's. Your reply and any task you create belong to this channel (it is added to the task's channels automatically).` : "",
     m.replyTo ? `The owner wrote this as a reply to the team's message about ${m.replyTo}.` : "",
     `The owner's message:\n${m.text.slice(0, 4000)}`,
   ].filter(Boolean).join("\n\n");
@@ -265,11 +286,12 @@ export function parseTurn(out: string): { calls: { tool: string; args: any }[]; 
 export async function think(m: BrainIn, st: ToolStore, model: Model, post: (reply: string, ref?: string) => void): Promise<BrainOut> {
   const t0 = Date.now();
   const res: BrainOut = { reply: "", calls: [], rounds: 0, ms: { model: [], total: 0 } };
-  const conv = await model.open(SYSTEM);
+  const conv = await model.open(systemPrompt());
   try {
     let input = context(st, m);
     for (let round = 0; round < MAX_ROUNDS; round++) {
       res.rounds++;
+      const last = round === MAX_ROUNDS - 1;
       const tm = Date.now();
       const out = await conv.send(input);
       res.ms.model.push(Date.now() - tm);
@@ -279,7 +301,8 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
       const writes = turn.calls.filter((c) => isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const unknown = turn.calls.filter((c) => !BRAIN_TOOLS.some((t) => t.name === c.tool));
       const invalid = writes.map((c) => ({ c, op: writeOp(c.tool, c.args, st) })).filter((x) => typeof x.op === "string");
-      if (reads.length || unknown.length || invalid.length) {
+      // the last round answers with what it has: a lookup that never ends must not swallow the message
+      if (!last && (reads.length || unknown.length || invalid.length)) {
         const results: string[] = [];
         for (const c of reads) {
           const r = await runTool(st, c.tool, c.args);
@@ -290,7 +313,7 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
         for (const x of invalid) { res.calls.push({ ...x.c, ok: false, error: x.op as string }); results.push(`${x.c.tool}(${JSON.stringify(x.c.args)}) → ERROR ${x.op}`); }
         const pending = writes.filter((c) => !invalid.some((x) => x.c === c));
         if (pending.length) results.push(`Not run yet (send them again if still wanted): ${pending.map((c) => c.tool).join(", ")}`);
-        input = `Tool results:\n${results.join("\n")}\n\nNow answer: one JSON object.`;
+        input = `Tool results:\n${results.join("\n")}\n\n${round === MAX_ROUNDS - 2 ? "Last turn: no more read calls, reply now with what you have" : "Now answer"}: one JSON object.`;
         continue;
       }
       // final turn: post the reply, then run the writes
@@ -309,13 +332,22 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
 }
 
 /** Latency log (one JSON line per message): ~/.noop/brain.jsonl, local to this machine. */
-/** Without the model: the task a terse follow-up continues. A short one-line message sent within 10 minutes of the team's
- *  last message about a task ("应该转发…", "给我中文") belongs to that task's conversation, not to a new task. */
-export function followUpTarget(text: string, events: { from: string; ts: string; ref?: string }[], now = Date.now()): string | undefined {
-  const t = text.trim();
-  if (!t || t.includes("\n") || [...t].length > 40) return undefined;
-  const last = [...events].reverse().find((e) => e.from !== "owner" && /^T-\w+$/.test(e.ref ?? ""));
-  return last && now - Date.parse(last.ts) <= 10 * 60_000 ? last.ref : undefined;
+/** The chat model cannot answer (CLI missing or logged out, quota, timeout), so nothing can tell what a message is about.
+ *  It is not guessed from recency ("the task the team spoke about last"): that silently reopened finished cards the message
+ *  had nothing to do with. A reply to a task, or a message written on a task's page, goes to that task, as the owner chose
+ *  it. Anything else becomes a new task for the lead, who sees the channel before it and decides. The owner gets a line
+ *  saying where it went (`note`), and `why` is the one-line reason for the journal. */
+export async function routeWithoutModel(st: ToolStore, o: { text: string; reply?: string; why: unknown }): Promise<{ ok: boolean; id?: string; amended: boolean; note: string; why: string }> {
+  const why = String(o.why).split("\n")[0].slice(0, 160);
+  if (o.reply) {
+    const r = await st.act({ tool: "amend_task", id: o.reply, text: o.text });
+    if (r.ok) return { ok: true, id: o.reply, amended: true, why, note: L(`The chat assistant is unavailable right now, so I added this to ${o.reply}.`, `聊天助手暂时不可用，已把这句话追加到 ${o.reply}。`) };
+  }
+  const details = `The chat assistant was unavailable (${why}), so nothing triaged this message. Read the channel before it: if it continues an existing task, answer there; otherwise handle it as a new request.`;
+  const r = await st.act({ tool: "create_task", title: o.text.split("\n")[0].slice(0, 80), details });
+  const id = typeof r.id === "string" ? r.id : undefined;
+  if (!r.ok) return { ok: false, amended: false, why, note: L("The chat assistant is unavailable and this message could not be saved as a task; please send it again.", "聊天助手暂时不可用，这句话没能保存成任务，请再发一次。") };
+  return { ok: true, id, amended: false, why, note: L(`The chat assistant is unavailable right now, so I handed this to the lead as ${id}.`, `聊天助手暂时不可用，已交总负责人 ${id}。`) };
 }
 
 export function logBrain(m: BrainIn, out: BrainOut, receivedAt: number) {
@@ -333,10 +365,15 @@ export function logBrain(m: BrainIn, out: BrainOut, receivedAt: number) {
   } catch {}
 }
 
+export function claudeSettingsPath(env: Record<string, string | undefined> = process.env): string {
+  // HOME does not exist on Windows unless a POSIX shell set it (a daemon started from PowerShell has none):
+  // `${undefined}/.claude` is no file, the gateway env was silently dropped and the brain could not log in
+  return join(env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude"), "settings.json");
+}
 /** `--setting-sources ""` also drops the `env` block of ~/.claude/settings.json, where an API gateway
  *  (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY) is configured; without it the brain falls back to the OAuth login
  *  and fails with "Not logged in" while every task run works. Pass that env through explicitly. */
-export function userSettingsEnv(path = `${process.env.CLAUDE_CONFIG_DIR ?? `${process.env.HOME}/.claude`}/settings.json`): Record<string, string> {
+export function userSettingsEnv(path = claudeSettingsPath()): Record<string, string> {
   try {
     const env = JSON.parse(readFileSync(path, "utf8"))?.env;
     if (!env || typeof env !== "object") return {};

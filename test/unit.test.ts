@@ -1,12 +1,22 @@
 import { expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { due } from "../src/cli";
+import { join } from "node:path";
+import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
-import { parseResult, runAgent } from "../src/runner";
+import { dirtyPaths } from "../src/setup";
+import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
+import { tooManyWakes } from "../src/waits";
 
-test("routine schedule", () => {
-  const t = new Date("2026-11-02T19:05:00"); // Monday
+test("dirtyPaths keeps every path intact, including the first line", () => {
+  // the first line of `git status --porcelain` for an unstaged edit starts with a space
+  expect(dirtyPaths(" M src/accounts.ts\nA  src/new.ts\nR  old.ts -> new.ts\n?? docs/x.md\n")).toEqual([
+    "src/accounts.ts", "src/new.ts", "old.ts -> new.ts", "docs/x.md",
+  ]);
+  expect(dirtyPaths("")).toEqual([]);
+});
+
+test("routine schedule", () => {  const t = new Date("2026-11-02T19:05:00"); // Monday
   expect(due("15m", undefined, t)).toBe(true);
   expect(due("15m", new Date(+t - 5 * 60e3).toISOString(), t)).toBe(false);
   expect(due("weekdays 19:00", undefined, t)).toBe(true);
@@ -14,6 +24,19 @@ test("routine schedule", () => {
   expect(due("weekly FRI 17:00", undefined, t)).toBe(false);
   expect(due("daily 20:00", undefined, t)).toBe(false);
   expect(due("daily 02:30", undefined, t)).toBe(false); // first run long after slot → wait for next slot
+});
+
+test("routine schedule catches up a slot missed while the machine slept", () => {
+  // Ran yesterday 19:00, tick at 03:00 before today's slot → nothing due yet.
+  expect(due("daily 19:00", "2026-11-17T19:00:00", new Date("2026-11-18T03:00:00"))).toBe(false);
+  // Missed yesterday 19:00 entirely (asleep), tick at 03:00 → fire yesterday's slot now.
+  expect(due("daily 19:00", "2026-11-16T19:00:00", new Date("2026-11-18T03:00:00"))).toBe(true);
+  // Weekday routine missed on Friday fires on Saturday morning.
+  expect(due("weekdays 19:00", "2026-11-12T19:00:00", new Date("2026-11-14T10:00:00"))).toBe(true);
+  // Weekly Sunday routine missed fires on Monday.
+  expect(due("weekly SUN 21:00", "2026-11-08T21:00:00", new Date("2026-11-16T08:00:00"))).toBe(true);
+  // ...but not a second time once it has caught up.
+  expect(due("daily 19:00", "2026-11-18T03:00:00", new Date("2026-11-18T03:05:00"))).toBe(false);
 });
 
 test("capability matching", () => {
@@ -34,6 +57,69 @@ test("external signature links the Noop name to its site", () => {
 test("result parsing", () => {
   expect(parseResult('blah\n```json\n{"status":"done","summary":"ok"}\n```').status).toBe("done");
   expect(parseResult("no block").status).toBe("failed");
+  expect(parseResult('```json\n{"status":"done","followups":[{"title":"A"},{"title":"B"}]}\n```').summary).toBe("Dispatched 2: A; B");
+  expect(parseResult('```json\n{"status":"done"}\n```').summary).toBe("(done, no summary)");
+  // codex sometimes ends its reply with a bare JSON object instead of a fenced ```json block
+  expect(parseResult('{"status":"done","summary":"ok"}').status).toBe("done");
+});
+
+test("result parsing keeps a lone backslash such as a Windows drive path", () => {
+  const out = '```json\n{"status":"done","summary":"can\'t reach D:\\、USB drives"}\n```';
+  expect(parseResult(out)).toMatchObject({ status: "done", summary: "can't reach D:\\、USB drives" });
+});
+
+test("result parsing repairs a raw line break inside a JSON string", () => {
+  const out = '```json\n{"status":"delegated","summary":"ok","followups":[{"title":"x","body":"line one\n","agent":"a"}]}\n```';
+  expect(parseResult(out)).toMatchObject({ status: "delegated", followups: [{ title: "x", body: "line one\n", agent: "a" }] });
+});
+
+test("long runs reserve a checkpoint window before the hard limit", () => {
+  const limits = runLimits({ clis: { timeout_minutes: 90 } } as Cfg, 0);
+  expect(limits).toEqual({
+    totalMinutes: 90,
+    workMinutes: 80,
+    checkpointMinutes: 10,
+    checkpointAt: "1970-01-01T01:20:00.000Z",
+    hardAt: "1970-01-01T01:30:00.000Z",
+  });
+  expect(runLimits({ clis: { timeout_minutes: 90, checkpoint_minutes: 15 } } as Cfg, 0).workMinutes).toBe(75);
+  expect(runLimits({ clis: { timeout_minutes: 29 } } as Cfg, 0).checkpointMinutes).toBe(0);
+  expect(runLimits({ clis: { timeout_minutes: 15, checkpoint_minutes: 5 } } as Cfg, 0).workMinutes).toBe(10);
+  expect(runLimits({ clis: { timeout_minutes: 90, checkpoint_minutes: 0 } } as Cfg, 0).checkpointMinutes).toBe(0);
+});
+
+test("every task prompt states the checkpoint and hard deadlines", () => {
+  const cfg = { clis: { timeout_minutes: 90 }, owner: { name: "owner" } } as Cfg;
+  const prompt = deadlinePrompt(runLimits(cfg, 0));
+  expect(prompt).toContain("90-minute hard limit");
+  expect(prompt).toContain("1970-01-01T01:20:00.000Z");
+  expect(prompt).toContain("1970-01-01T01:30:00.000Z");
+  expect(prompt).toContain("return `waiting` with a quick read-only `wait_check`");
+});
+
+test("checkpoint fallback parks with an executable time-based wait_check", () => {
+  expect(checkpointFallback("T-1", "/tmp/run.log", 300_000)).toMatchObject({
+    status: "waiting",
+    wait_kind: "ci",
+    wait_minutes: 5,
+    wait_check: 'test "$(date +%s)" -ge 300',
+  });
+});
+
+test("work-limit resumes use a separate counter with the MAX_WAKES safety cap", () => {
+  const meta: Record<string, string> = {};
+  for (let hit = 1; hit <= 6; hit++) expect(tooManyWakes(recordRunLimit(meta))).toBe(false);
+  expect(tooManyWakes(recordRunLimit(meta))).toBe(true);
+  expect(meta.run_limits).toBe("7");
+});
+
+test("result parsing repairs a bare double quote inside a JSON string", () => {
+  // a real run (T-0016, 2026-11-16) was requeued and re-run because of this one line
+  const out = '```json\n{"status":"done","summary":"ok","lessons":["旧的两条"压到一条绑 2FA"仍在和新结论打架。"]}\n```';
+  expect(parseResult(out)).toMatchObject({ status: "done", lessons: ['旧的两条"压到一条绑 2FA"仍在和新结论打架。'] });
+  // escaped quotes and nested objects must keep parsing as before
+  const ok = '```json\n{"status":"done","summary":"say \\"hi\\"","followups":[{"title":"x"}]}\n```';
+  expect(parseResult(ok)).toMatchObject({ status: "done", summary: 'say "hi"', followups: [{ title: "x" }] });
 });
 
 test("owner image uploads: images only, 10 MB, attachments are the hub's own media", async () => {
@@ -126,6 +212,13 @@ test("quota/auth failover: same CLI's other account, then the other CLI, else no
   expect(failoverAccount(solo, { cli: "codex", name: "zz-test-c", dir: "" }, ["codex", "claude"], all)?.cli).toBe("claude");
 });
 
+test("classify: OpenAI 'no credits remaining' is a quota wall, so codex work falls back", async () => {
+  const { classify } = await import("../src/accounts");
+  expect(classify("ERROR: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.")).toBe("quota");
+  expect(classify("Credit balance is too low")).toBe("quota");
+  expect(classify("exit 1: task failed")).toBeNull();
+});
+
 test("restart throttle: at most one voluntary restart per hour unless forced", async () => {
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -143,6 +236,28 @@ test("restart throttle: at most one voluntary restart per hour unless forced", a
 test("selfUpdate defers while tasks run on this host", async () => {
   const { selfUpdate } = await import("../src/setup");
   expect(await selfUpdate({ busy: 2 })).toBe(false);
+});
+
+test("a blocked self-update is reported once per distinct state", async () => {
+  const { join } = await import("node:path");
+  const { updateBlocked } = await import("../src/setup");
+  const f = join(mkdtempSync(join(tmpdir(), "noop-blocked-")), "update-blocked");
+  const dirty = "local edits: src/accounts.ts (HEAD aaaa, origin bbbb)";
+  expect(updateBlocked(dirty, f)).toBe(dirty); // first sighting → the caller journals it
+  expect(updateBlocked(dirty, f)).toBeNull(); // same state every 30 min → one line, not a flood
+  expect(updateBlocked("local edits: src/accounts.ts, src/cli.ts (HEAD aaaa, origin bbbb)", f)).not.toBeNull(); // a new edit is news
+});
+
+test("a release whose tests failed here is not installed again until origin moves on", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { updateRejected } = await import("../src/setup");
+  const f = join(mkdtempSync(join(tmpdir(), "noop-up-")), "update-rejected");
+  expect(updateRejected("1c6ae5a", f)).toBe(false); // nothing refused yet
+  writeFileSync(f, "1c6ae5a\n");
+  expect(updateRejected("1c6ae5a", f)).toBe(true); // the same bad release is skipped, no reinstall, no medic
+  expect(updateRejected("d23c0de", f)).toBe(false); // a newer release is tried again
 });
 
 test("taskView shows the original ask, not daemon requeue notes", async () => {
@@ -211,7 +326,7 @@ test("pickTask: a task no machine here can run (needs another OS) never holds ba
 });
 
 test("a reply to an agent's message goes to the brain with that task, never as an amendment of the last decision", async () => {
-  const { handleOwnerMessage, setOwnerTask, drainInbound } = await import("../src/server");
+  const { handleOwnerMessage, setOwnerTask, pendingInbound, ackInbound } = await import("../src/server");
   const calls: [string, { reply?: string; answered?: string }][] = [];
   setOwnerTask(async (text, o) => { calls.push([text, { reply: o.reply, answered: o.answered }]); });
   await handleOwnerMessage("D-0001 A"); // just answered a decision: the brain hears it may be amended
@@ -219,7 +334,21 @@ test("a reply to an agent's message goes to the brain with that task, never as a
   expect(calls).toEqual([["为何我看图片不清晰呢", { reply: "T-0125", answered: undefined }]]);
   await handleOwnerMessage("等等，选 B");
   expect(calls.at(-1)).toEqual(["等等，选 B", { reply: undefined, answered: "D-0001" }]);
-  expect(drainInbound()).toEqual([{ id: "D-0001", answer: "A", source: "chat" }]);
+  expect(pendingInbound()).toEqual([{ id: "D-0001", answer: "A", source: "chat" }]);
+  ackInbound(1);
+});
+
+test("an answer in words to a proposals card goes to the brain; numbers, all and none go straight to the card", async () => {
+  const { handleOwnerMessage, setOwnerTask, pendingInbound, ackInbound } = await import("../src/server");
+  const calls: string[] = [];
+  setOwnerTask(async (text) => { calls.push(text); });
+  await handleOwnerMessage("只做文档那项，另一个先不做", "P-0005");
+  await handleOwnerMessage("P-0006 1、不做 2、做");
+  await handleOwnerMessage("1，3", "P-0008");
+  await handleOwnerMessage("P-0009 all");
+  expect(calls).toEqual(["P-0005 只做文档那项，另一个先不做", "P-0006 1、不做 2、做"]);
+  expect(pendingInbound()).toEqual([{ id: "P-0008", answer: "1，3", source: "chat" }, { id: "P-0009", answer: "all", source: "chat" }]);
+  ackInbound(2);
 });
 
 test("a result block survives a later turn from a background task notification", async () => {
@@ -234,6 +363,217 @@ test("a result block survives a later turn from a background task notification",
   rmSync(log, { force: true });
   expect(res).toMatchObject({ status: "done", summary: "tested" });
 });
+
+test("run logs keep screenshot events but not their base64 payloads", () => {
+  const png = "iVBORw0KGgo".repeat(400);
+  const event = {
+    type: "user",
+    message: { role: "user", content: [{ tool_use_id: "t1", type: "tool_result",
+      content: [{ type: "image", source: { type: "base64", data: png, media_type: "image/png" } }] }] },
+    parent_tool_use_id: null,
+    tool_use_result: { type: "image", file: { base64: png, type: "image/png", originalSize: 3300 } },
+  };
+  const out = stripImages(JSON.stringify(event));
+  expect(out).not.toContain(png);
+  const e = JSON.parse(out);
+  expect(e.message.content[0].content[0].source).toEqual({ type: "base64", data: "[image/png, 3300 bytes omitted]", media_type: "image/png" });
+  expect(e.tool_use_result.file).toEqual({ base64: "[image/png, 3300 bytes omitted]", type: "image/png", originalSize: 3300 });
+  const text = '{"type":"assistant","message":{"content":[{"type":"text","text":"base64","note":"caf\\u00e9"}]}}'; // parsed, no image: kept byte for byte
+  expect(stripImages(text)).toBe(text);
+  const broken = '{"type":"user","source":{"type":"base64","data":"iVBOR';
+  expect(stripImages(broken)).toBe(broken);
+  expect(stripImages("plain codex output")).toBe("plain codex output");
+});
+
+test("a run log exists and grows while the agent runs, and has the usual layout at exit", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/noop-live-log-`);
+  const go = `${dir}/go`;
+  const first = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } });
+  const last = JSON.stringify({ type: "result", result: '```json\n{"status":"done","summary":"ok"}\n```' });
+  // prints one line, then waits for the test to release it before printing the result
+  const script = `const fs = require("node:fs");`
+    + `process.stdout.write(${JSON.stringify(`${first}\n`)});`
+    + `const t = setInterval(() => { if (fs.existsSync(${JSON.stringify(go)})) { clearInterval(t);`
+    + `process.stdout.write(${JSON.stringify(`${last}\n`)}); process.stderr.write("warn"); } }, 20);`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const run = runAgent("fake", "prompt", dir, cfg, log);
+    let mid = "";
+    for (let i = 0; i < 250 && !mid.endsWith(`${first}\n`); i++) { // the header holds the script, so it contains the text too
+      await Bun.sleep(20);
+      mid = existsSync(log) ? readFileSync(log, "utf8") : "";
+    }
+    expect(mid).toBe(`$ ${process.execPath} -e ${script} stream-json\n\n${first}\n`);
+    writeFileSync(go, "");
+    expect(parseResult(await run)).toMatchObject({ status: "done", summary: "ok" });
+    expect(readFileSync(log, "utf8")).toBe(`$ ${process.execPath} -e ${script} stream-json\n(exit 0)\n\n${first}\n${last}\n\n\n[stderr]\nwarn`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("an empty completion (no text, no tool call, exit 0) is retried once instead of failing the task", async () => {
+  // The provider sometimes answers with nothing at all and the CLI still exits 0; Claude Code's own
+  // "no visible output" retry gets nothing either. runAgent must not hand that back as the task's result.
+  const dir = mkdtempSync(`${tmpdir()}/noop-empty-`);
+  const mark = `${dir}/ran`;
+  const block = JSON.stringify({ type: "result", result: '```json\n{"status":"done","summary":"second try"}\n```' });
+  // first spawn: no output at all; second one: the normal result line (a marker file carries the state)
+  const script = `const fs = require("node:fs");`
+    + `if (fs.existsSync(${JSON.stringify(mark)})) process.stdout.write(${JSON.stringify(`${block}\n`)});`
+    + `else fs.writeFileSync(${JSON.stringify(mark)}, "");`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const res = parseResult(await runAgent("fake", "prompt", dir, cfg, log));
+    expect(res).toMatchObject({ status: "done", summary: "second try" });
+    expect(readFileSync(log, "utf8")).toContain("[retried after an empty response]");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a run that never reached the API is retried once instead of failing the task", async () => {
+  // A DNS or connection blip makes the CLI exit non-zero after burning no tokens and touching nothing; without a
+  // rerun one blip ends every task running at that moment with no result and wakes the medic.
+  const dir = mkdtempSync(`${tmpdir()}/noop-unreachable-`);
+  const mark = `${dir}/ran`;
+  const down = JSON.stringify({ type: "result", is_error: true, api_error: "connection_failed",
+    result: "API Error: Can't reach the API server \u2014 check your internet or DNS (ENOTFOUND)" });
+  const block = JSON.stringify({ type: "result", result: '```json\n{"status":"done","summary":"second try"}\n```' });
+  // first spawn: the connection failure and exit 1; second one: the normal result (a marker file carries the state)
+  const script = `const fs = require("node:fs");`
+    + `if (fs.existsSync(${JSON.stringify(mark)})) process.stdout.write(${JSON.stringify(`${block}\n`)});`
+    + `else { fs.writeFileSync(${JSON.stringify(mark)}, ""); process.stdout.write(${JSON.stringify(`${down}\n`)}); process.exit(1); }`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const res = parseResult(await runAgent("fake", "prompt", dir, cfg, log));
+    expect(res).toMatchObject({ status: "done", summary: "second try" });
+    expect(readFileSync(log, "utf8")).toContain("[retried after an unreachable API]");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a run stopped by its work limit uses a distinct checkpoint marker", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/noop-run-limit-`);
+  const script = `setTimeout(() => {}, 5000)`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script] }, timeout_minutes: 0.001 } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const out = await runAgent("fake", "prompt", dir, cfg, log);
+    expect(out).toContain(RUN_LIMIT);
+    expect(out).not.toContain("[stalled]");
+    expect(readFileSync(log, "utf8")).toContain("[stderr]");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 5_000);
+
+test("a work-limit run hands off to a checkpoint-only run end to end", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/noop-checkpoint-e2e-`);
+  const script = `let input = "";
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  if (input.includes("# Checkpoint-only recovery")) {
+    console.log('\`\`\`json\\n{"status":"waiting","wait_kind":"ci","wait_minutes":5,"wait_check":"test -f /tmp/noop-ready","waiting_on":"saved checkpoint","summary":"progress saved"}\\n\`\`\`');
+  } else setTimeout(() => {}, 5000);
+});`;
+  const workCfg = { clis: { fake: { command: [process.execPath, "-e", script] }, timeout_minutes: 0.001 } } as unknown as Cfg;
+  const checkpointCfg = { clis: { fake: { command: [process.execPath, "-e", script] }, timeout_minutes: 1 } } as unknown as Cfg;
+  const workLog = `${dir}/work.log`;
+  const checkpointLog = `${dir}/checkpoint.log`;
+  try {
+    const work = await runAgent("fake", "do work", dir, workCfg, workLog);
+    expect(work).toContain(RUN_LIMIT);
+    const body = checkpointRecoveryBody("do work", workLog, Date.now() + 300_000, 5);
+    const checkpoint = parseResult(await runAgent("fake", body, dir, checkpointCfg, checkpointLog));
+    expect(checkpoint).toMatchObject({ status: "waiting", wait_kind: "ci", wait_minutes: 5, waiting_on: "saved checkpoint" });
+    expect(checkpoint.wait_check).toBe("test -f /tmp/noop-ready");
+    expect(readFileSync(checkpointLog, "utf8")).toContain("progress saved");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 5_000);
+
+test("a failed run that already did work is not retried, however its text reads", async () => {
+  // The medic reports connection errors in its own result text. Replaying a run that ran a tool would repeat its
+  // side effects, so only a run that did nothing at all may be spawned again.
+  const dir = mkdtempSync(`${tmpdir()}/noop-unreachable-work-`);
+  const counter = `${dir}/n`;
+  const lines = [
+    { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "curl api" } }] } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "down" }] } },
+    { type: "result", result: "the host could not resolve the API (ENOTFOUND)" },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const script = `const fs = require("node:fs");`
+    + `const p = ${JSON.stringify(counter)};`
+    + `fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, "utf8") : 0) + 1));`
+    + `process.stdout.write(${JSON.stringify(`${lines}\n`)}); process.exit(1);`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const out = await runAgent("fake", "prompt", dir, cfg, log);
+    expect(out).toContain("ENOTFOUND");
+    expect(Number(readFileSync(counter, "utf8"))).toBe(1);
+    expect(readFileSync(log, "utf8")).not.toContain("[retried after");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a completed tool call with an empty result is not retried", async () => {
+  // A stream that already ran a tool and then ended with result:"" must not be replayed: the first run may have
+  // posted, committed, or done other work, and a fresh prompt would repeat it.
+  const dir = mkdtempSync(`${tmpdir()}/noop-tool-empty-`);
+  const counter = `${dir}/n`;
+  const lines = [
+    { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "echo hi" } }] } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "hi" }] } },
+    { type: "result", result: "" },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const script = `const fs = require("node:fs");`
+    + `const p = ${JSON.stringify(counter)};`
+    + `fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, "utf8") : 0) + 1));`
+    + `process.stdout.write(${JSON.stringify(`${lines}\n`)});`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const out = await runAgent("fake", "prompt", dir, cfg, log);
+    expect(out.trim()).toBe("");
+    expect(Number(readFileSync(counter, "utf8"))).toBe(1);
+    expect(readFileSync(log, "utf8")).not.toContain("[retried after an empty response]");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("visible assistant text with an empty result is not retried", async () => {
+  // An empty result currently masks earlier visible assistant text via `resultText ?? assistantText`; that must not
+  // trigger a replay either.
+  const dir = mkdtempSync(`${tmpdir()}/noop-text-empty-`);
+  const counter = `${dir}/n`;
+  const lines = [
+    { type: "assistant", message: { content: [{ type: "text", text: "I looked around" }] } },
+    { type: "result", result: "" },
+  ].map((l) => JSON.stringify(l)).join("\n");
+  const script = `const fs = require("node:fs");`
+    + `const p = ${JSON.stringify(counter)};`
+    + `fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, "utf8") : 0) + 1));`
+    + `process.stdout.write(${JSON.stringify(`${lines}\n`)});`;
+  const cfg = { clis: { fake: { command: [process.execPath, "-e", script, "stream-json"] } } } as unknown as Cfg;
+  const log = `${dir}/run.log`;
+  try {
+    const out = await runAgent("fake", "prompt", dir, cfg, log);
+    expect(out.trim()).toBe("");
+    expect(Number(readFileSync(counter, "utf8"))).toBe(1);
+    expect(readFileSync(log, "utf8")).not.toContain("[retried after an empty response]");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
 
 test("status: a task parked on something slow stays listed however many tasks finished after it", async () => {
   const { status } = await import("../src/server");
@@ -319,4 +659,108 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
     expect(parseResult(await runAgent("codex", "", tmpdir(), cfg, log))).toMatchObject({ status: "done", summary: "captured" });
     expect(parseResult(codexMessages(lines))).toMatchObject({ status: "done", summary: "captured" });
   } finally { rmSync(log, { force: true }); }
+});
+
+test("gate_override relaxes only the approvable gates", () => {
+  const cfg = { gates: { extra: ["Bash(kubectl delete:*)"] } } as unknown as Cfg;
+  const full = cliCommand("claude", cfg);
+  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)"])
+    expect(full).toContain(g);
+  const relaxed = cliCommand("claude", cfg, true);
+  expect(relaxed).not.toContain("Bash(gh pr merge:*)");
+  expect(relaxed).not.toContain("Bash(gh release create:*)");
+  expect(relaxed).not.toContain("Bash(gh api repos/:*)");
+  for (const g of ["--disallowedTools", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(kubectl delete:*)"])
+    expect(relaxed).toContain(g);
+});
+
+test("a model-emitted followup without a title cannot abort the run", async () => {
+  const { asText, newTask, readDoc, P } = await import("../src/core");
+  const { followupsOf } = await import("../src/cli");
+  // what the model actually sent when the daemon died: no title, only a body
+  const res = parseResult('```json\n{"status":"delegated","summary":"ok","followups":[{"body":"no title here"},{"title":"real work","agent":"lead"},"a bare string",null,{"title":42}]}\n```');
+  expect(followupsOf(res, 8).map((f) => f.title)).toEqual(["real work", "a bare string", "42"]);
+  expect(followupsOf({ status: "done", summary: "" }, 8)).toEqual([]); // no followups at all
+  expect(followupsOf({ status: "delegated", summary: "", followups: "nope" as any }, 8)).toEqual([]);
+  expect(followupsOf(res, 1).map((f) => f.title)).toEqual(["real work"]); // the depth cap still applies
+  // and the boundary itself no longer throws when a title is missing or not a string
+  for (const title of [undefined, null, 7, { a: 1 }]) expect(newTask(title as any, "")).toMatch(/^T-/);
+  expect(readDoc(P("tasks", "inbox", `${newTask("kept", "")}.md`)).meta.title).toBe("kept");
+  expect(asText({ a: 1 })).toBe('{"a":1}');
+});
+
+test("a followup whose requires is a list or another non-string cannot abort the run", async () => {
+  const { newTask, readDoc, P } = await import("../src/core");
+  const read = (id: string) => readDoc(P("tasks", "inbox", `${id}.md`)).meta;
+  // an agent told "leave requires empty" sent `"requires": []`; `.split` on an array killed the worker three times
+  // (each time after a long run, so the whole run was requeued)
+  expect(read(newTask("empty list", "", { requires: [] as any })).requires).toBe("");
+  expect(read(newTask("listed", "", { requires: ["os:windows", " cli:claude "] as any })).requires).toBe("os:windows,cli:claude");
+  expect(read(newTask("string still works", "", { requires: "os:macos, host:Mac" })).requires).toBe("os:macos,host:Mac");
+  // the other string-typed fields come from the same untrusted JSON
+  const odd = read(newTask("odd fields", "", { requires: 7 as any, repo: [] as any, agent: 3 as any, host: ["a"] as any, priority: { p: 1 } as any }));
+  expect(odd.requires).toBe("7");
+  expect(odd.repo).toBe("");
+  expect(odd.agent).toBe("3");
+  expect(odd.host).toBe("a");
+  expect(odd.priority).toBe('{"p":1}');
+});
+
+test("lessons sent as a bare string are kept, not fatal", async () => {
+  const { readIf, remember, P } = await import("../src/core");
+  const dir = P("agents", "crashguard-test", "memory.md");
+  rmSync(dir, { force: true });
+  expect(() => remember("crashguard-test", "one lesson" as any, "T-1")).not.toThrow();
+  expect(readIf(dir)).toContain("- one lesson _(T-1");
+  rmSync(dir, { force: true });
+  remember("crashguard-test", ["first", "", 5 as any], "T-2");
+  expect(readIf(dir)).toContain("- first _(T-2");
+  expect(readIf(dir)).toContain("- 5 _(T-2");
+  expect(readIf(dir)).not.toContain("-  _("); // blanks dropped
+  rmSync(dir, { force: true });
+  expect(() => remember("crashguard-test", undefined, "T-3")).not.toThrow();
+  expect(() => remember("crashguard-test", { length: 2 } as any, "T-4")).not.toThrow(); // no write, no crash
+});
+
+test("runsCheckHere: the host that parked a wait runs its check; the primary runs the rest it can", async () => {
+  const { runsCheckHere } = await import("../src/cli");
+  const mac = { host_caps: "os:macos,host:mbp", wait_check: "test -f /Users/j/done" };
+  expect(runsCheckHere(mac, "mbp", false, "linux")).toBe(true);
+  expect(runsCheckHere(mac, "lb", true, "linux")).toBe(false); // macOS path: the primary can't answer it
+  expect(runsCheckHere({ host_caps: "host:mbp", wait_check: "gh pr checks 1 -R o/r" }, "lb", true, "linux")).toBe(true);
+  expect(runsCheckHere({ host_caps: "host:mbp", wait_check: "gh pr checks 1 -R o/r" }, "win", false, "linux")).toBe(false);
+});
+
+test("a prompt says when it cuts the start of a file", async () => {
+  const { readTail } = await import("../src/core");
+  const dir = mkdtempSync(join(tmpdir(), "noop-tail-"));
+  try {
+    const f = join(dir, "memory.md");
+    writeFileSync(f, "STANDING-RULES\n" + "x".repeat(100) + "\nnewest lesson\n");
+    expect(readTail(f, 1000)).toBe(readFileSync(f, "utf8")); // fits: untouched, no notice
+    const cut = readTail(f, 40);
+    expect(cut.split("\n")[0]).toContain(f); // the notice says where the rest is
+    expect(cut.split("\n")[0]).toContain("cut");
+    expect(cut.endsWith("newest lesson\n")).toBe(true); // the newest text is still there
+    expect(cut).not.toContain("STANDING-RULES");
+    expect(readTail(join(dir, "missing.md"))).toBe("");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("readAll names the files that no longer fit instead of dropping them silently", async () => {
+  const { readAll } = await import("../src/core");
+  const dir = mkdtempSync(join(tmpdir(), "noop-readall-"));
+  try {
+    writeFileSync(join(dir, "a-principles.md"), "A".repeat(300));
+    writeFileSync(join(dir, "b-focus.md"), "B".repeat(300));
+    writeFileSync(join(dir, "c-taste.md"), "C".repeat(300));
+    expect(readAll(dir, 5000)).not.toContain("cut to the last"); // fits: no notice
+    const out = readAll(dir, 400);
+    const first = out.split("\n")[0];
+    expect(first).toContain("not shown: a-principles.md");
+    expect(first).toContain("partly shown: b-focus.md");
+    expect(first).not.toContain("c-taste.md"); // fully shown
+    expect(out.endsWith("C".repeat(300))).toBe(true);
+    expect(out.length).toBeLessThan(400 + first.length + 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

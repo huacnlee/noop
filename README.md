@@ -17,13 +17,15 @@ Noop runs a small team of Claude Code and Codex agents on your own computers. Th
 
 ## Install
 
-On an always-on Linux machine, once — it becomes the primary:
+On an always-on macOS or Linux machine, once — it becomes the primary:
 
 ```bash
 curl -fsSL https://huacnlee.github.io/noop/install.sh | bash -s -- --primary
 ```
 
 You'll be asked to log in to your Cloudflare account once (the free plan is enough).
+
+On macOS, install from a terminal in your logged-in desktop session. Noop starts at login using a launchd agent and prevents idle sleep while running. Keep the primary Mac logged in and awake; sleep, logout or closing the lid pauses scheduling and chat processing until it returns. The same `--primary` command works on both platforms.
 
 Add more machines whenever you like — they help when they're online and are never waited for:
 
@@ -53,8 +55,8 @@ irm https://huacnlee.github.io/noop/install-client.ps1 | iex
 
 From v0.1.5 the desktop apps update themselves: when a new version has downloaded, the sidebar offers a restart. Earlier versions update by running the same command again.
 
-- **Android** (9+): download [Noop-android.apk](https://github.com/huacnlee/noop/releases/latest/download/Noop-android.apk) on your phone and open it.
-- **iOS** (15+): [Noop-ios-unsigned.ipa](https://github.com/huacnlee/noop/releases/latest/download/Noop-ios-unsigned.ipa) is not signed, so sign and install it with your own Apple ID using a tool such as Sideloadly or AltStore.
+- **Android** (9+): download [noop-android.apk](https://github.com/huacnlee/noop/releases/latest/download/noop-android.apk) on your phone and open it.
+- **iOS** (15+): [noop-ios-unsigned.ipa](https://github.com/huacnlee/noop/releases/latest/download/noop-ios-unsigned.ipa) is not signed, so sign and install it with your own Apple ID using a tool such as Sideloadly or AltStore.
 
 ## Use
 

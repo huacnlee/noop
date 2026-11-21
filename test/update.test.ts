@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { compareVersions, createUpdates, type FoundUpdate, type UpdateState } from "../app/update";
+import { createUpdates, type FoundUpdate, type UpdateState, type UpdaterApi } from "../app/update";
 
 function setup(found: FoundUpdate | null) {
   const states: UpdateState[] = [];
   const calls: string[] = [];
-  const api = {
+  const api: UpdaterApi = {
     check: async () => { calls.push("check"); return found; },
     download: async () => { calls.push("download"); },
     install: async () => { calls.push("install"); },
@@ -82,31 +82,32 @@ function withPackages(found: { version: string; build: number } | null, restart 
     check: async () => { t.calls.push("pkg-check"); return found; },
     download: async () => { t.calls.push("pkg-download"); },
     restart: restart ? async () => { t.calls.push("pkg-restart"); } : null,
-    running: (() => null) as () => { version: string; build: number } | null,
   };
   const api = { ...t.api, packages };
   const updates = createUpdates(api, (s) => t.states.push(s));
-  return { ...t, packages, updates };
+  return { ...t, api, packages, updates };
 }
 const pkg = { version: "1.2.0", build: 42 };
 
 test("a package is preferred over the whole app, and a press restarts into it", async () => {
   const t = withPackages(pkg);
+  t.api.check = async () => { t.calls.push("check"); return null; };
   await t.updates.check();
-  expect(t.calls).toEqual(["pkg-check", "pkg-download"]);
+  expect(t.calls).toEqual(["pkg-check", "pkg-download", "check"]);
   expect(t.last()).toEqual({ kind: "ready", version: "1.2.0", package: true });
   await t.updates.install();
-  expect(t.calls).toEqual(["pkg-check", "pkg-download", "pkg-restart"]);
+  expect(t.calls).toEqual(["pkg-check", "pkg-download", "check", "pkg-restart"]);
 });
 
 test("where the app cannot restart itself a package is staged silently for the next launch", async () => {
   const t = withPackages(pkg, false);
+  t.api.check = async () => { t.calls.push("check"); return null; };
   await t.updates.check();
   expect(t.last()).toEqual({ kind: "staged", version: "1.2.0" });
   await t.updates.install();
-  expect(t.calls).toEqual(["pkg-check", "pkg-download"]);
+  expect(t.calls).toEqual(["pkg-check", "pkg-download", "check"]);
   await t.updates.check(); // the same package is not downloaded again
-  expect(t.calls).toEqual(["pkg-check", "pkg-download", "pkg-check"]);
+  expect(t.calls).toEqual(["pkg-check", "pkg-download", "check", "pkg-check", "check"]);
 });
 
 test("with no package this runtime can run, the whole app updates as before", async () => {
@@ -124,30 +125,69 @@ test("a failed package download falls back to the app check, and a failed restar
   await t.updates.check();
   expect(t.calls).toEqual(["pkg-check", "check", "download"]);
   const t2 = withPackages(pkg);
+  t2.api.check = async () => null;
   await t2.updates.check();
   t2.packages.restart = async () => { throw new Error("busy"); };
   await t2.updates.install();
   expect(t2.last()).toEqual({ kind: "failed", version: "1.2.0", message: "busy", package: true });
 });
 
-test("running a package of the release already, the whole app is not offered again", async () => {
-  // The desktop restarted into the 0.2.1 package; latest.json still says 0.2.1 while the app itself is 0.2.0.
+test("a running OTA no longer suppresses the shell update reported by NSH", async () => {
   const t = withPackages(null);
-  t.packages.running = () => pkg;
+  t.api.check = async () => ({ ...update, shell: true });
   await t.updates.check();
-  expect(t.calls).toEqual(["pkg-check", "check"]);
-  expect(t.states).toEqual([]);
-  // A release newer than the running package (one that needs a newer runtime) still comes as the whole app.
-  const t2 = withPackages(null);
-  t2.packages.running = () => ({ version: "1.1.9", build: 41 });
-  await t2.updates.check();
-  expect(t2.last()).toEqual({ kind: "ready", version: "1.2.0" });
+  expect(t.last()).toMatchObject({ kind: "shell", phase: "available", version: update.version });
+  expect(t.calls).toEqual(["pkg-check"]);
 });
 
-test("release numbers compare by part", () => {
-  expect(compareVersions("0.2.10", "0.2.9")).toBeGreaterThan(0);
-  expect(compareVersions("0.2.1", "0.2.1")).toBe(0);
-  expect(compareVersions("0.2", "0.2.1")).toBeLessThan(0);
+test("OTA downloads first; the shell waits for a press, reports progress and restarts", async () => {
+  const t = withPackages(pkg);
+  t.api.download = async (progress) => { t.calls.push("download"); progress?.(42); };
+  await t.updates.check();
+  expect(t.calls).toEqual(["pkg-check", "pkg-download", "check"]);
+  expect(t.last()).toMatchObject({ kind: "shell", phase: "available" });
+  await t.updates.check();
+  expect(t.calls.filter(c => c === "pkg-download").length).toBe(1);
+  await t.updates.installShell();
+  expect(t.calls.slice(-2)).toEqual(["download", "install"]);
+  expect(t.states).toContainEqual({ kind: "shell", version: update.version, url: update.url, canInstall: true, phase: "downloading", progress: 42, message: undefined });
+  expect(t.last()).toMatchObject({ kind: "shell", phase: "installing" });
+});
+
+test("Android and iOS shell links open only on request, without native download or install", async () => {
+  for (const url of ["https://example.com/noop.apk", "https://apps.apple.com/app/id123"]) {
+    const t = setup({ ...update, url, canInstall: false, shell: true });
+    t.api.open = async (target) => { t.calls.push(target); };
+    await t.updates.check();
+    expect(t.calls).toEqual(["check"]);
+    await t.updates.installShell();
+    expect(t.calls).toEqual(["check", url]);
+  }
+});
+
+test("shell download failure is visible and retryable, and duplicate presses are ignored", async () => {
+  const t = setup({ ...update, shell: true });
+  await t.updates.check();
+  t.api.download = async () => { throw new Error("offline"); };
+  await t.updates.installShell();
+  expect(t.last()).toMatchObject({ kind: "shell", phase: "failed", message: "offline" });
+  let finish!: () => void;
+  t.api.download = async () => { t.calls.push("download"); await new Promise<void>(resolve => { finish = resolve; }); };
+  const installing = t.updates.installShell();
+  await t.updates.installShell();
+  await t.updates.check();
+  expect(t.calls).toEqual(["check", "download"]);
+  finish();
+  await installing;
+  expect(t.calls).toEqual(["check", "download", "install"]);
+});
+
+test("a new OTA build of the same version is still downloaded while shell waits", async () => {
+  const t = withPackages(pkg);
+  await t.updates.check();
+  t.packages.check = async () => ({ ...pkg, build: 43 });
+  await t.updates.check();
+  expect(t.calls.filter(c => c === "pkg-download").length).toBe(2);
 });
 
 test("shell line: version, build and NSH; a phone shell without packages says to reinstall", async () => {
@@ -159,4 +199,12 @@ test("shell line: version, build and NSH; a phone shell without packages says to
   expect(shellLine(undefined, "ios")).toBeNull();
   expect(shellLine(undefined, "macos")).toBeNull();
   expect(shellLine({ ...info, packages: false }, "android")).toEqual({ text: "no-packages", tone: "bad" });
+});
+
+test("a failed shell check preserves the verified OTA for the next launch", async () => {
+  const t = withPackages(pkg, false);
+  t.api.check = async () => { throw new Error("offline"); };
+  await t.updates.check();
+  expect(t.last()).toEqual({ kind: "staged", version: pkg.version });
+  expect(t.calls).toEqual(["pkg-check", "pkg-download"]);
 });

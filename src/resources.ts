@@ -1,12 +1,64 @@
 // Resource governor: telemetry, adaptive parallelism, per-agent CPU budgets, automatic disk cleanup.
 // Everything here is deterministic code — agents never decide to delete things on their own.
-import { existsSync, lstatSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs";
-import { availableParallelism, freemem, homedir, loadavg, tmpdir, totalmem } from "node:os";
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs";
+import { availableParallelism, cpus, freemem, homedir, loadavg, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
-import { type Cfg, P, journal } from "./core";
+import { type Cfg, L, P, journal } from "./core";
 
-export type Stats = { cores: number; load1: number; loadRatio: number; memFreePct: number; diskFreeGB: number; diskFreePct: number };
+export type Stats = {
+  cores: number; load1: number; loadRatio: number;
+  /** Share of CPU time busy (0-100) since the previous sample; null until a delta exists or where it cannot be read. */
+  cpuBusyPct?: number | null;
+  memFreePct: number; diskFreeGB: number; diskFreePct: number;
+};
+
+type CpuTicks = { idle: number; total: number };
+
+/** Share of CPU time busy between two counter snapshots (0-1), null when there is no usable delta. */
+export function busyShare(prev: CpuTicks | null, cur: CpuTicks): number | null {
+  if (!prev || cur.total <= prev.total) return null;
+  return Math.min(1, Math.max(0, 1 - (cur.idle - prev.idle) / (cur.total - prev.total)));
+}
+
+const CPU_MIN_MS = 2000, CPU_FIRST_MS = 50;
+/** Linux: the aggregate line of /proc/stat. os.cpus() also reads every core's cpufreq file (~20ms each), which costs
+ *  seconds per call on a many-core host and ran at import time, slowing every CLI start. */
+function procStatTicks(): CpuTicks | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const f = readFileSync("/proc/stat", "utf8").split("\n", 1)[0].trim().split(/\s+/).slice(1, 8).map(Number); // user nice sys idle iowait irq softirq
+    if (f.length < 4 || f.some(Number.isNaN)) return null;
+    return { idle: f[3] + (f[4] ?? 0), total: f.reduce((a, b) => a + b, 0) };
+  } catch { return null; }
+}
+const snapCpu = (): CpuTicks => procStatTicks() ?? cpus().reduce<CpuTicks>((a, c) => {
+  a.idle += c.times.idle;
+  a.total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
+  return a;
+}, { idle: 0, total: 0 });
+// Primed at load so the first tick already has a baseline instead of falling back to loadavg.
+let cpuPrev: ({ at: number } & CpuTicks) | null = { at: Date.now(), ...snapCpu() };
+let cpuBusy: number | null = null;
+
+/** CPU busy share since the previous call, cached for minMs so a burst of samples in one dispatch loop reads one
+ *  stable value. loadavg is NOT usable for this on macOS: it averages every runnable thread of every process, so a
+ *  Mac with Chrome, WeChat and a chat app open reads 20-35 on 8 cores (2-4x the core count) while two thirds of the
+ *  CPU is idle — and the fleet then throttles itself for load it did not create. */
+export function cpuBusyShare(now = Date.now(), minMs = CPU_MIN_MS): number | null {
+  const prev = cpuPrev;
+  const elapsed = prev ? now - prev.at : Infinity;
+  if (prev && elapsed < minMs && cpuBusy != null) return cpuBusy; // still fresh
+  if (prev && elapsed < CPU_FIRST_MS) return cpuBusy; // counters have not moved enough to mean anything
+  const cur = snapCpu();
+  cpuPrev = { at: now, ...cur };
+  const busy = busyShare(prev, cur);
+  if (busy != null) cpuBusy = busy;
+  return cpuBusy;
+}
+
+/** The machine's CPU pressure, 0-1: measured utilisation when it is known, else load/cores (Windows, first tick). */
+export const pressureOf = (s: Stats): number => (s.cpuBusyPct == null ? s.loadRatio : s.cpuBusyPct / 100);
 
 /** Available memory. macOS freemem() excludes inactive/purgeable/speculative pages and reads ~2% on a healthy Mac. */
 function availMem(): number {
@@ -23,10 +75,12 @@ function availMem(): number {
 export function sample(cfg: Cfg): Stats {
   const cores = availableParallelism();
   const load1 = process.platform === "win32" ? 0 : loadavg()[0]; // Windows has no loadavg → rely on mem/disk
+  const busy = cpuBusyShare();
   const fsInfo = statfsSync(cfg.resources?.disk_path ?? homedir());
   const free = fsInfo.bavail * fsInfo.bsize, total = fsInfo.blocks * fsInfo.bsize;
   return {
     cores, load1: +load1.toFixed(2), loadRatio: +(load1 / cores).toFixed(2),
+    cpuBusyPct: busy == null ? null : Math.round(busy * 100),
     memFreePct: Math.round((availMem() / totalmem()) * 100),
     diskFreeGB: Math.round(free / 1e9), diskFreePct: Math.round((free / total) * 100),
   };
@@ -36,20 +90,22 @@ export function sample(cfg: Cfg): Stats {
 export function allowedParallel(s: Stats, cfg: Cfg, running: number): number {
   const max = cfg.host?.max_parallel ?? Math.max(2, Math.floor(s.cores / 3));
   const r = cfg.resources ?? {};
-  // load from our own running agents is expected; judge headroom by load beyond that
+  // Judge headroom by CPU actually spent, not by loadavg: on macOS loadavg counts every runnable thread of every
+  // GUI app, so a Mac at two thirds idle reads 2-4x its core count and used to pin the fleet to one agent forever.
+  const pressure = pressureOf(s);
   if (s.memFreePct < (r.mem_min_pct ?? 10) || s.diskFreeGB < (r.disk_hard_min_gb ?? 5)) return Math.min(running, 1) || 0;
-  if (s.loadRatio > (r.load_high ?? 0.9)) return Math.max(1, Math.min(running, max - 1));
-  if (s.loadRatio > (r.load_mid ?? 0.7)) return Math.max(1, Math.ceil(max / 2));
+  if (pressure > (r.load_high ?? 0.9)) return Math.max(1, Math.min(running, max - 1));
+  if (pressure > (r.load_mid ?? 0.7)) return Math.max(1, Math.ceil(max / 2));
   return max;
 }
 
 /** Heavy tasks (benchmarks, full builds, perf validation) only start with real headroom. */
 export const canRunHeavy = (s: Stats, cfg: Cfg, running: number) =>
-  s.loadRatio < (cfg.resources?.heavy_max_load ?? 0.5) && s.memFreePct > 25 && running < 2;
+  pressureOf(s) < (cfg.resources?.heavy_max_load ?? 0.5) && s.memFreePct > 25 && running < 2;
 
 /** CPU budget handed to each agent through env + prompt. */
 export function budget(s: Stats, running: number, heavy: boolean) {
-  const idle = Math.max(1, Math.floor(s.cores * (1 - Math.min(s.loadRatio, 0.95))));
+  const idle = Math.max(1, Math.floor(s.cores * (1 - Math.min(pressureOf(s), 0.95))));
   const jobs = heavy ? Math.max(2, idle) : Math.max(1, Math.floor(idle / Math.max(1, running)));
   return {
     jobs,
@@ -204,6 +260,38 @@ function cleanupSteps(cfg: Cfg, busyRepos: Set<string>): Step[] {
 
 let lastCleanup = 0;
 
+// Debounce the low-disk alert: no point paging the owner every 30 min about a disk that is not getting worse
+// (observed: 12 identical alerts in 6h, each having freed 0.0GB).
+let lastDiskAlert = { at: 0, freeGB: Infinity };
+
+/** Re-alert when never alerted, 6h since the last one, or free space dropped another 5GB. Pure, so it is testable. */
+export function diskAlertDue(prev: { at: number; freeGB: number }, now: number, freeGB: number, everyMs = 6 * 3600_000, dropGB = 5): boolean {
+  return now - prev.at >= everyMs || freeGB <= prev.freeGB - dropGB;
+}
+
+/** The journal line for one cleanup pass, or null when it freed nothing. A disk that stays low is the alert's job
+ *  (debounced to 6h / another 5GB); repeating "nothing big" every 30 min only buries the rest of the feed — observed
+ *  26 such lines in 8h while free space fell 23GB → 10GB. */
+export function cleanupLine(total: number, steps: string[], freeGB: number, minBytes = 1e8): string | null {
+  if (total <= minBytes) return null;
+  return `🧹 disk cleanup freed ${gb(total)}GB → ${freeGB}GB free (${steps.join("; ")})`;
+}
+
+/** Why a cleanup pass can free nothing while the disk keeps filling: the growth is in a repo the cleanup never looked
+ *  at. Naming it turns "needs your attention" into an action. */
+async function cleanupBlindSpot(cfg: Cfg): Promise<{ en: string; zh: string } | null> {
+  const dirs = (cfg.resources?.work_dirs ?? ["~/work"]).join(", ");
+  const scanned = workRepos(cfg);
+  if (scanned.length === 0) {
+    return { en: `no repo with target/ or node_modules/ under work_dirs (${dirs})`, zh: `work_dirs（${dirs}）下没有带 target/ 或 node_modules/ 的仓库` };
+  }
+  const caches = await Promise.all(scanned.filter((r) => existsSync(join(r, "target", "debug", "incremental")))
+    .map(async (r) => ({ p: `${r}/target/debug/incremental`, b: await sizeOf(join(r, "target", "debug", "incremental")) })));
+  const top = caches.sort((a, b) => b.b - a.b)[0];
+  return top ? { en: `biggest cache left alone is ${top.p} ${gb(top.b)}GB`, zh: `最大的一块缓存没动：${top.p} ${gb(top.b)}GB` } : null;
+}
+
+
 /** Runs tiered cleanup until disk is back above target. Returns a human summary or null if nothing needed. */
 export async function ensureDisk(cfg: Cfg, host: string, busyRepos: Set<string>, alert: (t: string) => Promise<unknown>) {
   const r = cfg.resources ?? {};
@@ -220,8 +308,15 @@ export async function ensureDisk(cfg: Cfg, host: string, busyRepos: Set<string>,
     s = sample(cfg);
     if (!low(s)) break;
   }
-  const msg = `🧹 disk cleanup freed ${gb(total)}GB → ${s.diskFreeGB}GB free (${lines.join("; ") || "nothing big"})`;
-  journal(host, msg);
-  if (low(s)) await alert(`⚠️ ${host} 磁盘仍不足：剩余 ${s.diskFreeGB}GB（${s.diskFreePct}%），自动清理已尽力（${gb(total)}GB）。需要你处理。`);
+  const msg = cleanupLine(total, lines, s.diskFreeGB);
+  if (msg) journal(host, msg);
+  if (low(s) && diskAlertDue(lastDiskAlert, Date.now(), s.diskFreeGB)) {
+    lastDiskAlert = { at: Date.now(), freeGB: s.diskFreeGB };
+    const why = await cleanupBlindSpot(cfg).catch(() => null);
+    await alert(L(`⚠️ ${host} is still low on disk: ${s.diskFreeGB}GB free (${s.diskFreePct}%) after automatic cleanup freed ${gb(total)}GB`
+      + `${why ? `; ${why.en}` : ""}. Needs your attention.`,
+      `⚠️ ${host} 磁盘仍不足：剩余 ${s.diskFreeGB}GB（${s.diskFreePct}%），自动清理腾出 ${gb(total)}GB`
+      + `${why ? `；${why.zh}` : ""}。需要你处理。`));
+  }
   return msg;
 }

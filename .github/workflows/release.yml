@@ -9,7 +9,12 @@ on:
     paths:
       - .github/workflows/release.yml
       - .github/actions/setup-nsh/**
+      - scripts/test-prepare-client-release.py
+      - scripts/prepare-client-release.py
       - scripts/check-ios-sdk.sh
+      - scripts/check-linux-runtime.sh
+      - scripts/fixtures/linux-runtime/**
+      - scripts/setup-linux-deps.sh
       - install-client.sh
       - install-client.ps1
       - app/build-web.sh
@@ -23,9 +28,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # NSH main with OTA updates through signed packages (longbridge/nsh#1189), the Android bindgen fix for NDK 27, and
-  # checkForUpdate leaving the whole app alone while a package of its release runs (longbridge/nsh#1207), the Linux tray painting an SVG icon as a template (longbridge/nsh#1209), and shellInfo() for the installed app's version and NSH runtime (longbridge/nsh#1226).
-  NSH_REF: a45c403e08d59453a259943deb77acbd96dcdbe9
+  # `nightly` builds against the commit of the current NSH nightly release and reuses its prebuilt CLI and runtimes,
+  # so a release does not compile NSH. Pin a commit only when Noop needs NSH changes the nightly does not have yet.
+  # Every job resolves it the same way, so all client runtimes and the OTA package share one commit.
+  NSH_REF: nightly
 
 defaults:
   run:
@@ -33,17 +39,18 @@ defaults:
 
 jobs:
   package:
-    name: package (${{ matrix.target }})
+    name: package (${{ matrix.target }}, ${{ matrix.channel || 'direct' }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { target: linux, os: ubuntu-24.04, asset: Noop-linux-x86_64.tar.gz, installer: install-client.sh }
-          - { target: windows, os: windows-latest, asset: Noop-windows-x86_64.zip, installer: install-client.ps1 }
-          - { target: macos, os: macos-15, asset: Noop-macos-arm64.zip, installer: install-client.sh }
-          - { target: ios, os: xcode-27, asset: Noop-ios-unsigned.ipa }
-          - { target: android, os: ubuntu-24.04, asset: Noop-android.apk }
-          - { target: web, os: ubuntu-24.04, asset: Noop-web.tar.gz }
+          - { target: linux, os: ubuntu-24.04, asset: noop-linux-x86_64.tar.gz, installer: install-client.sh }
+          - { target: windows, os: windows-latest, asset: noop-windows-x86_64.zip, installer: install-client.ps1 }
+          - { target: macos, os: macos-15, asset: noop-macos-arm64.zip, installer: install-client.sh }
+          - { target: ios, os: xcode-27, asset: noop-ios-unsigned.ipa }
+          - { target: ios, os: xcode-27, asset: noop-ios-store-unsigned.ipa, channel: store }
+          - { target: android, os: ubuntu-24.04, asset: noop-android.apk }
+          - { target: web, os: ubuntu-24.04, asset: noop-web.tar.gz }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,14 +59,21 @@ jobs:
           ref: ${{ env.NSH_REF }}
           target: ${{ matrix.target }}
 
+      - name: Verify release metadata
+        run: python3 scripts/test-prepare-client-release.py
+
       - name: Package
         env:
+          CHANNEL: ${{ matrix.channel || 'direct' }}
           TARGET: ${{ matrix.target }}
           ASSET: ${{ matrix.asset }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
+          version=$(python3 -c 'import json; print(json.load(open("app/nsh.json"))["version"])')
+          [ "$GITHUB_REF_TYPE" != tag ] || version="${GITHUB_REF_NAME#v}"
+          python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel "$CHANNEL"
           args=(--build "$GITHUB_RUN_NUMBER")
           [ "$GITHUB_REF_TYPE" != tag ] || args+=(--app-version "${GITHUB_REF_NAME#v}")
           # Settings › Version shows the release the app was built for.
@@ -115,7 +129,7 @@ jobs:
           ASSET: ${{ matrix.asset }}
           INSTALLER: ${{ matrix.installer }}
         run: |
-          (cd assets && { command -v sha256sum > /dev/null && sha256sum "$ASSET" || shasum -a 256 "$ASSET"; } > SHA256SUMS)
+          (cd assets && { command -v sha256sum > /dev/null && sha256sum "$ASSET" || shasum -a 256 "$ASSET"; } > sha256sums)
           python=python3; command -v python3 > /dev/null || python=python
           (cd assets && exec "$python" -m http.server 8765 > /dev/null 2>&1) &
           server=$!
@@ -135,7 +149,7 @@ jobs:
               test -x "$HOME/.local/bin/noop-client"
               grep -q "^Exec=$HOME/.local/share/noop-client/Noop" "$HOME/.local/share/applications/dev.noop.app.desktop" ;;
           esac
-          rm assets/SHA256SUMS
+          rm assets/sha256sums
 
       # Reuse this ARM runner for Intel after packaging and testing the native app.
       # The installer currently supports only Apple silicon; Intel users download the archive.
@@ -154,29 +168,33 @@ jobs:
           [ "$GITHUB_REF_TYPE" != tag ] || args+=(--app-version "${GITHUB_REF_NAME#v}")
           out="$RUNNER_TEMP/out-x86_64"
           mkdir -p assets-intel
-          # The Intel CLI runs through Rosetta and also names OTA archives macos-x86_64.
-          (cd app && nsh package --target macos -o "$out" "${args[@]}")
-          ditto -c -k --keepParent "$out/Noop.app" assets-intel/Noop-macos-x86_64.zip
+          # Name the processor: without --arch the CLI packages for the machine it runs on (arm64), even under Rosetta.
+          (cd app && nsh package --target macos --arch x86_64 -o "$out" "${args[@]}")
+          ditto -c -k --keepParent "$out/Noop.app" assets-intel/noop-macos-x86_64.zip
           mv "$out"/Noop-*-macos-x86_64.tar.gz assets-intel/
           app="$RUNNER_TEMP/verify-x86_64/Noop.app"
-          ditto -x -k assets-intel/Noop-macos-x86_64.zip "$RUNNER_TEMP/verify-x86_64"
+          ditto -x -k assets-intel/noop-macos-x86_64.zip "$RUNNER_TEMP/verify-x86_64"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-          lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64
-          codesign --verify --deep --strict "$app"
+          # Report every Mach-O and the signature so a failed check says which file is wrong.
+          find "$app/Contents/MacOS" -type f -exec file {} +
+          lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64 || { echo "::error::$executable is not x86_64"; exit 1; }
+          codesign --verify --deep --strict --verbose=4 "$app" || { echo "::error::codesign verification failed"; exit 1; }
 
       - name: Upload Intel macOS package
         if: matrix.target == 'macos'
         uses: actions/upload-artifact@v4
         with:
-          name: Noop-macos-x86_64.zip
+          name: noop-macos-x86_64.zip
           path: assets-intel/
           if-no-files-found: error
+          compression-level: 0
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: assets/
           if-no-files-found: error
+          compression-level: 0
 
   publish:
     if: github.ref_type == 'tag'
@@ -194,42 +212,67 @@ jobs:
         with:
           path: assets
           merge-multiple: true
+      # Release file names are lowercase on every project (nsh names its OTA archives after the app, Noop-<version>-...).
+      - name: Lowercase asset names
+        run: |
+          cd assets
+          for f in *; do l=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]'); [ "$f" = "$l" ] || mv "$f" "$l"; done
+          ls -l
       # OTA: the app's code as a package signed with the release key (certified by the root whose public key is in
       # app/nsh.json). Installed apps on every platform, iOS and Android included, run it from their next launch when
       # its build is newer than theirs and their NSH runtime is new enough; otherwise they take the whole app below.
       # It has this run's build number, as the apps packaged above do, so only older installs pick it up.
-      - name: Sign the OTA package
+      - name: Sign OTA packages and write channel manifests
         env:
           NSH_PACKAGE_KEY: ${{ secrets.NSH_PACKAGE_KEY }}
           NSH_PACKAGE_CERT: ${{ secrets.NSH_PACKAGE_CERT }}
+          IOS_UPDATE_URL: ${{ vars.IOS_UPDATE_URL }}
+          NSH_STORE_PACKAGE_CERT: ${{ secrets.NSH_STORE_PACKAGE_CERT }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           printf 'export const CLIENT_VERSION = "%s";\n' "$version" > app/version.ts
           keys="$RUNNER_TEMP/keys"
+          trap 'rm -rf "$keys"' EXIT
           (umask 077 && mkdir -p "$keys" && printf '%s\n' "$NSH_PACKAGE_KEY" > "$keys/release.secret")
           printf '%s\n' "$NSH_PACKAGE_CERT" > "$keys/release.cert"
           (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/release.cert" \
-            --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/Noop-$version.nshpkg")
-          rm -rf "$keys"
-      # The apps fetch `releases/latest/download/latest.json`, the versioned archives and the package next to it
-      # (nsh/updater). The installers keep using the unversioned assets. An APK cannot replace itself: Android gets a
-      # link for the whole app, and the package for its code.
-      - name: Write the update manifest
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          jq --arg version "$version" '.version = $version' app/nsh.json > "$RUNNER_TEMP/nsh.json"
-          mv "$RUNNER_TEMP/nsh.json" app/nsh.json
-          nsh update-manifest assets/Noop-"$version"-*.tar.gz assets/Noop-"$version"-*.zip --entry app --out assets \
-            --package assets/Noop-"$version".nshpkg \
-            --link "android=https://github.com/$GITHUB_REPOSITORY/releases/latest/download/Noop-android.apk"
+            --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-$version.nshpkg")
+          # The Store bundle ID needs its own root-certified package certificate.
+          test -n "$NSH_STORE_PACKAGE_CERT" || { echo "NSH_STORE_PACKAGE_CERT is required" >&2; exit 1; }
+          printf '%s\n' "$NSH_STORE_PACKAGE_CERT" > "$keys/store.cert"
+          python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel store
+          (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/store.cert" \
+            --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-store-$version.nshpkg")
+          nsh update-manifest --entry app --out "$RUNNER_TEMP/store-manifest" \
+            --package "assets/noop-store-$version.nshpkg" --key "$keys/release.secret" \
+            --link "ios=https://apps.apple.com/app/id6835723652"
+          mv "$RUNNER_TEMP/store-manifest/latest.json" assets/store-latest.json
+          # NSH resolves the detached signature as latest.json.sig next to any manifest URL.
+          mv "$RUNNER_TEMP/store-manifest/latest.json.sig" assets/latest.json.sig
+          python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel direct
+
+          # iOS offers a shell update only after a real App Store / TestFlight destination is configured.
+          links=()
+          if [[ -n "$IOS_UPDATE_URL" ]]; then
+            case "$IOS_UPDATE_URL" in
+              https://apps.apple.com/*|https://testflight.apple.com/join/*) links+=(--link "ios=$IOS_UPDATE_URL") ;;
+              *) echo "IOS_UPDATE_URL must be an App Store or TestFlight HTTPS URL" >&2; exit 1 ;;
+            esac
+          fi
+          nsh update-manifest assets/noop-"$version"-*.tar.gz assets/noop-"$version"-*.zip --entry app --out "$RUNNER_TEMP/direct-manifest" --key "$RUNNER_TEMP/keys/release.secret" \
+            --package assets/noop-"$version".nshpkg \
+            --link "android=https://github.com/$GITHUB_REPOSITORY/releases/latest/download/noop-android.apk" "${links[@]}"
+          mv "$RUNNER_TEMP/direct-manifest/latest.json" assets/direct-latest.json
+          mv "$RUNNER_TEMP/direct-manifest/latest.json.sig" assets/direct-latest.json.sig
+          cp assets/store-latest.json assets/latest.json
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           cd assets
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
+          sha256sum * > sha256sums
+          cat sha256sums
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" * --clobber
           else

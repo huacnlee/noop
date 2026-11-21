@@ -12,7 +12,7 @@ export type FileRow = { path: string; text: string; updated: string };
 /** A write. `tool` is the tool name; the rest are its validated arguments. */
 export type WriteOp =
   | { tool: "send_message"; text: string; reply_to?: string }
-  | { tool: "create_task"; title: string; details?: string; repo?: string; agent?: string; follows?: string }
+  | { tool: "create_task"; title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[] }
   | { tool: "amend_task"; id: string; text: string }
   | { tool: "cancel_task"; id: string }
   | { tool: "set_priority"; id: string; priority: Priority }
@@ -138,7 +138,8 @@ const options = (s?: string) => (s ?? "").split(" | ").map((x) => x.trim()).filt
 export function listDecisions(st: ToolStore, which: "open" | "closed" = "open", limit = 30) {
   return st.list(`decisions/${which}/`).filter((f) => f.path.endsWith(".md")).slice(0, limit).map((f) => {
     const { meta, body } = parseDoc(f.text);
-    return { id: meta.id, question: meta.question, options: options(meta.options), recommendation: meta.recommendation, task: meta.task,
+    // a proposals card has no options field: its numbered lines are what the owner picks from
+    return { id: meta.id, question: meta.question, options: meta.kind === "proposals" ? body.match(/^\d+\. .+$/gm) ?? [] : options(meta.options), recommendation: meta.recommendation, task: meta.task,
       agent: meta.agent, created: meta.created, answer: meta.answer, context: body.match(/## Context\n([\s\S]*?)(\n## |$)/)?.[1]?.trim().slice(0, 4000) };
   });
 }
@@ -267,6 +268,7 @@ export const TOOLS: Tool[] = [
   { name: "create_task", title: "Create a task", annotations: RW, write: true,
     inputSchema: obj({ title: str("Short imperative title"), details: str("Goal, context and acceptance criteria — everything the agent needs, in the owner's words"),
       repo: str("Optional repo, e.g. longbridge/nsh"), agent: str("Optional agent name from list_agents (default: lead, who plans and delegates)"),
+      channels: { type: "array", description: "Work topics matched by goal: existing slugs, or {name, goal} for a new channel; empty for none", items: { anyOf: [{ type: "string" }, { type: "object", properties: { name: { type: "string" }, goal: { type: "string" } }, required: ["name", "goal"], additionalProperties: false }] }, maxItems: 3 },
       follows: str("Optional: the task (T-…) this continues or corrects; the new task reads its result") }, ["title"]),
     description: "Hand a piece of work to the fleet. An agent picks it up, does it and reports back in the feed. Use for anything that takes more than a quick answer (code, reviews, releases, research)." },
   { name: "amend_task", title: "Add to a task", annotations: RW, write: true,
@@ -284,7 +286,7 @@ export const TOOLS: Tool[] = [
   { name: "remember", title: "Remember", annotations: RW, write: true,
     inputSchema: obj({ text: str("The rule or fact, one or two sentences, phrased so it is useful later (who/what it applies to, and why)"),
       file: str("memory/owner.md (who the owner is), memory/principles.md (how to work), memory/taste.md (UI/code taste), memory/projects.md, or agents/<name>/memory.md for one agent's know-how") }, ["text", "file"]),
-    description: "Write a durable memory the whole fleet reads from now on: the owner's preference, a rule ('以后都这样'), a fact about a project." },
+    description: "Write a durable memory the whole fleet reads from now on: the owner's preference, a rule ('always do this'), a fact about a project." },
   { name: "edit_memory", title: "Edit or delete a memory", annotations: DESTRUCTIVE, write: true,
     inputSchema: obj({ file: str("The memory file, as listed by read_memory"),
       match: str("Text copied from the entry, enough to pick exactly one line (find it with read_memory first)"),
@@ -292,7 +294,7 @@ export const TOOLS: Tool[] = [
     description: "Correct or delete one existing memory entry, when the owner says it is wrong, outdated or should go. New facts go in remember." },
   { name: "answer_decision", title: "Answer a decision", annotations: RW, write: true,
     inputSchema: obj({ id: str("Decision id, e.g. D-0025"), answer: str("An option letter (A, B, …) or a free-text answer") }, ["id", "answer"]),
-    description: "Answer a decision card (or change the answer the owner gave minutes ago), exactly like tapping an option in the Noop app." },
+    description: "Answer a decision card (or change the answer the owner gave minutes ago), exactly like tapping an option in the Noop app. For a proposals card (P-…) the answer must start with the item numbers to do, all or none, then a colon and the owner's words: \"1,3: skip the rest\", \"2: not 1\"." },
 ];
 
 export const toolsFor = (where: "mcp" | "brain") => TOOLS.filter((t) => !t.only || t.only === where);
@@ -313,7 +315,7 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
       const agent = s(a.agent);
       if (agent && !st.read(`agents/${agent}/profile.md`)) return `unknown agent ${agent} (see list_agents)`;
       return { tool: name, title: s(a.title).slice(0, 120), details: s(a.details).slice(0, 20_000) || undefined, repo: s(a.repo) || undefined,
-        agent: agent || undefined, follows: TASK_ID.test(s(a.follows)) ? s(a.follows) : undefined };
+        agent: agent || undefined, follows: TASK_ID.test(s(a.follows)) ? s(a.follows) : undefined, ...(Array.isArray(a.channels) ? { channels: a.channels.slice(0, 3) } : {}) };
     }
     case "amend_task": {
       const id = s(a.id);
@@ -423,4 +425,79 @@ export async function runTool(st: ToolStore, name: string, a: any, base = ""): P
     }
   }
   return bad(`unknown tool: ${name}`);
+}
+
+// ---------------------------------------------------------------- channels
+// A channel is a work topic the AI opens (like a Slack channel in a company): "NSH i18n", "Omamail". Stored as
+// channels/<slug>.md (name, goal, status, created); tasks carry `channels: a,b`. Read-only drill-down views of the main chat.
+export type ChannelRow = { slug: string; name: string; goal: string; status: "active" | "archived"; created: string };
+export type ChannelItem = { id: string; kind: "task" | "decision" | "report"; title: string; state: string; updated: string; task?: string };
+export const CHANNEL_SLUG = /^[a-z0-9][a-z0-9-]{0,47}$/;
+export const STALE_DAYS = 7;
+
+export function slugify(name: string): string {
+  const ascii = name.toLowerCase().normalize("NFKD").replace(/[^\x00-\x7f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48).replace(/-+$/, "");
+  if (ascii) return ascii;
+  let h = 0; for (const c of name) h = (h * 31 + c.codePointAt(0)!) >>> 0; // all CJK: a stable short id
+  return `ch-${h.toString(36)}`;
+}
+
+export const taskChannels = (meta: Record<string, string>) => (meta.channels ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+
+export function parseChannel(path: string, text: string): ChannelRow | null {
+  const slug = path.split("/").pop()!.replace(/\.md$/, "");
+  if (!CHANNEL_SLUG.test(slug)) return null;
+  const { meta, body } = parseDoc(text);
+  return { slug, name: meta.name || slug, goal: (meta.goal ?? body).trim(), status: meta.status === "archived" ? "archived" : "active", created: meta.created ?? "" };
+}
+
+export function listChannelRows(st: ToolStore): ChannelRow[] {
+  return st.list("channels/").filter((f) => /^channels\/[^/]+\.md$/.test(f.path)).map((f) => parseChannel(f.path, f.text)).filter((c): c is ChannelRow => !!c)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Every channel with its items (tasks + the cards they asked), newest first; `stale` = no activity for STALE_DAYS. */
+export function channelsView(st: ToolStore, nowMs = Date.now(), limit = 100) {
+  const chans = listChannelRows(st);
+  const items = new Map<string, ChannelItem[]>(chans.map((c) => [c.slug, []]));
+  const taskOf = new Map<string, string[]>(); const seen = new Set<string>();
+  const reportExists = new Map<string, boolean>();
+  for (const s of HISTORY_STATES) for (const f of st.list(`tasks/${s}/`)) {
+    if (!/^tasks\/[^/]+\/T-[^/]*\.md$/.test(f.path)) continue;
+    const { meta, body } = parseDoc(f.text);
+    const cs = taskChannels(meta).filter((c) => items.has(c));
+    const id = meta.id || f.path.split("/").pop()!.replace(/\.md$/, "");
+    if (!cs.length || seen.has(id)) continue;
+    seen.add(id); taskOf.set(id, cs);
+    const row = historyRow(f, s);
+    for (const c of cs) {
+      items.get(c)!.push({ id, kind: "task", title: row.title, state: s, updated: String(row.updated ?? "") });
+      for (const path of new Set([...body.matchAll(/\breports\/[\w./-]+\.md\b/g)].map((m) => m[0]))) {
+        if (path.split("/").some((s) => s === "..")) continue;
+        if (!reportExists.has(path)) reportExists.set(path, !!st.read(path));
+        if (!reportExists.get(path)) continue;
+        if (!items.get(c)!.some((i) => i.id === path)) items.get(c)!.push({ id: path, kind: "report", title: path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/, ""), state: "done", updated: String(row.updated ?? ""), task: id });
+      }
+    }
+  }
+  for (const w of ["open", "closed"]) for (const d of st.list(`decisions/${w}/`)) {
+    const { meta } = parseDoc(d.text);
+    const cs = meta.task ? taskOf.get(meta.task) : undefined;
+    if (!cs || !meta.id) continue;
+    for (const c of cs) items.get(c)!.push({ id: meta.id, kind: "decision", title: meta.question ?? meta.id, state: w, updated: meta.answered ?? meta.created ?? d.updated, task: meta.task });
+  }
+  return { channels: chans.map((c) => {
+    const list = items.get(c.slug)!.sort((a, b) => b.updated.localeCompare(a.updated));
+    const last = list[0]?.updated ?? c.created;
+    const stale = !last || nowMs - Date.parse(last) > STALE_DAYS * 86_400_000;
+    return { ...c, last_activity: last, stale, count: list.length, refs: list.filter((i) => i.kind !== "report").map((i) => i.id), items: list.slice(0, limit) };
+  }) };
+}
+
+/** A channel's digest: the main-chat messages about its tasks and cards (results, decisions, the owner's words), newest
+ *  last. Task-thread chatter and the hub's own acks are execution detail, so they stay on the task page. */
+export function channelDigest<E extends { ref?: string; from: string; thread?: boolean; kind?: string; channel?: string }>(events: readonly E[], refs: readonly string[], slug?: string, limit = 80): E[] {
+  const want = new Set(refs);
+  // what was said in the channel itself (the owner, the team's replies) plus the main chat's results and cards about its work
+  return events.filter((e) => !e.thread && (e.channel ? e.channel === slug : !!e.ref && want.has(e.ref) && !/^hub/.test(e.from) && e.kind !== "system")).slice(-limit);
 }

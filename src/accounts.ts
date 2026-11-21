@@ -5,7 +5,7 @@
 import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { type Cfg, hostName, journal, HOME_DIR } from "./core";
+import { type Cfg, L, hostName, journal, HOME_DIR } from "./core";
 import { notify } from "./notify";
 
 const HOME = join(HOME_DIR, "accounts");
@@ -26,6 +26,46 @@ export function accounts(cfg: Cfg, cli: string): Account[] {
   return list.length ? list : [{ cli, name: "default", dir: "", default: true }];
 }
 
+/** Claude Code can authenticate through an API gateway instead of an Anthropic OAuth login: the `env` block of
+ *  settings.json (or the inherited environment) sets ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN. `claude
+ *  setup-token` only performs the OAuth dance and cannot finish there, so an auth-shaped failure must not park
+ *  the account behind a login link that can never complete. Returns what makes the account gateway-backed. */
+export function gatewayAuth(dir: string, env: Record<string, string | undefined> = process.env): string | null {
+  let fileEnv: Record<string, string> = {};
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))?.env;
+    if (parsed && typeof parsed === "object") fileEnv = Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === "string")) as Record<string, string>;
+  } catch {}
+  const merged = { ...fileEnv, ...env };
+  if (merged.ANTHROPIC_AUTH_TOKEN) return "auth-token";
+  if (merged.ANTHROPIC_API_KEY) return "api-key";
+  const base = merged.ANTHROPIC_BASE_URL;
+  return base && !/^https?:\/\/api\.anthropic\.com(\/|$)/.test(base) ? "base-url" : null;
+}
+
+/** Codex can authenticate through a gateway too: `model_provider` in ~/.codex/config.toml names an entry of
+ *  `[model_providers.*]` that carries a bearer token / env key / non-OpenAI base URL. `codex login --device-auth`
+ *  only performs the ChatGPT OAuth dance and exits immediately against such a config, so it can never renew the
+ *  key. Returns what makes the account gateway-backed. */
+export function codexGatewayAuth(dir: string): string | null {
+  let conf: { model_provider?: string; model_providers?: Record<string, Record<string, unknown>> };
+  try { conf = Bun.TOML.parse(readFileSync(join(dir, "config.toml"), "utf8")) as typeof conf; } catch { return null; }
+  const id = conf.model_provider;
+  if (!id || id === "openai") return null;
+  const p = conf.model_providers?.[id];
+  if (!p) return null;
+  if (p.experimental_bearer_token || p.env_key) return "api-key";
+  const base = typeof p.base_url === "string" ? p.base_url : "";
+  return base && !/^https?:\/\/api\.openai\.com(\/|$)/.test(base) ? "base-url" : null;
+}
+
+function usesGateway(a: Account): boolean {
+  const dir = a.default ? join(homedir(), a.cli === "claude" ? ".claude" : ".codex") : a.dir;
+  if (a.cli === "claude") return !!gatewayAuth(dir);
+  if (a.cli === "codex") return !!codexGatewayAuth(dir);
+  return false;
+}
+
 /** When the CLI's login was last written: a new login (another account) changes it. */
 function credStamp(a: Account): number {
   const dir = a.default ? join(homedir(), a.cli === "claude" ? ".claude" : ".codex") : a.dir;
@@ -36,6 +76,12 @@ function credStamp(a: Account): number {
 export function usable(a: Account): boolean {
   const all = load();
   const s = all.accounts[key(a)] ?? {};
+  if (s.cooldown_until && !s.needs_login && s.last_error && /API Error: 50[234]\b/.test(s.last_error) && classify(s.last_error) === null) {
+    // Older versions treated the gateway's vague retry hint as exhausted credits.
+    all.accounts[key(a)] = { ...s, cooldown_until: undefined, told: undefined };
+    save(all);
+    return true;
+  }
   if ((s.needs_login || s.cooldown_until) && s.cred && credStamp(a) > s.cred) {
     // the owner logged in again (maybe another account): try it right away instead of waiting out the old limit
     all.accounts[key(a)] = { ...s, needs_login: false, cooldown_until: undefined, cred: undefined, told: undefined };
@@ -78,8 +124,11 @@ export function accountEnv(a: Account): Record<string, string> {
 }
 
 // ------------------------------------------------------------------ failure classification
-const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)/i;
-const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth token (has )?expired|login required|unauthorized|codex login/i;
+// "try again at/in <time>" is a quota reset hint. A vague "try again in a moment" is what a gateway 5xx says
+// ("a server-side issue, usually temporary"): counting it as quota put the account on a one-hour cooldown
+// and moved all its work to the other CLI over a blip.
+const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|no credits remaining|insufficient credits|purchase more credits|\b402\b|add credits to continue|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)(?! (?:a|a few|some) (?:moments?|bit|while|seconds?|minutes?)\b)/i;
+const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth (token|session) (has )?expired|login required|unauthorized|codex login/i;
 
 export type Failure = "quota" | "auth" | null;
 
@@ -105,6 +154,11 @@ function resetTime(output: string): Date {
   return new Date(Date.now() + 60 * 60_000);
 }
 
+/** Keep concurrent failures in the same cooldown episode so they share one notification. */
+export function quotaCooldownUntil(current: string | undefined, output: string): string {
+  return current && Date.parse(current) > Date.now() ? current : resetTime(output).toISOString();
+}
+
 export async function reportFailure(a: Account, kind: Failure, output: string, cfg: Cfg) {
   if (!kind) return;
   const s = load();
@@ -112,24 +166,40 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
   const host = hostName(cfg);
   st.last_error = output.slice(-300);
   st.cred = credStamp(a);
+  const gateway = kind === "auth" && usesGateway(a);
   if (kind === "quota") {
-    st.cooldown_until = resetTime(output).toISOString();
+    st.cooldown_until = quotaCooldownUntil(st.cooldown_until, output);
     journal(host, `${key(a)} hit usage limit → cooldown until ${st.cooldown_until.slice(11, 16)}Z`);
     if (st.told !== st.cooldown_until) {
       st.told = st.cooldown_until;
       const others = (cfg.clis?.preference ?? ["claude", "codex"]).filter((c: string) => c !== a.cli && Bun.which(c) && accounts(cfg, c).some(usable));
-      const at = new Date(st.cooldown_until).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-      void notify([`${a.cli === "claude" ? "Claude" : "Codex"}（${host}）额度用完了，约 ${at} 恢复。`,
-        others.length ? `这期间任务先交给 ${others.join("、")} 做。` : "这期间没有可用的 AI，任务会排队等着。",
-        `想马上恢复：在这台机器上运行 ${a.cli === "claude" ? "claude /login" : "codex login"} 换个账号，登录后会自动接着用，不用等。`].join("\n"),
+      const at = new Date(st.cooldown_until).toLocaleTimeString(L("en-US", "zh-CN"), { hour: "2-digit", minute: "2-digit" });
+      void notify([L(`${a.cli === "claude" ? "Claude" : "Codex"} (${host}) is out of quota, back around ${at}.`, `${a.cli === "claude" ? "Claude" : "Codex"}（${host}）额度用完了，约 ${at} 恢复。`),
+        others.length ? L(`Until then tasks go to ${others.join(", ")}.`, `这期间任务先交给 ${others.join("、")} 做。`) : L("No AI is available until then, tasks will queue.", "这期间没有可用的 AI，任务会排队等着。"),
+        L(`To recover now: run ${a.cli === "claude" ? "claude /login" : "codex login"} on this machine to switch account; it is picked up automatically.`, `想马上恢复：在这台机器上运行 ${a.cli === "claude" ? "claude /login" : "codex login"} 换个账号，登录后会自动接着用，不用等。`)].join("\n"),
         cfg, { kind: "notice" });
+    }
+  } else if (gateway) {
+    // Gateway/API-key auth has no OAuth login to refresh. Retrying `claude setup-token` / `codex login --device-auth`
+    // against a gateway 401s or exits at once, which used to mail a dead login link every 30 minutes while parking
+    // the account forever (L-0288…L-0310 for claude, L-0019…L-0073 for a codex gateway).
+    st.needs_login = false;
+    st.cooldown_until = new Date(Date.now() + 60 * 60_000).toISOString();
+    const day = new Date().toISOString().slice(0, 10);
+    if (st.told !== `gateway:${day}`) {
+      st.told = `gateway:${day}`;
+      journal(host, `${key(a)} gateway auth failed → cooldown 1h (no OAuth login for gateway accounts)`);
+      const other = a.cli === "claude" ? "Codex" : "Claude";
+      const where = a.cli === "claude" ? "~/.claude/settings.json (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN)" : "~/.codex/config.toml ([model_providers.*]: experimental_bearer_token / env_key / base_url)";
+      void notify([L(`${a.cli === "claude" ? "Claude" : "Codex"} (${host}) authenticates through an API gateway and the gateway rejected the token. Tasks go to ${other} for now. No login link will be sent: replace the token in ${where}.`,
+        `${a.cli === "claude" ? "Claude" : "Codex"}（${host}）使用 API 网关鉴权，网关拒绝了令牌，任务暂时交给 ${other}。这里不适用 OAuth 登录，不会再发登录链接；请更换 ${where} 里的令牌。`)].join("\n"), cfg, { kind: "notice" });
     }
   } else {
     st.needs_login = true;
     journal(host, `🔑 ${key(a)} needs login`);
   }
   save(s);
-  if (kind === "auth") await startLogin(a, cfg);
+  if (kind === "auth" && !gateway) await startLogin(a, cfg);
   await alertIfAllExhausted(cfg);
 }
 
@@ -144,10 +214,10 @@ async function alertIfAllExhausted(cfg: Cfg) {
   save(s);
   const lines = installed.flatMap((c) => accounts(cfg, c)).map((a) => {
     const st = load().accounts[key(a)] ?? {};
-    return `• ${key(a)}：${st.needs_login ? "需要登录" : st.cooldown_until ? `额度用尽，约 ${new Date(st.cooldown_until).toLocaleTimeString()} 恢复` : "?"}`;
+    return L(`• ${key(a)}: ${st.needs_login ? "needs login" : st.cooldown_until ? `out of quota, back around ${new Date(st.cooldown_until).toLocaleTimeString()}` : "?"}`, `• ${key(a)}：${st.needs_login ? "需要登录" : st.cooldown_until ? `额度用尽，约 ${new Date(st.cooldown_until).toLocaleTimeString()} 恢复` : "?"}`);
   });
-  await notify([`${hostName(cfg)} 上所有 AI 账户都不可用，fleet 暂停中：`, ...lines,
-    `可以：回复登录码完成待登录账户，或在 config.local.toml 的 [[accounts]] 加一个账户。`].join("\n"), cfg);
+  await notify([L(`All AI accounts on ${hostName(cfg)} are unavailable, the fleet is paused:`, `${hostName(cfg)} 上所有 AI 账户都不可用，fleet 暂停中：`), ...lines,
+    L(`Options: reply with a login code to finish a pending login, or add an account under [[accounts]] in config.local.toml.`, `可以：回复登录码完成待登录账户，或在 config.local.toml 的 [[accounts]] 加一个账户。`)].join("\n"), cfg);
 }
 
 // ------------------------------------------------------------------ remote-assisted login
@@ -192,9 +262,9 @@ export async function startLogin(a: Account, cfg: Cfg) {
     if (url && !sent && (needsCode || code || buf.length > 2000 || /enter|code/i.test(buf))) {
       sent = true;
       await notify([
-        `🔑 *${id}* · ${host} 上的 ${a.cli} 账户「${a.name}」需要重新登录`,
-        `1. 打开：${url}`,
-        code ? `2. 输入设备码：\`${code}\`（完成后会自动生效，无需回复）` : `2. 登录后把页面给出的授权码回复：\`${id} <code>\``,
+        L(`🔑 *${id}* · the ${a.cli} account "${a.name}" on ${host} needs to log in again`, `🔑 *${id}* · ${host} 上的 ${a.cli} 账户「${a.name}」需要重新登录`),
+        L(`1. Open: ${url}`, `1. 打开：${url}`),
+        code ? L(`2. Enter the device code: \`${code}\` (takes effect automatically, no reply needed)`, `2. 输入设备码：\`${code}\`（完成后会自动生效，无需回复）`) : L(`2. After logging in, reply with the code the page gives you: \`${id} <code>\``, `2. 登录后把页面给出的授权码回复：\`${id} <code>\``),
       ].join("\n"), cfg);
       journal(host, `🔑 ${id} login link sent for ${k}`);
     }
@@ -213,7 +283,7 @@ export async function startLogin(a: Account, cfg: Cfg) {
     st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined };
     save(st);
     journal(host, ok ? `${k} logged in (${id})` : `${k} login ${id} failed (exit ${code})`);
-    await notify(ok ? `${k} 登录成功，fleet 继续运转` : `${id} 登录未完成（exit ${code}），稍后会再发新链接`, cfg);
+    await notify(ok ? L(`${k} logged in, the fleet continues`, `${k} 登录成功，fleet 继续运转`) : L(`${id} login did not finish (exit ${code}), a new link will follow`, `${id} 登录未完成（exit ${code}），稍后会再发新链接`), cfg);
   });
   setTimeout(() => { if (pending.has(id)) proc.kill(); }, 30 * 60_000); // link expiry
 }
@@ -235,9 +305,20 @@ export async function retryLogins(cfg: Cfg) {
   const s = load();
   for (const cli of ["claude", "codex"]) for (const a of accounts(cfg, cli)) {
     const st = s.accounts[key(a)];
+    if (!st?.needs_login || pending.size || !Bun.which(cli)) continue;
+    if (usesGateway(a)) {
+      // A gateway account signs in with its gateway token; setup-token can never finish. Clear a stale flag
+      // (left by an older build) and let the next task try instead of sending another dead link.
+      const cur = load();
+      cur.accounts[key(a)] = { ...st, needs_login: false, told: undefined };
+      save(cur);
+      journal(hostName(cfg), `${key(a)} is gateway-authenticated; cleared the stale login flag instead of sending an OAuth link`);
+      continue;
+    }
     // back off: a login that exits immediately would otherwise send a new link every tick
     if (Date.now() - (lastLoginTry.get(key(a)) ?? 0) < 30 * 60_000) continue;
-    if (st?.needs_login && !pending.size && Bun.which(cli)) { lastLoginTry.set(key(a), Date.now()); await startLogin(a, cfg); }
+    lastLoginTry.set(key(a), Date.now());
+    await startLogin(a, cfg);
   }
 }
 

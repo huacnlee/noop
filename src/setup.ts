@@ -1,9 +1,9 @@
 // hub init / install / update — out-of-the-box setup and self-update.
 import { $ } from "bun";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
-import { CODE, DATA, P } from "./core";
+import { CODE, DATA, HOME_DIR, P, isCloudDeployHost } from "./core";
 
 const STATE_DIRS = [
   "tasks/proposed", "tasks/rejected", "tasks/waiting", "tasks/inbox", "tasks/active", "tasks/blocked", "tasks/failed", "tasks/done",
@@ -35,7 +35,8 @@ async function joinViaLogin(url: string, host: string): Promise<string | null> {
   const s = await post("/api/auth/start", { email });
   if (!s.ok) { console.error(`login failed (${s.status}): ${s.json?.error ?? ""}`); return null; }
   const code = (prompt("code from the email:") ?? "").trim();
-  const v = await post("/api/auth/verify", { email, code });
+  const totp = (prompt("6-digit code from the authenticator app:") ?? "").replace(/\s/g, "");
+  const v = await post("/api/auth/verify", { email, code, totp });
   if (!v.ok || !v.json?.session) { console.error(`verification failed (${v.status}): ${v.json?.error ?? ""}`); return null; }
   const j = await post("/api/host/join", { host }, v.json.session);
   await post("/api/auth/logout", {}, v.json.session); // the session was only needed to mint the machine token
@@ -57,7 +58,7 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
     const url = (opts.worker || joined || (prompt("your noop URL (e.g. https://noop.example.com; set up the first machine with --primary):") ?? "")).trim().replace(/\/$/, "");
     if (!url) { console.error("no noop URL: run init <noop-url>, or init --primary on the machine that hosts it"); process.exitCode = 1; return; }
     const token = opts.token ?? (url === joined ? readHubToml().server?.token : undefined) ?? await joinViaLogin(url, me);
-    if (!token) return;
+    if (!token) { process.exitCode = 1; return; }
     writeHubToml({ cloud: { url }, server: { token } });
     if (!(await pull())) { console.error(`could not sync from ${url} (check the URL / token)`); process.exitCode = 1; return; }
     writeLocalConfig(me);
@@ -93,29 +94,74 @@ function writeLocalConfig(me: string) {
 }
 
 // ------------------------------------------------------------------ self-update
+const REJECTED = () => join(HOME_DIR, "update-rejected"); // machine-local: a release this host already refused
+const BLOCKED = () => join(HOME_DIR, "update-blocked"); // machine-local: the last reason an update could not be applied
+
+/** A release whose tests failed here is not tried again until origin moves on — otherwise every check
+ *  re-installs the same bad code and wakes the medic again. An explicit `hub update` still retries. */
+export function updateRejected(up: string, file = REJECTED()): boolean {
+  try { return readFileSync(file, "utf8").trim() === up; } catch { return false; }
+}
+
+/** Report a blocked update once per distinct state: an uncommitted file (the medic is told to keep its fix applied
+ *  locally) used to freeze self-update for days without a journal line or a medic call. Returns the text when this
+ *  state is new, null when it was already reported; the caller journals the returned line. */
+export function updateBlocked(detail: string, file = BLOCKED()): string | null {
+  try { if (readFileSync(file, "utf8").trim() === detail) return null; } catch {}
+  try { mkdirSync(HOME_DIR, { recursive: true }); writeFileSync(file, detail); } catch {}
+  return detail;
+}
+
+/** Paths from `git status --porcelain` v1 output. Parse line by line, never trim the whole blob first:
+ *  an unstaged entry starts with a space (` M src/x.ts`), so trimming makes slice(3) drop the path's first char. */
+export function dirtyPaths(porcelain: string): string[] {
+  return porcelain.split("\n").filter((l) => l.length > 3).map((l) => l.replace(/^.. /, ""));
+}
+
 /** Fast-forward framework code if origin has new commits that pass tests. Returns true if updated. */
 export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?: boolean } = {}): Promise<boolean> {
   // never swap code (and then restart) under running work: defer until this host is idle
   if ((opts.busy ?? 0) > 0 && !opts.force) return false;
   const g = (...a: string[]) => $`git ${a}`.cwd(CODE).quiet().nothrow();
   if (!existsSync(join(CODE, ".git"))) return false;
-  if ((await g("status", "--porcelain", "--untracked-files=no")).stdout.toString().trim()) return false; // local edits → skip
   await g("fetch", "-q", "origin");
   const head = (await g("rev-parse", "HEAD")).stdout.toString().trim();
   const up = (await g("rev-parse", "@{u}")).stdout.toString().trim();
   if (!up || head === up) return false;
+  if (!opts.force && updateRejected(up)) return false; // already failed its tests here; wait for the next release
+  const reportBlocked = async (detail: string) => {
+    if (!updateBlocked(detail)) return;
+    try {
+      const { loadConfig, hostName, journal } = await import("./core");
+      journal(hostName(loadConfig()), `⏸ self-update blocked — ${detail}. Commit, revert or merge the change to resume.`);
+    } catch {} // a CLI run without a hub still must not fail on the notice
+  };
+  const dirty = dirtyPaths((await g("status", "--porcelain", "--untracked-files=no")).stdout.toString());
+  if (dirty.length) { // local edits → skip (they would be lost), but never silently
+    await reportBlocked(`local edits: ${dirty.join(", ")} (HEAD ${head.slice(0, 7)}, origin ${up.slice(0, 7)})`);
+    return false;
+  }
   // upstream history may have been rewritten (e.g. scrubbed); with no local edits, follow it — tests below still guard the switch
+  let applied;
   if ((await g("merge-base", "--is-ancestor", "HEAD", "@{u}")).exitCode !== 0) {
     // diverged: follow upstream only when it already has every local commit's change (a rewrite); unpushed work stays
     if ((await g("cherry", "@{u}", "HEAD")).stdout.toString().split("\n").some((l) => l.startsWith("+"))) return false;
-    await g("reset", "--hard", "-q", "@{u}");
+    applied = await g("reset", "--hard", "-q", "@{u}");
   }
-  else await g("merge", "--ff-only", "-q", "@{u}");
+  else applied = await g("merge", "--ff-only", "-q", "@{u}");
+  if (applied.exitCode !== 0) { // never test, report and restart on code that was not actually switched
+    await reportBlocked(`git could not move to ${up.slice(0, 7)}: ${(applied.stderr.toString() || applied.stdout.toString()).trim().slice(-300)}`);
+    return false;
+  }
   const deps = await $`bun install --frozen-lockfile`.cwd(CODE).quiet().nothrow();
-  const test = await $`bun test`.cwd(CODE).quiet().nothrow();
+  // A sleeping Mac can exhaust test timeouts during maintenance wakes. Keep it awake only for validation
+  // (-s also prevents system sleep on AC); caffeinate releases its assertions and preserves the test exit code.
+  const testCmd = process.platform === "darwin" ? ["/usr/bin/caffeinate", "-is", "bun", "test"] : ["bun", "test"];
+  const test = await $`${testCmd}`.cwd(CODE).quiet().nothrow();
   if (deps.exitCode !== 0 || test.exitCode !== 0) {
     await g("reset", "--hard", "-q", head); // roll back a bad release
     await $`bun install --frozen-lockfile`.cwd(CODE).quiet().nothrow();
+    try { mkdirSync(HOME_DIR, { recursive: true }); writeFileSync(REJECTED(), up); } catch {}
     console.error(`self-update to ${up.slice(0, 7)} failed tests → rolled back to ${head.slice(0, 7)}`);
     const { medic } = await import("./medic");
     const { loadConfig } = await import("./core");
@@ -124,15 +170,16 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
     return false;
   }
   seedTemplates(); // new template agents/policies appear; existing ones untouched
-  { // primary keeps its own Cloudflare hub in step with the code (Worker or app changed)
-    const { loadConfig, hostName } = await import("./core");
+  { // designated deployment host keeps its own Cloudflare hub in step with the code (Worker or app changed)
+    const { loadConfig } = await import("./core");
     const c = loadConfig();
     const changed = (await g("diff", "--name-only", head, up)).stdout.toString();
-    if (c.cloud?.url && c.fleet?.primary === hostName(c) && (opts.deploy || /^(cloud|app)\//m.test(changed))) {
+    if (c.cloud?.url && isCloudDeployHost(c) && (opts.deploy || /^(cloud|app)\//m.test(changed))) {
       const { cloudDeploy } = await import("./cloud");
       await cloudDeploy(c);
     }
   }
+  try { unlinkSync(BLOCKED()); } catch {} // the next block is a new event, not a repeat of this one
   console.log(`self-updated ${head.slice(0, 7)} → ${up.slice(0, 7)}`);
   return true;
 }
@@ -141,6 +188,28 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
 /** Machines installed before the rename keep their service name. */
 export const SERVICE = existsSync(join(homedir(), ".config/systemd/user/agent-hub.service")) || existsSync(join(homedir(), "Library/LaunchAgents/com.agent-hub.daemon.plist")) ? "agent-hub" : "noop";
 const LABEL = SERVICE === "agent-hub" ? "com.agent-hub.daemon" : "dev.noop.daemon";
+/** Write a launch agent without loading it; also supports fresh macOS accounts. */
+export function writeMacAgent(home: string, data: string, bun: string, cli: string, path: string, label: string): string {
+  const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+  const plist = join(home, `Library/LaunchAgents/${label}.plist`);
+  mkdirSync(join(plist, ".."), { recursive: true });
+  mkdirSync(join(data, "logs"), { recursive: true });
+  writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${xml(label)}</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>${xml(bun)}</string><string>${xml(cli)}</string><string>daemon</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string><key>HUB_DATA</key><string>${xml(data)}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>${xml(join(data, "logs", "daemon.log"))}</string>
+  <key>StandardErrorPath</key><string>${xml(join(data, "logs", "daemon.log"))}</string>
+</dict></plist>
+`);
+  return plist;
+}
+
 export async function install() {
   const bun = Bun.which("bun") ?? join(homedir(), ".bun/bin/bun");
   const cli = join(CODE, "src", "cli.ts");
@@ -180,28 +249,14 @@ WantedBy=default.target
   24/7:   linger enabled (runs with no one logged in). To prevent sleep on this always-on box:
           sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`);
   } else if (process.platform === "darwin") {
-    const plist = join(homedir(), `Library/LaunchAgents/${LABEL}.plist`);
-    writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>${LABEL}</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>${bun}</string><string>${cli}</string><string>daemon</string></array>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${path}</string><key>HUB_DATA</key><string>${DATA}</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>${join(DATA, "logs", "daemon.log")}</string>
-  <key>StandardErrorPath</key><string>${join(DATA, "logs", "daemon.log")}</string>
-</dict></plist>
-`);
-    mkdirSync(join(DATA, "logs"), { recursive: true });
+    const plist = writeMacAgent(homedir(), DATA, bun, cli, path, LABEL);
     await $`launchctl bootout gui/${process.getuid!()} ${plist}`.quiet().nothrow();
-    await $`launchctl bootstrap gui/${process.getuid!()} ${plist}`.nothrow();
-    console.log(`✔ launchd agent installed: ${plist} (caffeinate -i keeps it awake while plugged in; when the lid closes the fleet simply continues without this Mac)`);
+    await $`launchctl bootstrap gui/${process.getuid!()} ${plist}`;
+    console.log(`✔ launchd agent installed: ${plist} (starts at login; caffeinate -i prevents idle sleep). Keep a primary Mac logged in and awake: sleep, logout or closing the lid pauses coordination until it returns.`);
   } else if (process.platform === "win32") {
     const cmd = `"${bun}" "${cli}" daemon`;
     await $`schtasks /Create /F /SC ONLOGON /RL LIMITED /TN ${SERVICE} /TR ${cmd}`.nothrow();
     await $`schtasks /Run /TN ${SERVICE}`.nothrow();
-    console.log("✔ Scheduled Task '${SERVICE}' installed (runs at logon, restarts with the daemon's own loop). Disable sleep: powercfg /change standby-timeout-ac 0");
+    console.log(`✔ Scheduled Task '${SERVICE}' installed (runs at logon, restarts with the daemon's own loop). Disable sleep: powercfg /change standby-timeout-ac 0`);
   }
 }

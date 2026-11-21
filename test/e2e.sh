@@ -2,6 +2,7 @@
 # End-to-end: sandbox data mirror synced to an offline fake of the Worker files API
 # (HUB_SYNC_FAKE = the real cloud/src/files.ts over a local SQLite file), fake agent CLIs, run ticks.
 set -euo pipefail
+trap 'echo "FAIL: e2e.sh line $LINENO: $BASH_COMMAND" >&2' ERR
 SRC=$(cd "$(dirname "$0")/.." && pwd)
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 export NOOP_HOME="$W" HUB_DATA="$W/data" HUB_HOST=pc HUB_SYNC_FAKE="$W/worker.sqlite"
@@ -43,8 +44,6 @@ command = ["$W/fake-agent"]
 cli = "claude"
 [autonomy]
 batch_minutes = 0
-[clis]
-routine_agents = []
 [idle]
 enabled = false
 F
@@ -69,6 +68,12 @@ test -f tasks/done/T-0002.md && test -f decisions/closed/D-0001.md
 grep -q "owner likes options" agents/release-manager/memory.md
 test "$(bun -e "import {Database} from 'bun:sqlite'; console.log(new Database('$W/worker.sqlite').query('SELECT COUNT(DISTINCT ts) AS n FROM history').get().n)")" -gt 5
 # onboarding: self-generated (routine) work waits for approval; owner-derived follow-ups do not
+# Earlier tasks can leave a follow-up approval batch open. Close it before creating
+# the routine: a newly proposed task cannot join a recently notified batch.
+for proposal in decisions/open/P-*.md; do
+  test -f "$proposal" || continue
+  hub decide "$(basename "$proposal" .md)" none
+done
 ls tasks/done/T-0004.md >/dev/null   # follow-up of an owner task ran without approval
 RT=$(bun -e "import {newTask,setApprovalGate} from '$SRC/src/core.ts'; import {needsApproval} from '$SRC/src/autonomy.ts'; import {loadConfig} from '$SRC/src/core.ts'; setApprovalGate(s=>needsApproval(loadConfig(),s)); console.log(newTask('routine job','x',{source:'routine:pr-review'}))")
 test -f tasks/proposed/$RT.md

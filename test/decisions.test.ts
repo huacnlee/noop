@@ -130,3 +130,49 @@ test("D: the judge never answers a merge card, even when allowed to decide", asy
   expect(existsSync(core.P("decisions", "open", `${id}.md`))).toBe(true);
   expect(sent.at(-1)!.split("\n")[0]).toBe("https://github.com/huacnlee/omamail/pull/457 需要你点合并");
 });
+
+test("followups of an owner-answered idle menu count as the owner's pick; a skipped or judged menu does not", () => {
+  const menuTask = (tid: string) => {
+    const id = dec.openDecision({ id: tid, agent: "chief-of-staff", kind: "menu" }, { status: "needs_decision", summary: "idle", question: "Which next actions?", recommendation: "1", options: ["1. a", "2. b"] } as any, "h");
+    core.writeDoc(core.P("tasks", "blocked", `${tid}.md`), { id: tid, agent: "chief-of-staff", kind: "menu", source: "idle", decision: id }, "menu");
+    return id;
+  };
+  const resumed = (tid: string) => core.readDoc(core.P("tasks", "inbox", `${tid}.md`)).meta;
+  dec.closeDecision(menuTask("T-0301"), "all", "owner(chat)");
+  expect(dec.ownerPickedMenu(resumed("T-0301"))).toBe(true);
+  dec.ignoreDecision(menuTask("T-0302"), "owner(chat)");
+  expect(dec.ownerPickedMenu(resumed("T-0302"))).toBe(false);
+  dec.closeDecision(menuTask("T-0303"), "1", "judge");
+  expect(dec.ownerPickedMenu(resumed("T-0303"))).toBe(false);
+  expect(dec.ownerPickedMenu({ id: "T-0304", kind: "menu" })).toBe(false); // first run: nothing answered yet
+});
+
+test("a task that asks twice refreshes its card instead of opening a second one", async () => {
+  const r = { status: "needs_decision", summary: "ctx", question: "Which CIDR?", recommendation: "1", options: ["1: fill it", "2: skip"] } as any;
+  const first = dec.openDecision({ id: "T-0008", agent: "chief-of-staff", kind: "menu" }, r, "h");
+  const again = dec.openDecision({ id: "T-0008", agent: "chief-of-staff", kind: "menu" }, { ...r, question: "W8 verified, which CIDR?" }, "h");
+  expect(again).toBe(first);
+  const open = core.list(core.P("decisions", "open")).filter((p) => core.readDoc(p).meta.task === "T-0008");
+  expect(open.length).toBe(1);
+  expect(core.readDoc(open[0]).meta.question).toBe("W8 verified, which CIDR?");
+});
+
+test("a different task still gets its own card", () => {
+  const r = { status: "needs_decision", summary: "ctx", question: "Merge?", recommendation: "A", options: ["A: merge", "B: wait"] } as any;
+  const a = dec.openDecision({ id: "T-0010", agent: "lead" }, r, "h");
+  const b = dec.openDecision({ id: "T-0011", agent: "lead" }, r, "h");
+  expect(a).not.toBe(b);
+});
+
+test("a fresh menu card closes the older unanswered one and parks its idle task", () => {
+  const r = (q: string) => ({ status: "needs_decision", summary: "idle", question: q, recommendation: "1", options: ["1. a", "2. b"] }) as any;
+  core.writeDoc(core.P("tasks", "blocked", "T-0401.md"), { id: "T-0401", agent: "chief-of-staff", kind: "menu", source: "idle" }, "old menu");
+  const old = dec.openDecision({ id: "T-0401", agent: "chief-of-staff", kind: "menu" }, r("What next?"), "h");
+  const neu = dec.openDecision({ id: "T-0402", agent: "chief-of-staff", kind: "menu" }, r("What next?"), "h");
+  expect(existsSync(core.P("decisions", "open", `${old}.md`))).toBe(false);
+  expect(closed(old).answer).toBe("superseded (refreshed)");
+  expect(closed(old).answered_by).toBe("system");
+  expect(existsSync(core.P("decisions", "open", `${neu}.md`))).toBe(true);
+  expect(existsSync(core.P("tasks", "blocked", "T-0401.md"))).toBe(false);
+  expect(core.readDoc(core.P("tasks", "rejected", "T-0401.md")).meta.approval).toBe("superseded:T-0402");
+});
