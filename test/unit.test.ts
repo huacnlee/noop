@@ -4,11 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
+import { dirtyPaths } from "../src/setup";
 import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
 import { tooManyWakes } from "../src/waits";
 
-test("routine schedule", () => {
-  const t = new Date("2026-11-02T19:05:00"); // Monday
+test("dirtyPaths keeps every path intact, including the first line", () => {
+  // the first line of `git status --porcelain` for an unstaged edit starts with a space
+  expect(dirtyPaths(" M src/accounts.ts\nA  src/new.ts\nR  old.ts -> new.ts\n?? docs/x.md\n")).toEqual([
+    "src/accounts.ts", "src/new.ts", "old.ts -> new.ts", "docs/x.md",
+  ]);
+  expect(dirtyPaths("")).toEqual([]);
+});
+
+test("routine schedule", () => {  const t = new Date("2026-11-02T19:05:00"); // Monday
   expect(due("15m", undefined, t)).toBe(true);
   expect(due("15m", new Date(+t - 5 * 60e3).toISOString(), t)).toBe(false);
   expect(due("weekdays 19:00", undefined, t)).toBe(true);
@@ -16,6 +24,19 @@ test("routine schedule", () => {
   expect(due("weekly FRI 17:00", undefined, t)).toBe(false);
   expect(due("daily 20:00", undefined, t)).toBe(false);
   expect(due("daily 02:30", undefined, t)).toBe(false); // first run long after slot → wait for next slot
+});
+
+test("routine schedule catches up a slot missed while the machine slept", () => {
+  // Ran yesterday 19:00, tick at 03:00 before today's slot → nothing due yet.
+  expect(due("daily 19:00", "2026-11-17T19:00:00", new Date("2026-11-18T03:00:00"))).toBe(false);
+  // Missed yesterday 19:00 entirely (asleep), tick at 03:00 → fire yesterday's slot now.
+  expect(due("daily 19:00", "2026-11-16T19:00:00", new Date("2026-11-18T03:00:00"))).toBe(true);
+  // Weekday routine missed on Friday fires on Saturday morning.
+  expect(due("weekdays 19:00", "2026-11-12T19:00:00", new Date("2026-11-14T10:00:00"))).toBe(true);
+  // Weekly Sunday routine missed fires on Monday.
+  expect(due("weekly SUN 21:00", "2026-11-08T21:00:00", new Date("2026-11-16T08:00:00"))).toBe(true);
+  // ...but not a second time once it has caught up.
+  expect(due("daily 19:00", "2026-11-18T03:00:00", new Date("2026-11-18T03:05:00"))).toBe(false);
 });
 
 test("capability matching", () => {

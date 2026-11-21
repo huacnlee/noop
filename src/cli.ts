@@ -30,7 +30,7 @@ import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineParkedOnDecision, routineQueued, supersedeProposed } from "./autonomy";
-import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, capOk, idTagFor, isPrimary, isCloudDeployHost, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
@@ -47,11 +47,18 @@ export function due(every: string, last: string | undefined, t = new Date()): bo
     return !lastT || +t - +lastT >= mins * 60_000;
   }
   const [h, m] = parts.at(-1)!.split(":").map(Number);
-  const target = new Date(t); target.setHours(h, m, 0, 0);
-  if (t < target) return false;
-  const dow = t.getDay();
-  if (parts[0] === "weekdays" && (dow === 0 || dow === 6)) return false;
-  if (parts[0] === "weekly" && ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][dow] !== parts[1].toUpperCase().slice(0, 3)) return false;
+  // Most recent slot at or before t, stepping back over days the schedule excludes.
+  // A machine asleep at 19:00 used to skip that day's routine entirely: `target` was
+  // allowed to move forward with the clock, so the next tick (say 03:00) saw today's
+  // 19:00 still in the future and returned false for the whole day. Catch up instead.
+  let target = new Date(t); target.setHours(h, m, 0, 0);
+  if (t < target) target = new Date(+target - 24 * 60 * 60_000);
+  const onSchedule = (d: Date) => {
+    if (parts[0] === "weekdays") return d.getDay() !== 0 && d.getDay() !== 6;
+    if (parts[0] === "weekly") return ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][d.getDay()] === parts[1].toUpperCase().slice(0, 3);
+    return true;
+  };
+  for (let i = 0; i < 7 && !onSchedule(target); i++) target = new Date(+target - 24 * 60 * 60_000);
   if (!lastT) return +t - +target < 60 * 60_000; // first run ever: only fire near the scheduled time
   return lastT < target;
 }
@@ -573,11 +580,11 @@ function wakeParents(host: string, ready = new Set<string>()) {
       // Only wakes without progress count toward parking it as blocked; a changed wait_check is progress.
       const wakes = Number(meta.wakes ?? 0) + (ready.has(meta.id) ? 0 : 1);
       if (tooManyWakes(wakes)) { // cycling without progress: stop waking it, tell the owner once what blocks it
-        writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...meta, wake_at: undefined, wakes: String(wakes), status: "blocked" },
+        writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...meta, wake_at: undefined, wakes: String(wakes), status: "blocked", stuck_notified: "yes" },
           `${body}\nBlocked after ${wakes} wake-ups, still waiting on: ${meta.waiting_on ?? "?"}\n`);
         unlinkSync(p);
         journal(host, L(`🧱 ${meta.id} still not ready after ${wakes} wakes, now blocked: ${meta.waiting_on ?? "?"}`, `🧱 ${meta.id} 唤醒 ${wakes} 次仍未就绪，转为 blocked：${meta.waiting_on ?? "?"}`));
-        void notify(L(`${meta.id} is stuck: ${meta.waiting_on ?? "?"} (woken ${wakes} times, no more automatic retries)`, `${meta.id} 卡住了：${meta.waiting_on ?? "?"}（已唤醒 ${wakes} 次，不再自动重试）`), loadConfig(), { kind: "notice", ref: meta.id });
+        if (!meta.stuck_notified) void notify(L(`${meta.id} is stuck: ${meta.waiting_on ?? "?"} (woken ${wakes} times, no more automatic retries)`, `${meta.id} 卡住了：${meta.waiting_on ?? "?"}（已唤醒 ${wakes} 次，不再自动重试）`), loadConfig(), { kind: "notice", ref: meta.id });
         continue;
       }
       writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, wait_ready: undefined, status: undefined, claimed_by: undefined, resumed: "yes", wakes: String(wakes) },
@@ -805,7 +812,11 @@ const nap = (ms: number) => Promise.race([Bun.sleep(ms), new Promise<void>((r) =
 async function planNow(cfg: Cfg, host: string) {
   const todo = list(P("tasks", "inbox"), /^T-.*\.md$/).map((p) => ({ p, ...readDoc(p) })).filter((t) => !t.meta.planned).slice(0, 12);
   if (!todo.length) return;
-  const hosts = onlineHosts(cfg).map((h) => `- ${h.host}: ${h.caps.join(",")}`).join("\n");
+  const online = onlineHosts(cfg);
+  const hosts = online.map((h) => `- ${h.host}: ${h.caps.join(",")}`).join("\n");
+  // CLIs some machine can actually run (this host counts even before its first heartbeat lands): a hint for any other
+  // CLI would leave the task unclaimable
+  const clis = fleetClis([hostCaps(cfg), ...online.map((h) => h.caps)]);
   // the owner's per-member CLI policy (Settings → Members → clis.agents): the planner suggests, it may not override it
   const fixed = new Map<string, string[]>();
   for (const t of todo) {
@@ -818,7 +829,7 @@ For each task decide:
 - requires: host capabilities it truly needs, comma-separated, from the hosts' caps below (e.g. "os:macos" for iOS/macOS builds,
   simulators or screenshots; "os:windows"; "" when any host will do). Only require what the work cannot be done without.
 - cli: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews.
-  A suggestion only — never pick against an agent's fixed CLI below.
+  A suggestion only — never pick against an agent's fixed CLI below. Installed in this fleet: ${clis.join(", ") || "(unknown)"}; never suggest another.
 - difficulty: "hard" or "normal".
 ${fixed.size ? `\nAgent CLI (the owner's setting — not yours to change):\n${[...fixed].map(([a, c]) => `- ${a}: fixed to ${c.join(" → ")} (leave cli out)`).join("\n")}\n` : ""}
 
@@ -844,7 +855,7 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
       const hint = v.cli === "codex" || v.cli === "claude" ? v.cli : "";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
       writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req,
-        ...cliHintPatch(t.meta, per, v.cli),
+        ...cliHintPatch(t.meta, per, v.cli, clis),
         ...(v.difficulty === "hard" ? { difficulty: "hard" } : {}), planned: now() }, t.body);
       // what will actually run — plus the planner's raw answer when the owner's policy overruled it, so it stays traceable
       const run = allowedClis(readDoc(t.p).meta, cfg);

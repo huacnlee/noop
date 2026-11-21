@@ -315,7 +315,7 @@ function applyRemote(st: State, f: Remote): "ok" | "merged" | "lost" {
   }
   if (write) { if (!local || hash(write) !== lh) writeAtomic(abs, write); } else rmSync(abs, { force: true });
   if (!badRemote) setBase(f.path, remote); // else keep the last good copy: integrity.recoverMemory restores from it
-  if (remote) st.files[f.path] = { v: f.version, h: f.hash ?? hash(remote), ...(outcome === "merged" ? { m: -1, s: -1 } : stamp(f.path)) };
+  if (remote) st.files[f.path] = { v: f.version, h: f.hash ?? hash(remote), ...(outcome === "merged" || badRemote ? { m: -1, s: -1 } : stamp(f.path)) }; // badRemote: local is damaged too and gets restored in place, maybe within the same mtime tick and size
   else delete st.files[f.path];
   return outcome;
 }
@@ -389,6 +389,8 @@ function recordCommitted(st: State, changes: Change[], files: { path: string; ve
     if (c?._bytes) setBase(f.path, c._bytes);
     // edited again while the request was in flight → force a rehash next scan
     if (c?._hash && f.hash !== c._hash) st.files[f.path].m = -1;
+    // a same-size rewrite inside the filesystem's timestamp tick would keep this stamp and never be pushed
+    else if (Date.now() - st.files[f.path].m < 2000) st.files[f.path].m = -1;
   }
 }
 

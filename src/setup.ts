@@ -112,6 +112,12 @@ export function updateBlocked(detail: string, file = BLOCKED()): string | null {
   return detail;
 }
 
+/** Paths from `git status --porcelain` v1 output. Parse line by line, never trim the whole blob first:
+ *  an unstaged entry starts with a space (` M src/x.ts`), so trimming makes slice(3) drop the path's first char. */
+export function dirtyPaths(porcelain: string): string[] {
+  return porcelain.split("\n").filter((l) => l.length > 3).map((l) => l.replace(/^.. /, ""));
+}
+
 /** Fast-forward framework code if origin has new commits that pass tests. Returns true if updated. */
 export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?: boolean } = {}): Promise<boolean> {
   // never swap code (and then restart) under running work: defer until this host is idle
@@ -130,9 +136,9 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
       journal(hostName(loadConfig()), `⏸ self-update blocked — ${detail}. Commit, revert or merge the change to resume.`);
     } catch {} // a CLI run without a hub still must not fail on the notice
   };
-  const dirty = (await g("status", "--porcelain", "--untracked-files=no")).stdout.toString().trim();
-  if (dirty) { // local edits → skip (they would be lost), but never silently
-    await reportBlocked(`local edits: ${dirty.split("\n").map((l) => l.slice(3)).join(", ")} (HEAD ${head.slice(0, 7)}, origin ${up.slice(0, 7)})`);
+  const dirty = dirtyPaths((await g("status", "--porcelain", "--untracked-files=no")).stdout.toString());
+  if (dirty.length) { // local edits → skip (they would be lost), but never silently
+    await reportBlocked(`local edits: ${dirty.join(", ")} (HEAD ${head.slice(0, 7)}, origin ${up.slice(0, 7)})`);
     return false;
   }
   // upstream history may have been rewritten (e.g. scrubbed); with no local edits, follow it — tests below still guard the switch

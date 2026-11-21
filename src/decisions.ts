@@ -21,7 +21,33 @@ export function openDecision(task: Record<string, string>, res: Result, host: st
     attachments: (res.attachments ?? []).join(" | ") || undefined,
     kind: task.kind === "menu" ? "menu" : undefined,
   }, `## Context\n${res.summary}\n\n## Options\n${opts.map((o) => `- ${o}`).join("\n")}\n`);
+  if (task.kind === "menu") supersedeMenus(id);
   return id;
+}
+
+/**
+ * A refreshed next-steps menu replaces the unanswered one before it. The idle loop asks the chief of staff to refresh
+ * a menu the owner has not answered, but the old card stayed open: D-0014 and D-0015 (same items, three hours apart)
+ * both waited overnight and every further refresh would add one more. Close the older menu cards (by the system: no
+ * lesson, not an owner answer) and finish their tasks without running them, so the owner answers one menu.
+ */
+function supersedeMenus(newId: string) {
+  for (const p of list(P("decisions", "open"))) {
+    const { meta, body } = readDoc(p);
+    if (meta.kind !== "menu" || meta.id === newId) continue;
+    const answer = `superseded by ${newId}`;
+    writeDoc(P("decisions", "closed", `${meta.id}.md`), { ...meta, answer, answered_by: "system", answered: now(), superseded_by: newId },
+      `${body}\n## Answer (system)\n${answer}: a refreshed menu replaced this unanswered one.\n`);
+    unlinkSync(p);
+    for (const task of cardTasks(meta)) {
+      const t = P("tasks", "blocked", `${task}.md`);
+      if (!existsSync(t)) continue;
+      const { meta: tm, body: tb } = readDoc(t);
+      writeDoc(P("tasks", "done", `${task}.md`), { ...tm, status: "done", finished: now(), claimed_by: undefined },
+        `${tb}\n\n> ${now()}: menu ${meta.id} ${answer}; closed without running.\n`);
+      unlinkSync(t);
+    }
+  }
 }
 
 type Verdict = { verdict: "decided" | "sent_back" | "hold"; answer?: string; reason: string; cite?: string };

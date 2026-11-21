@@ -8,6 +8,7 @@ trap '(cd "$work" && rm -rf -- ./*); rmdir "$work"' EXIT
 mkdir -p "$work/nsh"
 "${NSH:-nsh}" build "$root/scripts/fixtures/linux-runtime/App.tsx" -o "$work/nsh"
 printf '%s\n' '{"name":"Noop runtime check","id":"dev.noop.runtime-check"}' > "$work/nsh/app.json"
+printf '%s\n' '{"network":{"hosts":["github.com"]}}' > "$work/nsh/capabilities.json"
 cp "$runtime" "$work/runner"
 # Cold GTK/graphics initialization on shared runners can exceed five seconds.
 # Keep the success marker mandatory, and print startup diagnostics on failure.

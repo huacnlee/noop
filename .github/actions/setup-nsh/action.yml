@@ -47,7 +47,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.nsh-dist
-        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}${{ steps.apple-sdk.outputs.key }}${{ inputs.target == 'macos' && format('-{0}', inputs.rust-target || 'native') || '' }}${{ inputs.target == 'linux' && '-crypto-v1' || '' }}
+        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}${{ steps.apple-sdk.outputs.key }}${{ inputs.target == 'macos' && format('-{0}', inputs.rust-target || 'native') || '' }}${{ inputs.target == 'linux' && '-features-v2' || '' }}
 
     # The x86_64 CLI also generates x86_64 OTA archive names. It needs Rosetta even on cache hits.
     - if: runner.os == 'macOS' && runner.arch == 'ARM64' && inputs.rust-target == 'x86_64-apple-darwin'
@@ -167,9 +167,11 @@ runs:
         fi
         case "$TARGET" in
           linux)
-            # noop shows no web views, so the app needs only GTK 4 and not WebKitGTK.
-            # Sending uses crypto.randomUUID() for optimistic message IDs. `js` alone omits Web Crypto.
-            cargo build --release --locked -p nsh-linux-app --no-default-features --features js,crypto
+            # noop shows no web views, so the app needs only GTK 4 and not WebKitGTK: every other default
+            # feature stays, as `cargo xtask dist` builds it without WebKitGTK. `net` (fetch), `websocket`
+            # and `svg` became optional in longbridge/nsh#1709; leaving them out broke sign-in.
+            cargo build --release --locked -p nsh-linux-app --no-default-features \
+              --features js,shader,editor,highlight,math,plot,rich-editor,zlib,crypto,websocket,updater,svg,net,sound
             rm -rf "$out/runtime/linux"; install -d "$out/runtime/linux"; cp target/release/nsh-linux-app "$out/runtime/linux/" ;;
           windows)
             cargo build --release --locked -p nsh-windows-app

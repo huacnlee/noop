@@ -1,6 +1,6 @@
 // Resource governor: telemetry, adaptive parallelism, per-agent CPU budgets, automatic disk cleanup.
 // Everything here is deterministic code — agents never decide to delete things on their own.
-import { existsSync, lstatSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs";
 import { availableParallelism, cpus, freemem, homedir, loadavg, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
@@ -22,7 +22,17 @@ export function busyShare(prev: CpuTicks | null, cur: CpuTicks): number | null {
 }
 
 const CPU_MIN_MS = 2000, CPU_FIRST_MS = 50;
-const snapCpu = (): CpuTicks => cpus().reduce<CpuTicks>((a, c) => {
+/** Linux: the aggregate line of /proc/stat. os.cpus() also reads every core's cpufreq file (~20ms each), which costs
+ *  seconds per call on a many-core host and ran at import time, slowing every CLI start. */
+function procStatTicks(): CpuTicks | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const f = readFileSync("/proc/stat", "utf8").split("\n", 1)[0].trim().split(/\s+/).slice(1, 8).map(Number); // user nice sys idle iowait irq softirq
+    if (f.length < 4 || f.some(Number.isNaN)) return null;
+    return { idle: f[3] + (f[4] ?? 0), total: f.reduce((a, b) => a + b, 0) };
+  } catch { return null; }
+}
+const snapCpu = (): CpuTicks => procStatTicks() ?? cpus().reduce<CpuTicks>((a, c) => {
   a.idle += c.times.idle;
   a.total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
   return a;

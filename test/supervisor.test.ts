@@ -211,3 +211,25 @@ test("CI held for approval turns a machine wait into a visible owner wait", () =
     supervise({}, "test", NOW, () => "OPEN", () => { throw new Error("human waits are not rechecked"); });
   } finally { rmSync(waiting, { force: true }); }
 });
+
+test("a blocked task closes quietly once its PRs are merged or closed, even with children", () => {
+  const id = "T-10394-test";
+  const blocked = P("tasks", "blocked", `${id}.md`);
+  const inbox = P("tasks", "inbox", `${id}.md`);
+  const done = P("tasks", "done", `${id}.md`);
+  try {
+    writeDoc(blocked, { id, title: "NSH #2346：macOS screenshots", status: "blocked", children: "T-H0041", decision: "D-none", resumes: "D-none", waiting_on: "display", created: new Date(NOW).toISOString() }, "PR https://github.com/longbridge/nsh/pull/2346 needs shots");
+    supervise({}, "test", NOW, () => "MERGED", () => false);
+    expect(existsSync(blocked)).toBe(false);
+    expect(existsSync(inbox)).toBe(false);
+    expect(readDoc(done).meta.status).toBe("done");
+  } finally {
+    for (const path of [blocked, inbox, done]) rmSync(path, { force: true });
+  }
+});
+
+test("an answered card does not resume a blocked task that already resumed on it", () => {
+  const ctx = { now: NOW, online: [], retired: [], primaryOs: "linux", maxAgeHours: 3, maxWakes: 3, decision: () => "closed" as const } as any;
+  expect(classify({ folder: "blocked", meta: { id: "T-x", decision: "D-1", resumes: "D-1" } }, ctx)?.action).not.toBe("resume");
+  expect(classify({ folder: "blocked", meta: { id: "T-x", decision: "D-1" } }, ctx)?.action).toBe("resume");
+});

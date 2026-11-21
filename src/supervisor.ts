@@ -50,8 +50,8 @@ export function classify(t: Task, ctx: Ctx): Verdict | null {
     if (capable(rest).length) return v(`host:${gone}`, "reroute", [L(`pinned host ${gone} is retired`, `绑定的主机 ${gone} 已停用`)], rest.join(","));
     return v(`host:${gone}`, "escalate", [L(`pinned host ${gone} is retired and no other online host meets ${rest.join(",") || "the requirements"}`, `绑定的主机 ${gone} 已停用，且没有其他在线主机满足 ${rest.join(",") || "要求"}`)]);
   }
-  // 2. blocked on a card that is already closed → the answer never reached it
-  if (t.folder === "blocked" && m.decision && ctx.decision(m.decision) === "closed") return v(`answered:${m.decision}`, "resume", [L(`${m.decision} was answered but the task did not continue`, `${m.decision} 已回答但任务没有继续`)]);
+  // 2. blocked on a card that is already closed → the answer never reached it (unless the task already resumed on it)
+  if (t.folder === "blocked" && m.decision && m.resumes !== m.decision && ctx.decision(m.decision) === "closed") return v(`answered:${m.decision}`, "resume", [L(`${m.decision} was answered but the task did not continue`, `${m.decision} 已回答但任务没有继续`)]);
   if (t.folder === "blocked" && m.decision && ctx.decision(m.decision) === "open") return null; // the owner has the card
   // 2b. parked on the owner: a human wait is a state, not a stall. waits.ts gives it no deadline and no timer, so a
   // clock-based card here would only add a second unanswered card about the first one (2026-11-14: 167 identical
@@ -183,10 +183,24 @@ export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = 
   const counts = { reroute: 0, resume: 0, requeue: 0, cards: 0, merged: 0 };
   let merged = 0;
   for (const task of [...tasks]) { // Wake once per merged PR set, preserving any unfinished acceptance work.
-    if (task.meta.children || ctx.decision(task.meta.decision ?? "") === "open") continue;
     const prs = trackedPrs(task.meta, task.body);
+    if (!prs.length) continue;
+    // A blocked task has already given up on its own condition; once every PR it exists for is merged or closed, the
+    // owner has decided. Close it quietly instead of waking it or pinging the owner again (T-10394: T-10076 kept a
+    // "stuck" notice alive for #2346 a day after the owner merged it).
+    if (task.folder === "blocked" && ctx.decision(task.meta.decision ?? "") !== "open") {
+      const states = prs.map((r) => readPrState(r));
+      if (!states.every((x) => x === "MERGED" || x === "CLOSED")) continue;
+      writeDoc(P("tasks", "done", `${task.meta.id}.md`), { ...task.meta, status: "done", finished: new Date(t).toISOString(), wake_at: undefined, claimed_by: undefined },
+        `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} ${states.join("/").toLowerCase()} while this task was blocked; closed without further work or notices.\n`);
+      unlinkSync(task.path);
+      tasks.splice(tasks.indexOf(task), 1);
+      journal(host, L(`🧭 supervisor: ${task.meta.id} closed, ${prs.join(", ")} already settled`, `🧭 supervisor: ${task.meta.id} 已收尾关闭，${prs.join("、")} 已合并或关闭`)); merged++;
+      continue;
+    }
+    if (task.meta.children || ctx.decision(task.meta.decision ?? "") === "open") continue;
     const signature = prs.slice().sort().join(",");
-    if (!prs.length || task.meta.supervisor_merged_prs === signature || !prs.every((r) => readPrState(r) === "MERGED")) continue;
+    if (task.meta.supervisor_merged_prs === signature || !prs.every((r) => readPrState(r) === "MERGED")) continue;
     writeDoc(P("tasks", "inbox", `${task.meta.id}.md`), { ...task.meta, status: undefined, finished: undefined, resumed: "yes", supervisor_merged_prs: signature, wake_at: undefined, wait_kind: undefined, claimed_by: undefined },
       `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} merged while this task waited. Check remaining acceptance criteria and follow-ups; return done if the goal is met, otherwise continue the unfinished work. Do not wait for these PRs to merge again.\n`);
     unlinkSync(task.path);

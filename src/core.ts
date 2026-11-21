@@ -256,12 +256,19 @@ export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
 }
 
 /** What the planner may write back about the CLI: only a `cli_hint`, and only when the task is not pinned and its
- *  agent has no per-member policy — either of those would overrule the suggestion anyway. */
-export function cliHintPatch(meta: Record<string, string>, per: unknown, suggestion: unknown): Record<string, string> {
+ *  agent has no per-member policy — either of those would overrule the suggestion anyway.
+ *  `available` is the set of CLIs installed on some online host (see fleetClis): a hint naming a CLI no machine has
+ *  would narrow allowedClis to a CLI nobody can run, and the task would sit in the inbox forever. */
+export function cliHintPatch(meta: Record<string, string>, per: unknown, suggestion: unknown, available: string[]): Record<string, string> {
   const pinned = meta.cli && meta.cli !== "auto";
   const hint = suggestion === "claude" || suggestion === "codex" ? suggestion : "";
-  if (pinned || (Array.isArray(per) && per.length) || !hint) return {};
+  if (pinned || (Array.isArray(per) && per.length) || !hint || !available.includes(hint)) return {};
   return { cli_hint: hint };
+}
+
+/** The agent CLIs (claude, codex) installed on at least one of these hosts, read from their `cli:*` caps. */
+export function fleetClis(caps: string[][]): string[] {
+  return ["claude", "codex"].filter((c) => caps.some((cs) => cs.includes(`cli:${c}`)));
 }
 
 export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null {
@@ -463,7 +470,8 @@ export const recentJournal = (days = 2) =>
 export function precedents(n = 30): string {
   // the latest answers, not the last file names: by name every P-… batch and D-C… card sorts after every D-0… card
   const at = (m: Record<string, string>) => m.answered ?? m.created ?? "";
-  return list(P("decisions", "closed")).map((p) => readDoc(p).meta).sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)).slice(-n)
+  // a menu the system closed because a refreshed one replaced it was never answered: not a precedent
+  return list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => !m.superseded_by).sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)).slice(-n)
     .map((meta) => `- ${meta.id} [${meta.agent}] Q: ${meta.question}\n  → **${meta.answer}** (by ${meta.answered_by})`).join("\n");
 }
 
