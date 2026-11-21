@@ -172,6 +172,7 @@ test("a fresh menu card closes the older unanswered one and parks its idle task"
   expect(existsSync(core.P("decisions", "open", `${old}.md`))).toBe(false);
   expect(closed(old).answer).toBe("superseded (refreshed)");
   expect(closed(old).answered_by).toBe("system");
+  expect(closed(old).superseded_by).toBe(neu);
   expect(existsSync(core.P("decisions", "open", `${neu}.md`))).toBe(true);
   expect(existsSync(core.P("tasks", "blocked", "T-0401.md"))).toBe(false);
   expect(core.readDoc(core.P("tasks", "rejected", "T-0401.md")).meta.approval).toBe("superseded:T-0402");
