@@ -684,6 +684,12 @@ const inQuietHours = (cfg: Cfg) => {
 /** Did this task end in a decision card (open or already answered)? Decision cards carry the id of the task that raised them. */
 const raisedDecision = (taskId: string) =>
   ["open", "closed"].some((dir) => list(P("decisions", dir)).some((p) => readDoc(p).meta.task === taskId));
+/** Answered by the owner (not by the judge, not a system supersede) at or after `iso`. */
+const answeredByOwnerSince = (iso: string): boolean =>
+  list(P("decisions", "closed")).some((p) => {
+    const m = readDoc(p).meta;
+    return /^owner/.test(m.answered_by ?? "") && Date.parse(m.answered ?? "") >= Date.parse(iso);
+  });
 
 export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, string>) {
   if (cfg.idle?.enabled === false || inQuietHours(cfg)) return;
@@ -699,6 +705,13 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
     .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
   const cooldown = (cfg.idle?.cooldown_minutes ?? 180) * 60_000;
   if (pendingMenu && Date.now() - Date.parse(pendingMenu.created) < cooldown) return;
+  // Re-offering only helps an owner who is listening. If he has answered nothing since the pending menu was
+  // created, another refresh lands in the same unanswered pile: stop minting menus (each costs a full agent run)
+  // and let the channel get fixed instead. Any real answer — including "忽略" — re-opens the loop.
+  if (pendingMenu && !answeredByOwnerSince(pendingMenu.created)) {
+    journal(host, `💤 fleet idle ${Math.round(idleMin)}m → no new menu: ${pendingMenu.id} still unanswered and the owner has answered nothing since`);
+    return;
+  }
   const sinceLast = state.last_menu ? Date.now() - Date.parse(state.last_menu) : Infinity;
   if (sinceLast < 15 * 60_000) return;
   // The cooldown above only covers a menu card that is still open. A run that found nothing worth asking raises no card,

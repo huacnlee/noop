@@ -11,6 +11,8 @@ const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
 const state = () => ({ idle_since: ago(60), last_menu: ago(30) });
 const menu = (id: string, minutes: number, kind = "menu") =>
   writeDoc(P("decisions/open", `${id}.md`), { id, kind, created: ago(minutes) }, "pending");
+const closed = (id: string, minutes: number, by = "owner") =>
+  writeDoc(P("decisions/closed", `${id}.md`), { id, answered_by: by, answered: ago(minutes), answer: "1" }, "answered");
 const tasks = () => list(P("tasks/inbox"));
 
 beforeEach(() => {
@@ -37,6 +39,7 @@ test("cooldown expiry refreshes the latest menu by time, ignoring newer non-menu
     menu("D-F0004", 180);
     menu("D-F0014", 480);
     menu("D-9999", 1, "decision");
+    closed("D-0007", 30); // the owner did answer something since D-F0004 was created → he is listening
     maybeProposeNext(cfg, "test", state());
     expect(tasks()).toHaveLength(1);
     const task = readDoc(tasks()[0]);
@@ -44,6 +47,14 @@ test("cooldown expiry refreshes the latest menu by time, ignoring newer non-menu
     expect(task.body).toContain("An earlier menu D-F0004 is still unanswered");
     expect(task.body).not.toContain("An earlier menu D-F0014");
   } finally { clock.mockRestore(); }
+});
+
+test("an owner who answered nothing since the last menu gets no refresh", () => {
+  menu("D-F0004", 480);
+  closed("P-OLD", 600, "system"); // a system supersede is not an answer
+  closed("D-OLD", 600, "judge");  // nor is a judge decision
+  maybeProposeNext(cfg, "test", state());
+  expect(tasks()).toEqual([]);
 });
 
 test("without pending menus the existing 15-minute generation guard still applies", () => {
