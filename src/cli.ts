@@ -705,7 +705,7 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   // so without this the next run fires every 15 minutes, each one a full model run that again answers "nothing new".
   if (sinceLast < cooldown && state.last_idle_task && !raisedDecision(state.last_idle_task)) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
-Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,
+Build the owner's next-action menu per your profile. Return needs_decision only for candidates with new evidence or a prepared result that changes the owner's decision. If none qualify, return done with a brief no-change summary and no question, options, or followups; leave pending decisions unanswered.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — assess what changed before offering a refresh.` : ""}`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
   state.last_idle_task = id;
