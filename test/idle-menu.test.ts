@@ -31,18 +31,16 @@ test("a recent pending menu suppresses another even when an older menu sorts fir
   expect(tasks()).toEqual([]);
 });
 
-test("cooldown expiry refreshes the latest menu by time, ignoring newer non-menu decisions", () => {
+test("an unanswered menu keeps suppressing new ones past the cooldown; non-menu cards do not count", () => {
   const clock = spyOn(Date, "now").mockReturnValue(now);
   try {
     menu("D-F0004", 180);
-    menu("D-F0014", 480);
     menu("D-9999", 1, "decision");
     maybeProposeNext(cfg, "test", state());
-    expect(tasks()).toHaveLength(1);
-    const task = readDoc(tasks()[0]);
-    expect(task.meta.kind).toBe("menu");
-    expect(task.body).toContain("An earlier menu D-F0004 is still unanswered");
-    expect(task.body).not.toContain("An earlier menu D-F0014");
+    expect(tasks()).toEqual([]);
+    menu("D-F0014", 480); // an older one does not change the answer either
+    maybeProposeNext(cfg, "test", state());
+    expect(tasks()).toEqual([]);
   } finally { clock.mockRestore(); }
 });
 

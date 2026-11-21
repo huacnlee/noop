@@ -693,19 +693,19 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
-  // Re-offer after the latest unanswered menu's cooldown, regardless of filename order.
-  const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta)
-    .filter((m) => m.kind === "menu")
-    .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
+  // An open menu already asks the owner what to do next. Re-raising a reworded copy every cooldown only piled up cards
+  // nobody answered (13 open on 2026-11-18, two raised five minutes apart, none answered in 15 days). Ask again only
+  // once the owner has dealt with the last one — answered, ignored or closed — i.e. when no menu card is open.
+  const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta).find((m) => m.kind === "menu");
+  if (pendingMenu) return;
   const cooldown = (cfg.idle?.cooldown_minutes ?? 180) * 60_000;
-  if (pendingMenu && Date.now() - Date.parse(pendingMenu.created) < cooldown) return;
   const sinceLast = state.last_menu ? Date.now() - Date.parse(state.last_menu) : Infinity;
   if (sinceLast < 15 * 60_000) return;
   // The cooldown above only covers a menu card that is still open. A run that found nothing worth asking raises no card,
   // so without this the next run fires every 15 minutes, each one a full model run that again answers "nothing new".
   if (sinceLast < cooldown && state.last_idle_task && !raisedDecision(state.last_idle_task)) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
-Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,
+Build the owner's next-action menu per your profile and return needs_decision.`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
   state.last_idle_task = id;
