@@ -145,6 +145,10 @@ import {
   recommended,
   type Attachment,
   attachProblem,
+  ATTACH_MAX_BYTES,
+  ATTACH_MAX_COUNT,
+  insertText,
+  pasteAsFile,
   filePath,
   imageType,
   rows,
@@ -914,6 +918,16 @@ function retryDoc(src: string, body: Signal<DocBody>) {
 }
 
 /** A Markdown report attached to a message: a file card that opens the report in the chat's reader pane. */
+/** A long paste waiting in the composer: a Markdown file tile the size of an image thumbnail. */
+function PastedDoc(props: { name: string; size: number }) {
+  return (
+    <View testID="pasted-doc" accessibilityLabel={props.name} style={{ width: props.size, height: props.size, borderRadius: radius.inset, borderCurve: "continuous", borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", gap: 3 }}>
+      <Icon name="document" size={18} tint={colors.muted} />
+      <Text style={{ fontFamily: MONO, fontSize: 8, fontWeight: "600", letterSpacing: 0.5, color: colors.faint }}>MD</Text>
+    </View>
+  );
+}
+
 function DocAttachment(props: { src: string; name: string }) {
   const active = () => reading()?.src === props.src && reading()?.at === readerAt();
   const stem = () => props.name.replace(/\.(md|markdown)$/i, "");
@@ -1783,7 +1797,7 @@ function createAttachments() {
   }
   function unattach(id: string) {
     const a = list().find((x) => x.id === id);
-    if (a) URL.revokeObjectURL(a.preview);
+    if (a) URL.revokeObjectURL(a.preview.replace(/#.*$/, ""));
     list.update((l) => l.filter((x) => x.id !== id));
     note.set(null);
   }
@@ -1801,7 +1815,26 @@ function createAttachments() {
       }
     }
   }
-  return { list, note, attach, unattach, attachUris };
+  /** A long paste, kept as a Markdown file that goes with the message (read in the reader, not dumped into the box). */
+  function attachText(text: string) {
+    if (list().length >= ATTACH_MAX_COUNT) return note.set(attachProblem("text/markdown", 0, list().length));
+    const file = new Blob([text], { type: "text/markdown" });
+    if (file.size > ATTACH_MAX_BYTES) return note.set(L("Pasted text must be 10 MB or less", "粘贴的文字不能超过 10 MB"));
+    note.set(null);
+    const name = `pasted-${++seq}.md`;
+    // the name rides on the preview URL so the sent message shows it as a document right away
+    list.update((a) => [...a, { id: `a${seq}`, name, type: "text/markdown", size: file.size, file, preview: `${URL.createObjectURL(file)}#${name}` }]);
+  }
+  /** What a composer does with a paste (it takes pastes as reports): files attach, long text becomes a file, the rest goes in at the caret. */
+  function paste(e: { text: string; files: File[]; uris: string[] }, value: string, sel: { start: number; end: number } | null, put: (value: string, at: number) => void) {
+    for (const f of e.files) attach(f, f.name);
+    if (e.uris.length) void attachUris(e.uris);
+    if (!e.text || e.files.length || e.uris.length) return;
+    if (pasteAsFile(e.text)) return attachText(e.text);
+    const r = insertText(value, e.text, sel);
+    put(r.value, r.at);
+  }
+  return { list, note, attach, unattach, attachUris, attachText, paste };
 }
 
 function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (folded: Folded | null) => void }) {
@@ -1974,7 +2007,9 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
             <Each of={files.list()} key={(a) => a.id}>
               {(a) => (
                 <View testID="task-attachment" style={{ width: 56, height: 56 }}>
-                  <Image src={a().preview} style={{ width: 56, height: 56, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }} />
+                  <If when={a().type === "text/markdown"} else={<Image src={a().preview} style={{ width: 56, height: 56, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }} />}>
+                    <PastedDoc name={a().name} size={56} />
+                  </If>
                   <View
                     role="button"
                     accessibilityLabel={L(`Remove ${a().name}`, `移除 ${a().name}`)}
@@ -1998,10 +2033,12 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
             multiline
             value={text()}
             onChange={({ value }) => text.set(value)}
-            onPaste={({ files: pasted, uris }) => {
-              for (const f of pasted) files.attach(f, f.name);
-              if (uris.length) void files.attachUris(uris);
-            }}
+            pasteBehavior="report"
+            onPaste={(e) => files.paste(e, text(), taskCaret, (v, at) => {
+              text.set(v);
+              taskCaret = { start: at, end: at };
+              taskComposer?.setSelection(at);
+            })}
             submitBehavior={touch ? "newline" : "submit"}
             onSubmit={() => void say()}
             placeholder={L(`Continue in ${props.id}…`, `在 ${props.id} 里继续说…`)}
@@ -4785,10 +4822,12 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   }
 
   // Images the owner attaches: pasted, dropped on the window, or picked.
-  const { list: attachments, note: attachNote, attach, unattach: dropAttachment, attachUris } = createAttachments();
+  const { list: attachments, note: attachNote, attach, unattach: dropAttachment, attachUris, paste } = createAttachments();
+  /** The attached images (pasted text files are not paged through as images). */
+  const imageAttachments = () => attachments().filter((a) => a.type !== "text/markdown");
   /** The thumbnail whose full-size view is open; it pages through every attached image. */
   const viewing = signal<string | null>(null);
-  const viewingIndex = () => Math.max(0, attachments().findIndex((a) => a.id === viewing()));
+  const viewingIndex = () => Math.max(0, imageAttachments().findIndex((a) => a.id === viewing()));
   // A file drag over the window: null when none, else the offered files (empty until the shell reports them).
   const dropping = signal<string[] | null>(null);
   function unattach(id: string) {
@@ -5397,17 +5436,21 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                       <Each of={attachments()} key={(a) => a.id}>
                         {(a) => (
                           <View testID="attachment" style={{ width: 64, height: 64 }}>
-                            <View
-                              role="button"
-                              accessibilityLabel={L(`View ${a().name}`, `查看 ${a().name}`)}
-                              onPress={() => viewing.set(a().id)}
-                              style={{ width: 64, height: 64, cursor: "pointer" }}
-                            >
-                              <Image
-                                src={a().preview}
-                                style={{ width: 64, height: 64, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }}
-                              />
-                            </View>
+                            <If when={a().type === "text/markdown"} else={
+                              <View
+                                role="button"
+                                accessibilityLabel={L(`View ${a().name}`, `查看 ${a().name}`)}
+                                onPress={() => viewing.set(a().id)}
+                                style={{ width: 64, height: 64, cursor: "pointer" }}
+                              >
+                                <Image
+                                  src={a().preview}
+                                  style={{ width: 64, height: 64, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }}
+                                />
+                              </View>
+                            }>
+                              <PastedDoc name={a().name} size={64} />
+                            </If>
                             <View
                               testID="remove-attachment"
                               role="button"
@@ -5434,7 +5477,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                       backdropClass="bg-scrim"
                       style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
                     >
-                      <ImagePager urls={attachments().map((a) => a.preview)} start={viewingIndex} onClose={() => viewing.set(null)} />
+                      <ImagePager urls={imageAttachments().map((a) => a.preview)} start={viewingIndex} onClose={() => viewing.set(null)} />
                     </Dialog>
                   </>
                 </If>
@@ -5453,10 +5496,12 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     if (untracked(speech) !== "off" && value !== dictated) stopDictation(true);
                   }}
                   onSelectionChange={({ start, end }) => (caret = { start, end })}
-                  onPaste={({ files, uris }) => {
-                    for (const f of files) attach(f, f.name);
-                    if (uris.length) void attachUris(uris);
-                  }}
+                  pasteBehavior="report"
+                  onPaste={(e) => paste(e, draft(), caret, (v, at) => {
+                    draft.set(v);
+                    caret = { start: at, end: at };
+                    composer?.setSelection(at);
+                  })}
                   onFocus={() => {
                     if (compactComposer() && !reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut", "opacity"));
                     focused.set(true);

@@ -401,7 +401,7 @@ export function withAttachments(text: string, files: string[], missing = 0): str
   if (!files.length && !missing) return text;
   const lines = files.map((f) => `- ${f}`);
   if (missing) lines.push(`- (${missing} more image(s) could not be downloaded)`);
-  return `${text.trim() || "(see the attached images)"}\n\nAttached images from the owner (absolute paths on the primary host; open them to see):\n${lines.join("\n")}`;
+  return `${text.trim() || "(see the attached images)"}\n\nAttached images from the owner (absolute paths on the primary host; open them to see; a .md is a long text the owner pasted):\n${lines.join("\n")}`;
 }
 
 export async function handleOwnerMessage(

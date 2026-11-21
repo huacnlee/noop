@@ -764,3 +764,9 @@ test("readAll names the files that no longer fit instead of dropping them silent
     expect(out.length).toBeLessThan(400 + first.length + 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a long paste uploads as Markdown; other text types stay refused", async () => {
+  const { uploadProblem } = await import("../cloud/src/uploads");
+  expect(uploadProblem("text/markdown", 10)).toBeNull();
+  expect(uploadProblem("text/html", 10)?.status).toBe(415);
+});
