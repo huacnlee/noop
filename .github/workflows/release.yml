@@ -12,11 +12,13 @@ on:
       - scripts/test-prepare-client-release.py
       - scripts/prepare-client-release.py
       - scripts/check-ios-sdk.sh
+      - scripts/check-macos-websocket.py
       - scripts/check-linux-runtime.sh
       - scripts/fixtures/linux-runtime/**
       - scripts/setup-linux-deps.sh
       - install-client.sh
       - install-client.ps1
+      - app/nsh.json
       - app/build-web.sh
   workflow_dispatch:
 
@@ -122,6 +124,7 @@ jobs:
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
           lipo "$app/Contents/MacOS/$executable" -verify_arch arm64
           codesign --verify --deep --strict "$app"
+          python3 scripts/check-macos-websocket.py "$app"
 
       - name: Try the installer on this package
         if: matrix.installer != ''
