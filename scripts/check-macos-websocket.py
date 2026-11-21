@@ -26,11 +26,12 @@ mount(() => <Text>WebSocket check</Text>);
 const ws = new WebSocket("wss://127.0.0.1:{port}/");
 ws.onclose = () => console.log("NOOP_TLS_CLOSE_OK");
 """)
-        subprocess.run(["nsh", "build", str(entry), "-o", str(resources)], check=True)
-        (resources / "app.json").write_text(json.dumps({
-            "id": "dev.noop.websocket-check", "dataDir": str(work / "data"),
+        (work / "nsh.json").write_text(json.dumps({
+            "name": "WebSocket check",
+            "id": "dev.noop.websocket-check",
+            "capabilities": {"network": {"hosts": ["127.0.0.1"]}},
         }))
-        (resources / "capabilities.json").write_text('{"network":{"hosts":["127.0.0.1"]}}')
+        subprocess.run(["nsh", "build", str(entry), "-o", str(resources)], cwd=work, check=True)
         log = work / "runner.log"
         with log.open("wb") as output:
             runner = subprocess.Popen([executable],
