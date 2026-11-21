@@ -29,7 +29,7 @@ import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel,
 import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
-import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
+import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
 import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
@@ -113,7 +113,10 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
     }
     // scheduler "each": every machine runs its own copy, pinned to it (e.g. the weekly security check of this computer)
     const pin = owner === "each" ? host : undefined;
-    const queued = routineQueued(r.name, pin); // a copy queued or running → this run is redundant
+    let queued = routineQueued(r.name, pin); // a copy queued or running → this run is redundant
+    // a copy whose own requirements no host meets would hold every later run back forever, config edits included
+    const gone = queued && retireUnrunnableCopy(queued, (reqs) => unrunnableReason(reqs, [hostCaps(cfg), ...knownHostCaps()]));
+    if (gone) { journal(host, `⏰ routine \`${r.name}\`: retired ${queued}, no known host has ${gone}`); queued = ""; }
     if (queued) {
       state[r.name] = new Date().toISOString();
       journal(host, `⏰ routine \`${r.name}\` skipped: ${queued} still queued/running`);

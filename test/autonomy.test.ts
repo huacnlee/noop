@@ -210,6 +210,18 @@ test("routine dedupe: a checkpointed copy that will resume still blocks the next
   expect(A.routineQueued("own-prs-ci")).toBe("");
 });
 
+test("a queued copy no known host can run is retired, so the routine runs on its current config", () => {
+  // own-prs-ci T-0406 asked for cli:git (no host reports it) and held the routine from 2026-11-10 on
+  const missing = (reqs: string[]) => reqs.find((r) => !["os:macos", "cli:gh"].includes(r)) ?? "";
+  writeDoc(P("tasks", "inbox", "T-0121.md"), { id: "T-0121", source: "routine:own-prs-ci", requires: "cli:gh,cli:git", host: "any" }, "body");
+  expect(A.retireUnrunnableCopy("T-0121", missing)).toBe("cli:git");
+  expect(files("tasks", "inbox")).toEqual([]);
+  expect(readDoc(P("tasks", "rejected", "T-0121.md")).meta.approval).toBe("superseded:unrunnable");
+  writeDoc(P("tasks", "inbox", "T-0122.md"), { id: "T-0122", source: "routine:own-prs-ci", requires: "cli:gh" }, "body");
+  expect(A.retireUnrunnableCopy("T-0122", missing)).toBe(""); // a runnable copy stays queued
+  expect(A.routineQueued("own-prs-ci")).toBe("T-0122");
+});
+
 test("a copy parked on an unanswered decision is found only while that decision is open", () => {
   writeDoc(P("decisions", "open", "D-0004.md"), { id: "D-0004", question: "告警源？" }, "x");
   writeDoc(P("tasks", "waiting", "T-0201.md"), {

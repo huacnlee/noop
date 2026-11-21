@@ -117,6 +117,22 @@ export function supersedeProposed(name: string, newId: string, host?: string): s
   return out;
 }
 
+/** A copy waiting in the inbox for a capability no known host has never starts, and while it waits every later run is
+ *  skipped as "still queued", so editing the routine's `requires` never takes effect (own-prs-ci T-0406 asked for
+ *  cli:git, which no host reports, and held the routine from 2026-11-10 on). Retires such a copy to tasks/rejected
+ *  and returns the missing capability, else "". `missing` returns the first requirement no known host meets. */
+export function retireUnrunnableCopy(id: string, missing: (reqs: string[]) => string): string {
+  const f = P("tasks", "inbox", `${id}.md`);
+  if (!existsSync(f)) return "";
+  const { meta, body } = readDoc(f);
+  const pin = meta.host && meta.host !== "any" ? `host:${meta.host}` : "";
+  const why = missing([...(meta.requires ?? "").split(","), pin].map((s) => s.trim()).filter(Boolean));
+  if (!why) return "";
+  writeDoc(P("tasks", "rejected", `${id}.md`), { ...meta, approval: "superseded:unrunnable" }, body + `\n\n## Note\nno known host has ${why}\n`);
+  unlinkSync(f);
+  return why;
+}
+
 /** Judge may only auto-decide outside onboarding. */
 export const judgeMayDecide = (cfg: Cfg, agent?: string) => level(cfg, agent) !== "onboarding";
 
