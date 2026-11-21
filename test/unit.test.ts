@@ -57,6 +57,8 @@ test("external signature links the Noop name to its site", () => {
 test("result parsing", () => {
   expect(parseResult('blah\n```json\n{"status":"done","summary":"ok"}\n```').status).toBe("done");
   expect(parseResult("no block").status).toBe("failed");
+  expect(parseResult('```json\n{"status":"done","followups":[{"title":"A"},{"title":"B"}]}\n```').summary).toBe("Dispatched 2: A; B");
+  expect(parseResult('```json\n{"status":"done"}\n```').summary).toBe("(done, no summary)");
   // codex sometimes ends its reply with a bare JSON object instead of a fenced ```json block
   expect(parseResult('{"status":"done","summary":"ok"}').status).toBe("done");
 });

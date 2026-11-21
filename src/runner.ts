@@ -375,7 +375,13 @@ export function parseResult(out: string): Result {
 function parsed(text: string): Result | null {
   try {
     const r = JSON.parse(text);
-    return r?.status ? r : null;
+    if (!r?.status) return null;
+    // a model may omit the summary (e.g. a menu run that only dispatches followups); never show "undefined" to the owner
+    if (typeof r.summary !== "string" || !r.summary.trim()) {
+      const titles = Array.isArray(r.followups) ? r.followups.map((f: { title?: string }) => f?.title).filter(Boolean) : [];
+      r.summary = titles.length ? `Dispatched ${titles.length}: ${titles.join("; ")}` : `(${r.status}, no summary)`;
+    }
+    return r;
   } catch { return null; }
 }
 
