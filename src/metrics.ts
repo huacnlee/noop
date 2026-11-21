@@ -20,16 +20,24 @@ export function codeState(root = CODE) {
 
 export function computeMetrics(days = 7) {
   const since = Date.now() - days * 86400e3;
+  const closedCards = list(P("decisions", "closed")).map((p) => readDoc(p).meta);
+  const menuReplacements = new Map(closedCards
+    .filter((card) => card.kind === "menu" && card.answered_by === "system" && card.superseded_by)
+    .map((card) => [card.id, card.superseded_by]));
   const per: Record<string, { done: number; failed: number; blocked: number; minutes: number[] }> = {};
   for (const folder of ["done", "failed", "blocked"] as const)
     for (const p of list(P("tasks", folder), /^T-.*\.md$/)) {
-      const m = readDoc(p).meta;
+      const { meta: m, body } = readDoc(p);
       if (Date.parse(m.finished ?? m.created) < since) continue;
+      // Older refreshes filed the parked menu in done/ and stamped its finish time when the replacement arrived.
+      // Check the final note too: a later run can finish real work on a task with the old decision in its history.
+      const replacement = menuReplacements.get(m.decision);
+      if (folder === "done" && replacement && body.trimEnd().endsWith(`: menu ${m.decision} superseded by ${replacement}; closed without running.`)) continue;
       const a = (per[m.agent || "generalist"] ??= { done: 0, failed: 0, blocked: 0, minutes: [] });
       a[folder]++;
       if (m.started && m.finished) a.minutes.push((Date.parse(m.finished) - Date.parse(m.started)) / 60e3);
     }
-  const decisions = list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => Date.parse(m.answered ?? "") > since);
+  const decisions = closedCards.filter((m) => Date.parse(m.answered ?? "") > since);
   // Cards still waiting on the owner are this fleet's main failure mode, and counting only decisions/closed made them
   // invisible: 14 open cards and 0 answers reported as decisions.total = 0, i.e. as nothing at all.
   const openCards = list(P("decisions", "open"), /^D-.*\.md$/).map((p) => readDoc(p).meta);
@@ -47,7 +55,7 @@ export function computeMetrics(days = 7) {
     const judged = v.done + v.failed;
     return [k, { runs: n, success: judged ? +(v.done / judged).toFixed(2) : null, failed: v.failed, blocked: v.blocked, median_minutes: Math.round(med) }];
   }));
-  const approvals = list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => m.kind === "proposals");
+  const approvals = closedCards.filter((m) => m.kind === "proposals");
   const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/).length;
   const out = {
     shadow_judge: judgeAccuracy(),

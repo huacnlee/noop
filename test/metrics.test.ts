@@ -38,6 +38,29 @@ test("an agent that only ever asked for a decision has no success rate to judge"
   expect(m.agents["chief-of-staff"].success).toBeNull();
 });
 
+test("archived menus closed by a refresh have the same execution metrics as menus parked in rejected", () => {
+  const agent = "chief-of-staff";
+  const decision = "D-M0001";
+  const replacement = "D-M0002";
+  const footer = `> ${at(2)}: menu ${decision} superseded by ${replacement}; closed without running.`;
+  const menu = { id: "T-M0001", agent, kind: "menu", decision, status: "done", started: at(600), finished: at(2) };
+  const path = P("tasks", "done", "T-M0001.md");
+  writeDoc(P("decisions", "closed", `${decision}.md`), {
+    id: decision, task: menu.id, kind: "menu", answered_by: "system", answered: at(2), superseded_by: replacement,
+  }, "refreshed");
+  task("blocked", "T-M0002", agent, { started: at(5), finished: at(2) });
+  task("rejected", "T-M0003", agent, { approval: "superseded:T-M0002" });
+  writeDoc(path, menu, `old menu\n\n${footer}\n`);
+
+  const metrics = M.computeMetrics(7);
+  expect(metrics.agents[agent]).toEqual({ runs: 1, success: null, failed: 0, blocked: 1, median_minutes: 3 });
+  expect(metrics.decisions.total).toBe(1);
+
+  // A later completed run takes precedence over an old closure in the task's history.
+  writeDoc(path, menu, `old menu\n\n${footer}\n\n## Run\n**done** — completed follow-up`);
+  expect(M.computeMetrics(7).agents[agent].success).toBe(1);
+});
+
 // The blind spot that let 14 cards sit unanswered: this file counted only decisions/closed, so an owner who never
 // answers reported as decisions.total = 0 — indistinguishable from a fleet that never had to ask anything.
 test("cards still open are counted, with the age of the oldest one", () => {
