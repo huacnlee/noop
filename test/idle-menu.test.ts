@@ -87,3 +87,43 @@ test("launching an idle run remembers its task id for the next check", () => {
   maybeProposeNext(cfg, "test", st);
   expect(st.last_idle_task).toBe(readDoc(tasks()[0]).meta.id);
 });
+
+test("each further idle run in a row that raised no menu doubles the wait, capped at a day", () => {
+  const clock = spyOn(Date, "now").mockReturnValue(now);
+  try {
+    // Two empty runs already happened before T-0100 (also empty): the next one waits 4 x 180 minutes.
+    const st = { idle_since: ago(2000), last_idle_task: "T-0100", idle_empty: "2" };
+    maybeProposeNext(cfg, "test", { ...st, last_menu: ago(719) });
+    expect(tasks()).toEqual([]);
+    const next: Record<string, string> = { ...st, last_menu: ago(721) };
+    maybeProposeNext(cfg, "test", next);
+    expect(tasks()).toHaveLength(1);
+    expect(next.idle_empty).toBe("3");
+    rmSync(P("tasks/inbox"), { recursive: true, force: true });
+    mkdirSync(P("tasks/inbox"), { recursive: true });
+    // A long streak never waits more than a day.
+    maybeProposeNext(cfg, "test", { ...st, idle_empty: "9", last_menu: ago(24 * 60 + 1) });
+    expect(tasks()).toHaveLength(1);
+  } finally { clock.mockRestore(); }
+});
+
+test("a menu run that raised a card resets the empty-run streak", () => {
+  const clock = spyOn(Date, "now").mockReturnValue(now);
+  try {
+    writeDoc(P("decisions/closed", "D-0001.md"), { id: "D-0001", kind: "menu", task: "T-0100", created: ago(40) }, "answered");
+    const st: Record<string, string> = { idle_since: ago(60), last_menu: ago(30), last_idle_task: "T-0100", idle_empty: "3" };
+    maybeProposeNext(cfg, "test", st);
+    expect(tasks()).toHaveLength(1);
+    expect(st.idle_empty).toBe("0");
+  } finally { clock.mockRestore(); }
+});
+
+test("work the owner asked for resets the streak; routine work does not", () => {
+  writeDoc(P("tasks/active/T-0001.md"), { id: "T-0001", source: "routine:daily-report" }, "work");
+  const st: Record<string, string> = { ...state(), idle_empty: "3" };
+  maybeProposeNext(cfg, "test", st);
+  expect(st.idle_empty).toBe("3");
+  writeDoc(P("tasks/inbox/T-0002.md"), { id: "T-0002", source: "followup:T-0001", origin: "owner" }, "picked from a menu");
+  maybeProposeNext(cfg, "test", st);
+  expect(st.idle_empty).toBeUndefined();
+});
