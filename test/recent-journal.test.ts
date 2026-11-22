@@ -1,6 +1,13 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { beforeEach, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { P, recentJournal } from "../src/core";
+
+// The data dir is shared across test files, and others journal under today's date,
+// which sorts after the fixed dates below and would push them out of the last two days.
+beforeEach(() => {
+  rmSync(P("journal"), { recursive: true, force: true });
+  mkdirSync(P("journal"), { recursive: true });
+});
 
 test("the prompt's recent journal is the latest days, even when agents left other notes in journal/", () => {
   mkdirSync(P("journal"), { recursive: true });
