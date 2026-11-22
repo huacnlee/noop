@@ -54,6 +54,14 @@ test("external signature links the Noop name to its site", () => {
   );
 });
 
+test("external signature never mentions the template's placeholder login", () => {
+  const tail = (github?: string) => signature("lead", "host", { owner: { github } } as Cfg).split(" · ")[1];
+  expect(tail("your-github")).toBe("AI agent acting for its owner");
+  expect(tail(undefined)).toBe("AI agent acting for its owner");
+  expect(tail("")).toBe("AI agent acting for its owner");
+  expect(tail("@huacnlee")).toBe("AI agent acting for @huacnlee");
+});
+
 test("result parsing", () => {
   expect(parseResult('blah\n```json\n{"status":"done","summary":"ok"}\n```').status).toBe("done");
   expect(parseResult("no block").status).toBe("failed");

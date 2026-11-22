@@ -483,8 +483,14 @@ export function precedents(n = 30): string {
     .map((meta) => `- ${meta.id} [${meta.agent}] Q: ${meta.question}\n  → **${meta.answer}** (by ${meta.answered_by})`).join("\n");
 }
 
+/** The GitHub login `templates/config.toml` ships with. It is a real account, so signing "@your-github" pings a stranger
+ *  on every comment an instance posts before its owner edits [owner] github. */
+const TEMPLATE_GITHUB = "your-github";
+
 export function signature(agent: string, host: string, cfg: Cfg) {
-  return `🤖 [Noop](https://huacnlee.github.io/noop) (${agent}) · AI agent acting for @${cfg.owner?.github ?? "owner"}`;
+  const gh = (cfg.owner?.github ?? "").trim().replace(/^@/, "");
+  const who = gh && gh !== TEMPLATE_GITHUB ? `@${gh}` : "its owner"; // no login → no mention at all
+  return `🤖 [Noop](https://huacnlee.github.io/noop) (${agent}) · AI agent acting for ${who}`;
 }
 
 export function agentName(agent: string): string {
