@@ -16,7 +16,8 @@ export type Result = {
   wait_minutes?: number;
   waiting_on?: string;
   wait_check?: string;
-  wait_kind?: "human" | "ci";
+  wait_kind?: "human" | "ci" | "event";
+  wait_until?: string;
   summary: string;
   question?: string;
   options?: string[];
@@ -60,7 +61,8 @@ const RESULT_SPEC = () => `Finish the work, then end your final reply with EXACT
 {
   "status": "done" | "needs_decision" | "failed" | "delegated" | "waiting",   // delegated = you split the work into followups and want to be woken up to consolidate when they finish; waiting = see below
   "waiting_on": "waiting only: what you wait for and how to check it, e.g. CI run https://github.com/o/r/actions/runs/123 (gh run view 123)",
-  "wait_kind": "waiting only: human when it waits on a person (the owner merging, publishing, answering) — then it wakes only on an event, never on a timer; ci for machines (CI, deploys)",
+  "wait_kind": "waiting only: human when it waits on a person (the owner merging, publishing, answering) — then it wakes only on an event, never on a timer; ci for machines (CI, deploys); event for days-long external events (a stable release, someone else merging) — wakes when wait_check changes, else once a day or at wait_until",
+  "wait_until": "event only, optional: ISO date the event is expected (e.g. the next release day); the latest fallback wake-up",
   "wait_minutes": 15,   // waiting only: latest time to wake you to check again (5-120)
   "wait_check": "waiting only: a quick read-only shell command whose exit code changes when the wait is over, e.g. gh pr checks 123 -R o/r (exits 8 while pending); the daemon runs it every few minutes and wakes you as soon as it changes",
   "summary": "1-3 sentences: what you did / found (links to PRs, commits, files). For needs_decision this is all the owner reads before choosing: say what the PR / change does and what is at stake, the facts they need to choose (not why it needs them, they know)",
