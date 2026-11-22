@@ -38,6 +38,27 @@ test("an agent that only ever asked for a decision has no success rate to judge"
   expect(m.agents["chief-of-staff"].success).toBeNull();
 });
 
+test("a shorter task window preserves the roster's lifetime shadow scores", () => {
+  const older = at(10 * 24 * 60);
+  writeDoc(P("agents", "reviewer", "profile.md"), {}, "# Reviewer");
+  writeDoc(P("agents", "lead", "profile.md"), {}, "# Lead");
+  task("done", "T-0001", "reviewer", { created: older, started: older, finished: older });
+  task("done", "T-0002", "helper"); // historical task owner without an installed profile
+  writeDoc(P("decisions", "closed", "D-0001.md"), {
+    id: "D-0001", agent: "reviewer", answered: older, answered_by: "owner(chat)",
+    shadow_verdict: "decided", shadow_agree: "yes",
+  }, "reviewed");
+
+  const month = M.computeMetrics(30);
+  const week = M.computeMetrics(7);
+  expect(month.agents.reviewer.runs).toBe(1);
+  expect(week.agents.reviewer).toBeUndefined();
+  expect(week.shadow_judge_by_agent.reviewer).toEqual(month.shadow_judge_by_agent.reviewer);
+  expect(week.shadow_judge_by_agent.reviewer).toMatchObject({ scored: 1, accuracy: 1 });
+  expect(week.shadow_judge_by_agent.lead).toMatchObject({ scored: 0, accuracy: null });
+  expect(week.shadow_judge_by_agent.helper).toMatchObject({ scored: 0, accuracy: null });
+});
+
 test("archived menus closed by a refresh have the same execution metrics as menus parked in rejected", () => {
   const agent = "chief-of-staff";
   const decision = "D-M0001";

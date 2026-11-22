@@ -245,9 +245,8 @@ export function resolveProposals(id: string, answer: string, by: string): boolea
 }
 
 /** Shadow-judge accuracy: how often the judge's would-be answer matched the owner's. */
-export function judgeAccuracy(agent?: string) {
-  const rows = list(P("decisions", "closed")).map((p) => readDoc(p).meta)
-    .filter((m) => m.shadow_verdict && /^owner/.test(m.answered_by ?? "") && (!agent || m.agent === agent));
+export function judgeAccuracy(agent?: string, closedCards = list(P("decisions", "closed")).map((p) => readDoc(p).meta)) {
+  const rows = closedCards.filter((m) => m.shadow_verdict && /^owner/.test(m.answered_by ?? "") && (!agent || m.agent === agent));
   // every owner-answered decision the judge also answered counts (held ones too): shadow_agree is set by closeDecision
   const scored = rows.filter((m) => m.shadow_agree === "yes" || m.shadow_agree === "no");
   const agree = scored.filter((m) => m.shadow_agree === "yes");
