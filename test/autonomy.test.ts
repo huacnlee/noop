@@ -49,6 +49,10 @@ test("open batch with stale tasks is closed and rebuilt (no deadlock)", async ()
   // the task the owner never saw (T-0003) comes first: a rebuild must surface it, not bury it behind T-0002
   expect(readDoc(P("decisions", "open", "P-0002.md")).meta.items).toBe("T-0003,T-0002");
   expect(sent.length).toBe(2);
+  expect(core.precedents()).toBe("");
+  expect(A.resolveProposals("P-0002", "1", "owner(chat)")).toBe(true);
+  expect(core.precedents()).toContain("P-0002");
+  expect(core.precedents()).not.toContain("P-0001");
 });
 
 test("an unanswered batch stopped at nine never hides proposals that arrived later", async () => {

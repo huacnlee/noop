@@ -478,8 +478,9 @@ export const recentJournal = (days = 2) =>
 export function precedents(n = 30): string {
   // the latest answers, not the last file names: by name every P-… batch and D-C… card sorts after every D-0… card
   const at = (m: Record<string, string>) => m.answered ?? m.created ?? "";
-  // a menu the system closed because a refreshed one replaced it was never answered: not a precedent
-  return list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => !m.superseded_by).sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)).slice(-n)
+  return list(P("decisions", "closed")).map((p) => readDoc(p).meta)
+    .filter((m) => !m.superseded_by && m.answered_by !== "system")
+    .sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)).slice(-n)
     .map((meta) => `- ${meta.id} [${meta.agent}] Q: ${meta.question}\n  → **${meta.answer}** (by ${meta.answered_by})`).join("\n");
 }
 
