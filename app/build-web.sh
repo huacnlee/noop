@@ -5,7 +5,7 @@
 # whole app), a stable icon URL for notifications, and the manifest's colors (the gallery's page).
 set -e
 cd "$(dirname "$0")"
-NSH="${NSH:-$HOME/work/nsh/target/debug/nsh}"
+NSH="${NSH:-nsh}"
 # The package directory is named after the display name (Noop), but the Worker serves dist/web/noop.
 OUT="dist/web/noop"
 TMP="dist/.web-build"

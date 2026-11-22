@@ -94,7 +94,7 @@ jobs:
             fi
           fi
           if [ "$TARGET" = web ]; then
-            (cd app && NSH=nsh ./build-web.sh "${args[@]}")
+            (cd app && ./build-web.sh "${args[@]}")
             tar -czf "assets/$ASSET" -C app/dist/web/noop .
             ls -l assets
             exit 0
