@@ -2,7 +2,8 @@ import { describe, expect, open, test } from "nsh/test";
 import { URL as ParsedURL } from "url";
 
 const URL = "http://hub.test:8787";
-const STORAGE = { "hub.url": URL, "hub.token": "tok" };
+// most tests start with the Channels section open; the fold tests clear "hub.channelsOpen"
+const STORAGE = { "hub.url": URL, "hub.token": "tok", "hub.channelsOpen": "1" };
 const ts = (min: number) => new Date(Date.now() - (60 - min) * 60000).toISOString();
 
 const events = [
@@ -799,13 +800,17 @@ describe("channel", () => {
       { slug: "old-ops", name: "Old ops", goal: "retired", status: "archived", created: ts(-30000), last_activity: ts(-30000), stale: true, count: 0, items: [] },
     ];
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "noop.channels.since": ts(-10000) }, width: 1200, height: 800, platform: "macos",
+      storage: { "hub.url": URL, "hub.token": "tok", "noop.channels.since": ts(-10000) }, width: 1200, height: 800, platform: "macos",
       network: {
         ...hub([]),
         [`GET ${URL}/api/channels`]: { body: { channels: chans } },
         [`POST ${URL}/api/channels`]: (r: { body?: string | null }) => { posts.push(JSON.parse(r.body!)); return { body: { ok: true } }; },
       },
     });
+    // Channels start folded: only the open channel and ones with unread show until the heading opens the section
+    await app.waitFor("id:side-channels");
+    expect(app.shows("id:side-channel-omasend")).toBe(false);
+    await app.press("id:side-channels");
     await app.waitFor("id:side-channel-omamail");
     await app.waitFor("Quiet 7d");
     // archived channels are folded under one row until it is opened
@@ -831,6 +836,23 @@ describe("channel", () => {
     await app.press("id:channel-archive");
     await app.waitFor("id:channel-archived");
     expect(posts).toEqual([{ slug: "omamail", name: "Omamail 邮件", goal: "omamail 的 PR 与 issue，以及发布" }, { slug: "omamail", archived: true }]);
+  });
+
+  test("channels: the open section lists the most recently active few and folds the rest under More", async () => {
+    const chans = Array.from({ length: 12 }, (_, i) => ({ slug: `c${i}`, name: `C${i}`, goal: `goal ${i}`, status: "active", created: ts(-900), last_activity: ts(-i * 10), stale: false, count: 0, refs: [], items: [] }));
+    const app = await open("./App.tsx", {
+      storage: { "hub.url": URL, "hub.token": "tok", "noop.channels.since": ts(100) }, width: 1200, height: 800, platform: "macos",
+      network: { ...hub([]), [`GET ${URL}/api/channels`]: { body: { channels: chans } } },
+    });
+    await app.waitFor("id:side-channels");
+    expect(app.shows("id:side-channel-c0")).toBe(false);
+    await app.press("id:side-channels");
+    await app.waitFor("id:side-channel-c7");
+    expect(app.shows("id:side-channel-c8")).toBe(false);
+    await app.press("id:side-channels-more");
+    await app.waitFor("id:side-channel-c11");
+    await app.press("id:side-channels-more");
+    await app.waitUntil(() => !app.shows("id:side-channel-c11"));
   });
 
   test("a channel is its own room: messages sent there carry the channel, and its talk stays out of the main chat", async () => {

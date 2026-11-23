@@ -204,7 +204,7 @@ const CODE_LEN = 8;
 
 type Config = { url: string; token: string };
 /** `token` holds the login session (sent as `Bearer`, and `?token=` on the WebSocket and media URLs). */
-const KEYS = { url: "hub.url", token: "hub.token", email: "hub.email", theme: "hub.theme", seen: "hub.lastSeen", notifyOff: "hub.notifyOff", draft: "hub.draft" };
+const KEYS = { url: "hub.url", token: "hub.token", email: "hub.email", theme: "hub.theme", seen: "hub.lastSeen", notifyOff: "hub.notifyOff", draft: "hub.draft", channelsOpen: "hub.channelsOpen" };
 /** iOS and Android draw the pages' headers (title, back, swipe back); the desktops and the web show the app's. */
 const systemHeader = platform.os === "ios" || platform.os === "android";
 const MONO = "monospace";
@@ -1589,6 +1589,9 @@ function createMessageReads(hub: Hub) {
 type MessageReads = ReturnType<typeof createMessageReads>;
 
 /** Channel snapshots refresh from pushed task/channel revisions, never on a timer. */
+/** How many channels the open Channels section lists before the rest fold under "More" (owner, T-10851: 5-10). */
+const CHANNELS_SHOWN = 8;
+
 function createChannels(hub: Hub, reads: MessageReads) {
   const list = signal<Channel[]>([]);
   let generation = 0;
@@ -2254,7 +2257,20 @@ function Sidebar(props: {
   const queuedOpen = signal(true);
   const recentOpen = signal(false);
   // Channels fold like Slack sections: folded, only the open channel and ones with unread stay (owner, T-9158).
-  const channelsOpen = signal(true);
+  // Folded by default; opened, the most recently active few show and the quiet rest sit under "More" (owner, T-10851).
+  // the fold is remembered: once opened (or folded again) it stays that way across launches
+  const channelsOpen = signal(false);
+  void Storage.getItem(KEYS.channelsOpen).then((v) => { if (v === "1") channelsOpen.set(true); });
+  effect(() => { const open = channelsOpen(); if (open) Storage.setItem(KEYS.channelsOpen, "1"); else Storage.removeItem(KEYS.channelsOpen); });
+  const showMoreChannels = signal(false);
+  const activeChannels = () => props.channels.list().filter((c) => c.status !== "archived" || c.slug === props.channel());
+  const visibleChannels = () => {
+    const all = activeChannels();
+    if (!channelsOpen()) return all.filter((c) => c.slug === props.channel() || props.channels.unread(c) > 0);
+    if (showMoreChannels() || all.length <= CHANNELS_SHOWN + 1) return all;
+    return all.filter((c, i) => i < CHANNELS_SHOWN || c.slug === props.channel() || props.channels.unread(c) > 0);
+  };
+  const hiddenChannels = () => (channelsOpen() ? activeChannels().length - visibleChannels().length : 0);
   const waits = computed(() => { const done = answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
   // the sidebar's right-click menu: end a task that can't go on without opening it
   const endTask = async (id: string, done: boolean) => {
@@ -2370,7 +2386,7 @@ function Sidebar(props: {
 
           <If when={props.channels.list().length}>
             <SideHeading testID="side-channels" open={channelsOpen} title={L("Channels", "Channels")} count={props.channels.list().reduce((n, c) => n + props.channels.unread(c), 0) || undefined} accent />
-            <Each of={props.channels.list().filter((c) => (c.status !== "archived" || c.slug === props.channel()) && (channelsOpen() || c.slug === props.channel() || props.channels.unread(c) > 0))} key={(c) => c.slug}>
+            <Each of={visibleChannels()} key={(c) => c.slug}>
               {(c) => (
                 <SidebarRow onPress={() => props.onChannel(c().slug)} selected={props.channel() === c().slug} title={c().goal || c().name}>
                   <Text style={{ width: 17, textAlign: "right", fontSize: 15, color: colors.faint }}>#</Text>
@@ -2385,6 +2401,15 @@ function Sidebar(props: {
                 </SidebarRow>
               )}
             </Each>
+            <If when={channelsOpen() && (showMoreChannels() || hiddenChannels() > 0)}>
+              <SidebarRow onPress={() => showMoreChannels.set(!showMoreChannels())} title={L("More channels", "更多 Channel")}>
+                <View style={{ width: 17, alignItems: "flex-end" }}><Icon name={showMoreChannels() ? "chevron-down" : "chevron"} size={12} tint={colors.faint} /></View>
+                <Text testID="side-channels-more" style={{ ...rowText(), color: colors.faint }}>{showMoreChannels() ? L("Show less", "收起") : L("More", "更多")}</Text>
+                <If when={!showMoreChannels()}>
+                  <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{String(hiddenChannels())}</Text>
+                </If>
+              </SidebarRow>
+            </If>
             <If when={channelsOpen() && archivedChannels().length}>
               <SidebarRow onPress={() => showArchived.set(!showArchived())} title={L("Archived channels", "已归档的 Channel")}>
                 <View style={{ width: 17, alignItems: "flex-end" }}><Icon name={showArchived() ? "chevron-down" : "chevron"} size={12} tint={colors.faint} /></View>
