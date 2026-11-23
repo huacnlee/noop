@@ -1364,6 +1364,8 @@ describe("keyboard", () => {
     await app.waitFor("id:composer");
     await app.type("id:composer", "看一下日志");
     await app.submit("id:composer");
+    await app.waitFor("id:composer-sweep"); // a faint light sweeps the composer once
+    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 });
     await app.waitUntil(() => posts.length === 1, { timeout: 8000 }); // sent after the 5 s undo window
     expect(posts[0]).toMatchObject({ text: "看一下日志" });
     expect(app.value("id:composer")).toBe("");

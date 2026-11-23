@@ -4675,6 +4675,15 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
   /** What the floating composer covers at the bottom of the timeline. */
   const composerHeight = signal(0);
+  const composerWidth = signal(0);
+  /** A faint blue light sweeps once across the composer when voice input starts and when a message is sent. */
+  const sweeps = signal<number[]>([]);
+  const sweep = () => {
+    if (untracked(reduceMotion)) return;
+    const id = Date.now() + Math.random();
+    sweeps.set([...untracked(sweeps), id]);
+    setTimeout(() => sweeps.set(untracked(sweeps).filter((x) => x !== id)), 1000);
+  };
   // Keep every explicit timeline jump short, including off-screen decision cards.
   // Stage the target one viewport away, let recycled rows lay out, then use the
   // platform's smooth scroll for the final screen instead of traversing the history.
@@ -4840,6 +4849,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     viewing.set(null);
     attachNote.set(null);
     inputHeight.set(28);
+    sweep();
     send(v, r, undefined, files);
   }
 
@@ -4920,6 +4930,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     dictated = v;
     attachNote.set(null);
     speech.set("on");
+    sweep();
     if (native) {
       try {
         const s = Speech.start({ lang: speechLang() });
@@ -5370,7 +5381,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
 
           {/* The composer floats over the timeline, which scrolls on under its glass. */}
           <View
-            onLayout={({ bounds }) => composerHeight.set(bounds.size.height)}
+            onLayout={({ bounds }) => { composerHeight.set(bounds.size.height); composerWidth.set(bounds.size.width); }}
             style={{ position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: wide() ? 32 : 10, paddingTop: 4, paddingBottom: keyboardFrame().height > 0 ? 8 : Math.max(12, safeArea().bottom + 8), pointerEvents: "box-none" }}
           >
             <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 8, pointerEvents: "box-none" }}>
@@ -5435,6 +5446,21 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                   ...(dropping() && onChannel() ? { borderColor: colors.accent, borderStyle: "dashed" as const } : {}),
                 }}
               >
+                <Each of={sweeps()}>
+                  {() => {
+                    const band = Math.max(160, composerWidth() * 0.45);
+                    const m = createMotion({ enter: { keyframes: { translateX: [-band, composerWidth() + band], opacity: [0, 1, 1, 0] }, duration: 900, easing: "easeInOut" } });
+                    return (
+                      <View
+                        testID="composer-sweep"
+                        style={[m.style, {
+                          position: "absolute", top: 0, bottom: 0, left: 0, width: band, pointerEvents: "none",
+                          backgroundImage: `linear-gradient(100deg, ${alpha(colors.info, 0)}, ${alpha(colors.info, 0.10)} 45%, ${alpha(colors.info, 0.16)} 50%, ${alpha(colors.info, 0.10)} 55%, ${alpha(colors.info, 0)})`,
+                        }]}
+                      />
+                    );
+                  }}
+                </Each>
                 <If when={replyTo()}>
                   {(ref) => (
                     <View testID="reply-chip" style={{ flexDirection: "row", alignItems: "center", gap: 8, alignSelf: "flex-start", maxWidth: "100%", height: 30, paddingLeft: 10, paddingRight: 4, borderRadius: 8, backgroundColor: tints.accent }}>
