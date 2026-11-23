@@ -17,8 +17,11 @@ const task = (m: Record<string, string>, folder: "waiting" | "blocked" = "waitin
 // Every test file shares one throwaway hub (see test/preload.ts), and reroute/resume move tasks into
 // tasks/inbox with their host requirement stripped. A leftover there is a pickable task, so a later
 // file's pickTask() test would pick it up instead of its own fixture. Remove what this file created.
+// The cards supervise() opens go too: their summary names merge gates (合并), so a later file's search over
+// decisions would find them.
 afterAll(() => {
-  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202"]) rmSync(P("tasks", "inbox", `${id}.md`), { force: true });
+  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202"]) for (const f of ["inbox", "waiting"]) rmSync(P("tasks", f, `${id}.md`), { force: true });
+  for (const f of ["open", "closed"]) for (const p of list(P("decisions", f))) if (readDoc(p).meta.supervisor_cause) rmSync(p, { force: true });
 });
 
 test("young, normally cycling waits are left alone", () => {
