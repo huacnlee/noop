@@ -23,6 +23,7 @@ import { checkUnrunnable, supervise } from "./supervisor";
 import { collect, LEARN_PROMPT } from "./sessions";
 import { medic } from "./medic";
 import { githubStarved } from "./github";
+import { sharedSecrets } from "./secrets";
 import { doctor, visual } from "./visual";
 import { ackInbound, answerFromChat, appendEvent, cancelTask, feed, handleOwnerMessage, mediaDays, pendingInbound, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
 import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, FallbackModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
@@ -172,6 +173,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   const { meta, body } = readDoc(path);
   const wanted = allowedClis(meta, cfg);
   const installed = (c: string) => !!Bun.which(c);
+  await sharedSecrets(cfg); // shared Claude keys decide which accounts exist
   const first = pickAccount(cfg, wanted.filter(installed)) ?? failoverAccount(cfg, null, wanted, installed);
   const agent = meta.agent || "lead";
   if (!first) { // no usable account right now → put it back, don't fail it

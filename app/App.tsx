@@ -3352,6 +3352,9 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
         <Group title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
           <McpRows settings={props.settings} />
         </Group>
+        <Group title="Claude" hint={CLAUDE_HINT()}>
+          <ClaudeKeyRows settings={props.settings} />
+        </Group>
         <Group title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
           <SecretRows settings={props.settings} />
         </Group>
@@ -3605,6 +3608,39 @@ const MCP_HINT = () => L(
   "Tools every agent on every machine can use. A remote server that uses OAuth: Sign in once here. Never paste a key into a server: add it under Keys below and write ${NAME} where it goes.",
   "所有机器上的每个成员都能用的工具。用 OAuth 的远程服务，在这里登录一次即可。不要把密钥直接填进服务：在下方「密钥」里添加，再在需要的位置写 ${NAME}。",
 );
+/** Shared keys the task runner reads itself (src/accounts.ts), shown as their own section rather than as MCP keys. */
+const CLAUDE_KEYS = [
+  { name: "CLAUDE_CODE_OAUTH_TOKEN", label: () => L("Claude login", "Claude 登录"), hint: () => L("Token from `claude setup-token` (valid one year)", "`claude setup-token` 输出的令牌（一年有效）") },
+  { name: "ANTHROPIC_API_KEY", label: () => "API Key", hint: () => L("Used when the subscription runs out", "订阅额度用尽时使用") },
+  { name: "ANTHROPIC_BASE_URL", label: () => "Base URL", hint: () => L("Optional, for a gateway or proxy", "可选，用于网关或代理") },
+];
+const CLAUDE_HINT = () => L(
+  "Log in once for every machine: run `claude setup-token` on any computer and paste the token here. Machines use the subscription first, switch to the API Key when its quota runs out, and switch back once it resets. Anything left empty falls back to each machine's own login and ~/.claude/settings.json.",
+  "登录一次，所有机器共用：在任意一台电脑上运行 `claude setup-token`，把得到的令牌粘贴到这里。各机器优先使用订阅账号，额度用尽时自动改用 API Key，额度恢复后切回。未填写的项沿用各机器自己的登录和 ~/.claude/settings.json。",
+);
+
+/** The Claude credentials: fixed rows that open the shared-key editor on their own name. */
+function ClaudeKeyRows(props: { settings: Settings }) {
+  const st = props.settings;
+  const d = st.secretDraft;
+  void st.loadSecrets();
+  const set = (name: string) => (st.secrets() ?? []).find((k) => k.name === name);
+  const open = (name: string) => { d.name.set(name); d.value.set(""); d.note.set(""); d.editing.set(name); };
+  return (
+    <Each of={CLAUDE_KEYS} key={(k) => k.name}>
+      {(k, i) => (
+        <SettingsItem first={i() === 0} testID={`claude-key-${k().name}`} style={{ flexDirection: "row", alignItems: "center" }}>
+          <View role="button" accessibilityLabel={k().label()} onPress={() => open(k().name)} style={{ flex: 1, minWidth: 0, gap: 3 }}>
+            <Text style={{ fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().label()}</Text>
+            <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{set(k().name) ? L(`Set ${new Date(set(k().name)!.updated).toLocaleDateString()}`, `设置于 ${new Date(set(k().name)!.updated).toLocaleDateString()}`) : k().hint()}</Text>
+          </View>
+          <Text style={{ fontFamily: MONO, fontSize: 13, color: set(k().name) ? colors.faint : colors.info }}>{set(k().name) ? "••••••" : L("Set", "设置")}</Text>
+        </SettingsItem>
+      )}
+    </Each>
+  );
+}
+
 const SECRETS_HINT = () => L(
   "Entered once here, used by every machine. Stored encrypted in your own cloud, never in the team's data; this app can replace or delete a key but never show it again. A machine's own environment variable is used when no key here has that name.",
   "在这里填一次，所有机器都能用。加密保存在你自己的云端，不进团队数据；客户端只能替换或删除，无法再查看。这里没有的名字，才使用机器自己的同名环境变量。",
@@ -3794,7 +3830,7 @@ function SecretRows(props: { settings: Settings }) {
   const d = st.secretDraft;
   void st.loadSecrets();
   const open = (name?: string) => { d.name.set(name ?? ""); d.value.set(""); d.note.set(""); d.editing.set(name ?? ""); };
-  const list = () => st.secrets() ?? [];
+  const list = () => (st.secrets() ?? []).filter((k) => !CLAUDE_KEYS.some((c) => c.name === k.name));
   return (
     <>
       <Each of={list()} key={(k) => k.name}>
@@ -4133,6 +4169,9 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       </Section>
       <Section title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
         <McpRows settings={props.settings} />
+      </Section>
+      <Section title="Claude" hint={CLAUDE_HINT()}>
+        <ClaudeKeyRows settings={props.settings} />
       </Section>
       <Section title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
         <SecretRows settings={props.settings} />
