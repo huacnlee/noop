@@ -35,9 +35,10 @@ fn shade(uv: vec2f) -> vec4f {
   // The arc mapping jumps along the centre line and the quadrant diagonals, so the glow must
   // fade out well before it reaches them or those seams show as hard edges.
   let reach = min(halfSize.x, halfSize.y);
-  let halo = exp(-max(depth, 0.0) / 22.0) * (1.0 - smoothstep(0.3 * reach, 0.8 * reach, depth));
+  let halo = exp(-max(depth, 0.0) / 12.0) * (1.0 - smoothstep(0.3 * reach, 0.8 * reach, depth));
   let head = exp(-pow(offset / 0.015, 2.0));
-  let color = mix(hue, vec3f(0.92, 0.97, 1.0), rim * head * 0.9);
+  let color = mix(hue, vec3f(0.92, 0.97, 1.0), rim * head * 0.5);
   let fade = smoothstep(0.0, 0.1, t) * (1.0 - smoothstep(0.82, 1.0, t));
-  return vec4f(color, beam * fade * inside * min(1.0, 1.15 * rim + 0.7 * halo + 0.35 * head * halo));
+  // Keep it a faint accent: the owner wants a hint of light, not a bright ring.
+  return vec4f(color, 0.45 * beam * fade * inside * min(1.0, 0.8 * rim + 0.3 * halo + 0.2 * head * halo));
 }`;
