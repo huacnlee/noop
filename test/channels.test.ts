@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { DATA, P, writeDoc } from "../src/core";
 import { channelPrompt, channels, createChannel, resolveChannels, updateChannel } from "../src/channels";
@@ -6,6 +6,7 @@ import { context, localStore } from "../src/brain";
 import { channelsView, slugify, writeOp } from "../cloud/src/tools";
 
 const reset = () => { rmSync(P("channels"), { recursive: true, force: true }); rmSync(P("tasks"), { recursive: true, force: true }); rmSync(P("decisions"), { recursive: true, force: true }); };
+afterAll(reset); // later files share DATA: a leftover D-0001 card leaks into their searches
 const store = () => localStore({ acts: {}, status: () => ({}), feed: () => [], root: DATA });
 
 test("slugs: ascii names become kebab-case, CJK-only names get a stable id", () => {
