@@ -272,12 +272,16 @@ function loginCommand(a: Account): { cmd: string[]; needsCode: boolean } {
   return { cmd: ["claude", "setup-token"], needsCode: true };
 }
 
-/** Wrap in `script` so TUIs think they have a terminal (headless box, no monitor). */
-function withPty(cmd: string[]): string[] {
-  const q = cmd.map((c) => `'${c}'`).join(" ");
-  if (process.platform === "linux" && Bun.which("script")) return ["script", "-qfec", q, "/dev/null"];
-  if (process.platform === "darwin") return ["script", "-q", "/dev/null", ...cmd];
-  return cmd;
+/** How to run a login command so it can print its link without a monitor.
+ * - codex `login --device-auth` prints plain text: run it as is. Wrapping it in BSD `script` on macOS broke it,
+ *   because Bun's stdin pipe is a socket and `script` exits 1 with "tcgetattr/ioctl: Operation not supported on socket".
+ * - claude `setup-token` is a TUI that prints nothing without a terminal: give it a real pseudo-terminal
+ *   (Bun's `terminal` spawn option) on macOS, `script` on Linux, the bare command elsewhere. */
+export function loginSpawn(cli: string, cmd: string[], platform: string = process.platform, hasScript = !!Bun.which("script")): { argv: string[]; pty: boolean } {
+  if (cli === "codex") return { argv: cmd, pty: false };
+  if (platform === "linux" && hasScript) return { argv: ["script", "-qfec", cmd.map((c) => `'${c}'`).join(" "), "/dev/null"], pty: false };
+  if (platform === "darwin") return { argv: cmd, pty: true };
+  return { argv: cmd, pty: false };
 }
 
 export async function startLogin(a: Account, cfg: Cfg) {
@@ -288,10 +292,12 @@ export async function startLogin(a: Account, cfg: Cfg) {
   s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id };
   save(s);
   const { cmd, needsCode } = loginCommand(a);
-  const proc = Bun.spawn(withPty([...cmd, ...claudeAuthArgs(accountEnv(a))]), {
-    stdin: "pipe", stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, ...accountEnv(a), BROWSER: "/bin/false", TERM: "xterm-256color", COLUMNS: "500" },
-  });
+  const { argv, pty } = loginSpawn(a.cli, [...cmd, ...claudeAuthArgs(accountEnv(a))]);
+  const env = { ...process.env, ...accountEnv(a), BROWSER: "/bin/false", TERM: "xterm-256color", COLUMNS: "500" };
+  const dec = new TextDecoder();
+  const proc = pty
+    ? Bun.spawn(argv, { env, terminal: { cols: 500, rows: 50, data: (_t, d) => void onData(dec.decode(d, { stream: true })) } })
+    : Bun.spawn(argv, { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   pending.set(id, { id, account: k, proc, started: Date.now() });
   let buf = "";
   let sent = false;
@@ -317,7 +323,7 @@ export async function startLogin(a: Account, cfg: Cfg) {
     const dec = new TextDecoder();
     for await (const c of stream) await onData(dec.decode(c));
   };
-  void Promise.all([pump(proc.stdout as ReadableStream), pump(proc.stderr as ReadableStream)]);
+  if (!pty) void Promise.all([pump(proc.stdout as ReadableStream), pump(proc.stderr as ReadableStream)]);
   proc.exited.then(async (code) => {
     pending.delete(id);
     const st = load();
@@ -335,6 +341,7 @@ export const pendingLoginIds = () => new Set(pending.keys());
 export function submitLoginCode(id: string, code: string): boolean {
   const p = pending.get(id);
   if (!p) return false;
+  if (p.proc.terminal) { p.proc.terminal.write(code.trim() + "\r"); return true; }
   const stdin = p.proc.stdin as import("bun").FileSink;
   stdin.write(code.trim() + "\r");
   stdin.flush();
