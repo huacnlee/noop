@@ -18,7 +18,7 @@ import type { ServerWebSocket } from "bun";
 import { accountsInfo } from "./accounts";
 import { cliCommand, startModel } from "./runner";
 import { type Cfg, DATA, JOURNAL_DAY, L, P, _commitPush, isEnglish, allowedClis, hostName, hostPriority, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
-import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
+import { mediaResponse, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
 import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
@@ -505,7 +505,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         const f = join(MEDIA, basename(url.pathname));
         if (!existsSync(f)) return json({ error: "not found" }, 404);
         const file = Bun.file(f);
-        return new Response(file, { headers: mediaHeaders(file.type, basename(f)) });
+        return mediaResponse(req, file, file.type, basename(f));
       }
       if (url.pathname === "/api/feed") return json({ events: feed(url.searchParams.get("since") ?? undefined) });
       if (url.pathname === "/api/status") return json(status());

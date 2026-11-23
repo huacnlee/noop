@@ -22,7 +22,7 @@ import { FREE, LEAN, SHED, TARGET, latestOnly } from "./budget";
 import { CHANNEL_SLUG, channelDigest, channelsView, taskHistory, taskInfo } from "./tools";
 import { CODE_RE, newCode, normCode } from "./authcode";
 import { newSecret, otpauthUri, totpMatch } from "./totp";
-import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
+import { mediaResponse, ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
 import { sendMail, type SmtpCfg } from "./smtp";
 import { EmailMessage } from "cloudflare:email";
 
@@ -940,7 +940,7 @@ export class Hub extends DurableObject<Env> {
       const rows = this.sql.exec("SELECT type, data FROM media WHERE id = ? ORDER BY n", id).toArray();
       if (!rows.length) return json({ error: "not found" }, 404);
       const parts = rows.map((r) => new Uint8Array(r.data as ArrayBuffer));
-      return new Response(new Blob(parts), { headers: mediaHeaders(rows[0].type as string, id) });
+      return mediaResponse(req, new Blob(parts), rows[0].type as string, id);
     }
 
     // ---- fleet side
