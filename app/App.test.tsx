@@ -1355,6 +1355,7 @@ describe("keyboard", () => {
     expect(app.shows("即将发送")).toBe(false);
     await app.press("id:recall-send");
     await app.waitUntil(() => app.value("id:composer") === "发错了");
+    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 }); // nothing is under way any more
     await app.wait(6000);
     expect(posts.length).toBe(0);
   });
@@ -1387,9 +1388,11 @@ describe("keyboard", () => {
     await app.waitFor("id:composer");
     await app.type("id:composer", "看一下日志");
     await app.submit("id:composer");
-    await app.waitFor("id:composer-sweep"); // a faint light sweeps the composer once
-    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 });
+    await app.waitFor("id:composer-sweep"); // a faint light circles the composer while the message can be recalled
+    await app.wait(2500);
+    expect(app.count("id:composer-sweep")).toBe(1); // still there after the first lap
     await app.waitUntil(() => posts.length === 1, { timeout: 8000 }); // sent after the 5 s undo window
+    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 }); // gone once it has left
     expect(posts[0]).toMatchObject({ text: "看一下日志" });
     expect(app.value("id:composer")).toBe("");
   });
@@ -1754,9 +1757,12 @@ describe("voice input", () => {
     expect(app.value("id:composer")).toBe("提醒我：明天");
     await app.hear("明天上午开会");
     expect(app.value("id:composer")).toBe("提醒我：明天上午开会");
+    await app.wait(2000);
+    expect(app.count("id:composer-sweep")).toBe(1); // the light keeps circling while listening
 
     await app.press("label:Stop voice input");
     await app.waitFor("label:Voice input");
+    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 });
     expect(app.value("id:composer")).toBe("提醒我：明天上午开会");
     expect(app.shows("id:dictating")).toBe(false);
     expect(posts).toEqual([]);

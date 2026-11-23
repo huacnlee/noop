@@ -4790,15 +4790,14 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   /** What the floating composer covers at the bottom of the timeline. */
   const composerHeight = signal(0);
   const beamDuration = 1500;
+  /** Messages sent from the composer; while one can still be recalled or is on its way, the light keeps circling. */
+  const composerSent = new Set<string>();
   const sweeps = signal<number[]>([]);
+  /** The shader's clock time the light has faded out by: far away while busy. */
+  const sweepUntil = signal(1e6);
   let sweepId = 0;
+  let sweepStart = 0;
   let sweepTimer: ReturnType<typeof setTimeout>;
-  const sweep = () => {
-    if (untracked(reduceMotion)) return;
-    clearTimeout(sweepTimer);
-    sweeps.set([++sweepId]);
-    sweepTimer = setTimeout(() => sweeps.set([]), beamDuration);
-  };
   cleanup(() => clearTimeout(sweepTimer));
   // Keep every explicit timeline jump short, including off-screen decision cards.
   // Stage the target one viewport away, let recycled rows lay out, then use the
@@ -4966,8 +4965,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     viewing.set(null);
     attachNote.set(null);
     inputHeight.set(28);
-    sweep();
-    send(v, r, undefined, files);
+    const id = `local:${crypto.randomUUID()}`;
+    composerSent.add(id);
+    send(v, r, id, files);
   }
 
   // Images the owner attaches: pasted, dropped on the window, or picked.
@@ -4997,6 +4997,31 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // they are heard; nothing is sent. Where there is neither, there is no button.
   const canDictate = signal(false);
   const speech = signal<"off" | "on" | "stopping">("off");
+  /** The light circles the composer as long as something is under way: dictation, or a sent message not yet delivered. */
+  const busy = computed(() => {
+    if (speech() === "on") return true;
+    const here = scope() ?? null;
+    return outbox().some((o) => composerSent.has(o.id) && (o.state === "held" || o.state === "sending") && (o.channel ?? null) === here);
+  });
+  effect(() => {
+    const on = busy() && !reduceMotion();
+    untracked(() => {
+      const lit = sweeps().length > 0;
+      if (on) {
+        clearTimeout(sweepTimer);
+        sweepUntil.set(1e6);
+        if (!lit) { sweepStart = Date.now(); sweeps.set([++sweepId]); }
+        return;
+      }
+      if (!lit || sweepUntil() < 1e6) return;
+      for (const id of composerSent) if (!outbox().some((o) => o.id === id && (o.state === "held" || o.state === "sending"))) composerSent.delete(id);
+      // Finish fading from where the light is now, and never cut short its first lap.
+      const now = (Date.now() - sweepStart) / 1000;
+      const until = Math.max(now + 0.18 * beamDuration / 1000, beamDuration / 1000);
+      sweepUntil.set(until);
+      sweepTimer = setTimeout(() => sweeps.set([]), (until - now) * 1000);
+    });
+  });
   let native = false;
   let session: SpeechSession | null = null;
   void Speech.available()
@@ -5047,7 +5072,6 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     dictated = v;
     attachNote.set(null);
     speech.set("on");
-    sweep();
     if (native) {
       try {
         const s = Speech.start({ lang: speechLang() });
@@ -5569,7 +5593,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     <Shader
                       testID="composer-sweep"
                       source={composerBeam}
-                      uniforms={{ radius: compactComposer() ? corner.composerCompact : corner.composer, tint: colors.info, duration: beamDuration / 1000 }}
+                      uniforms={{ radius: compactComposer() ? corner.composerCompact : corner.composer, tint: colors.info, duration: beamDuration / 1000, until: sweepUntil() }}
                       style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, pointerEvents: "none" }}
                     />
                   )}
