@@ -94,12 +94,12 @@ jobs:
             fi
           fi
           if [ "$TARGET" = web ]; then
-            (cd app && ./build-web.sh "${args[@]}")
+            app/build-web.sh "${args[@]}"
             tar -czf "assets/$ASSET" -C app/dist/web/noop .
             ls -l assets
             exit 0
           fi
-          (cd app && nsh package --target "$TARGET" -o "$out" "${args[@]}")
+          nsh package --target "$TARGET" -o "$out" "${args[@]}"
           case "$TARGET" in
             linux) mv "$out/Noop.tar.gz" "assets/$ASSET"; mv "$out"/Noop-*.tar.gz assets/ ;;
             windows) mv "$out/Noop.zip" "assets/$ASSET"; mv "$out"/Noop-*.zip assets/ ;;
@@ -172,7 +172,7 @@ jobs:
           out="$RUNNER_TEMP/out-x86_64"
           mkdir -p assets-intel
           # Name the processor: without --arch the CLI packages for the machine it runs on (arm64), even under Rosetta.
-          (cd app && nsh package --target macos --arch x86_64 -o "$out" "${args[@]}")
+          nsh package --target macos --arch x86_64 -o "$out" "${args[@]}"
           ditto -c -k --keepParent "$out/Noop.app" assets-intel/noop-macos-x86_64.zip
           mv "$out"/Noop-*-macos-x86_64.tar.gz assets-intel/
           app="$RUNNER_TEMP/verify-x86_64/Noop.app"
@@ -238,15 +238,15 @@ jobs:
           trap 'rm -rf "$keys"' EXIT
           (umask 077 && mkdir -p "$keys" && printf '%s\n' "$NSH_PACKAGE_KEY" > "$keys/release.secret")
           printf '%s\n' "$NSH_PACKAGE_CERT" > "$keys/release.cert"
-          (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/release.cert" \
+          (nsh publish --key "$keys/release.secret" --cert "$keys/release.cert" \
             --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-$version.nshpkg")
           # The Store bundle ID needs its own root-certified package certificate.
           test -n "$NSH_STORE_PACKAGE_CERT" || { echo "NSH_STORE_PACKAGE_CERT is required" >&2; exit 1; }
           printf '%s\n' "$NSH_STORE_PACKAGE_CERT" > "$keys/store.cert"
           python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel store
-          (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/store.cert" \
+          (nsh publish --key "$keys/release.secret" --cert "$keys/store.cert" \
             --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-store-$version.nshpkg")
-          nsh update-manifest --entry app --out "$RUNNER_TEMP/store-manifest" \
+          nsh update-manifest --entry . --out "$RUNNER_TEMP/store-manifest" \
             --package "assets/noop-store-$version.nshpkg" --key "$keys/release.secret" \
             --link "ios=https://apps.apple.com/app/id6835723652"
           mv "$RUNNER_TEMP/store-manifest/latest.json" assets/store-latest.json
