@@ -1,4 +1,5 @@
 import { describe, expect, open, test } from "nsh/test";
+import type { App } from "nsh/test";
 import { URL as ParsedURL } from "url";
 
 const URL = "http://hub.test:8787";
@@ -1736,6 +1737,11 @@ describe("notifications", () => {
 });
 
 describe("voice input", () => {
+  // nsh-extra's fake recognizer stands in for the microphone in headless runs.
+  const SPEECH = "nsh-extra/speech";
+  const hear = (app: App, text: string) => app.fake(SPEECH, "hear", [text]);
+  const speechRequests = (app: App) => app.fake(SPEECH, "requests") as Promise<{ lang: string | null; interim: boolean }[]>;
+
   test("the microphone dictates into the composer until pressed again; nothing is sent", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
@@ -1743,16 +1749,17 @@ describe("voice input", () => {
     await app.type("id:composer", "提醒我：");
     expect(app.count("id:composer-sweep")).toBe(0);
     await app.press("label:Voice input");
-    await app.waitUntil(() => app.speechRequests().length === 1);
     await app.waitFor("id:composer-sweep");
-    expect(app.speechRequests()[0].lang).toBe("zh-CN");
+    const requests = await speechRequests(app);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].lang).toBe("zh-CN");
     await app.waitFor("label:Stop voice input");
     expect(app.shows("text:Listening…")).toBe(true);
 
     // interim results replace each other; the words land after what was typed
-    await app.hear("明天");
+    await hear(app, "明天");
     expect(app.value("id:composer")).toBe("提醒我：明天");
-    await app.hear("明天上午开会");
+    await hear(app, "明天上午开会");
     expect(app.value("id:composer")).toBe("提醒我：明天上午开会");
 
     await app.press("label:Stop voice input");
@@ -1765,14 +1772,14 @@ describe("voice input", () => {
   test("sending while listening stops it; a refused microphone is explained", async () => {
     const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
     await app.press("label:Voice input");
-    await app.hear("看一下日志");
+    await hear(app, "看一下日志");
     expect(app.value("id:composer")).toBe("看一下日志");
     await app.press("id:send");
     await app.waitFor("label:Voice input");
     expect(app.value("id:composer")).toBe("");
 
     await app.press("label:Voice input");
-    await app.endSpeech("not-allowed");
+    await app.fake(SPEECH, "end", ["not-allowed"]);
     await app.waitFor("id:attach-note");
     expect(app.shows("text:/No microphone or speech recognition permission/")).toBe(true);
     expect(app.shows("label:Stop voice input")).toBe(false);
@@ -1786,7 +1793,7 @@ describe("voice input", () => {
     await app.waitFor("label:Stop voice input");
     expect(app.shows("id:dictate")).toBe(true);
     expect(app.shows("label:Voice input")).toBe(false);
-    await app.hear("部署一下");
+    await hear(app, "部署一下");
     await app.press("label:Stop voice input");
     await app.waitFor("label:Voice input");
     expect(app.value("id:composer")).toBe("部署一下");

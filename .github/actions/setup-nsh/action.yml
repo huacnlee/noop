@@ -1,7 +1,9 @@
 name: Set up nsh
 description: >
   Puts on PATH an nsh CLI with the runtime for one target, built from a pinned commit and cached.
-  It is the layout of an nsh release (bin/ and runtime/), so packaging needs no Rust once cached.
+  It is the layout of an nsh release (bin/ and runtime/). The app links a Rust nshm (nsh-extra, for Speech), so
+  every nsh command on it builds Rust: the toolchain and the target's system packages are set up on every run,
+  and nsh-extra comes from the same nsh commit as the CLI.
 inputs:
   ref:
     description: The longbridge/nsh commit to build, or `nightly` for the commit of the current NSH nightly release
@@ -122,20 +124,59 @@ runs:
         path: .nsh-src
         # Keep the native build's host tools when cross-compiling Intel on the same Mac runner.
         clean: ${{ inputs.target != 'macos' || inputs.rust-target == '' }}
-    - if: steps.cache.outputs.cache-hit != 'true' && (steps.nightly.outputs.used != 'true' || inputs.target == 'linux')
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ inputs.rust-target }}
-
-    # Cached distributions need runtime libraries, not a C/Rust build toolchain.
-    - if: runner.os == 'Linux' && ((steps.cache.outputs.cache-hit != 'true' && steps.nightly.outputs.used != 'true') || inputs.target == 'linux')
+    # The app's hosts are built here (nsh-extra is Rust), cached CLI or not: the Rust targets nsh package builds for.
+    - id: rust
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
-        PREBUILT: ${{ steps.nightly.outputs.used }}
+        RUST_TARGET: ${{ inputs.rust-target }}
+      run: |
+        case "$TARGET" in
+          ios) targets=aarch64-apple-ios ;;
+          android) targets=aarch64-linux-android,armv7-linux-androideabi ;;
+          web) targets=wasm32-unknown-unknown ;;
+          *) targets="" ;;
+        esac
+        [ -z "$RUST_TARGET" ] || targets="${targets:+$targets,}$RUST_TARGET"
+        echo "targets=$targets" >> "$GITHUB_OUTPUT"
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ steps.rust.outputs.targets }}
+    # On the web nsh-extra calls the browser through wasm-bindgen, whose CLI must be the version nsh links.
+    - id: wasm-bindgen
+      if: inputs.target == 'web'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REF: ${{ steps.ref.outputs.sha }}
+      run: |
+        version="$(gh api "repos/longbridge/nsh/contents/Cargo.toml?ref=$REF" -H 'Accept: application/vnd.github.raw' \
+          | sed -n 's/^wasm-bindgen = .*"=\([0-9.]*\)".*/\1/p' | head -1)"
+        [ -n "$version" ] || { echo "::error::no wasm-bindgen pin in longbridge/nsh's Cargo.toml at $REF"; exit 1; }
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - if: inputs.target == 'web'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-bindgen-cli@${{ steps.wasm-bindgen.outputs.version }}
+    # The app's Rust builds: Cargo's downloads, the installed nshm and the generated hosts' workspaces.
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/.nsh/nshms
+          ~/.nsh/builds
+          app/.nsh/rust
+          app/target
+        key: nsh-app-rust-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ inputs.rust-target || 'native' }}-${{ steps.ref.outputs.sha }}-${{ hashFiles('app/nsh.lock') }}
+        restore-keys: |
+          nsh-app-rust-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ inputs.rust-target || 'native' }}-
+    - if: runner.os == 'Linux'
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
       run: bash "$GITHUB_WORKSPACE/scripts/setup-linux-deps.sh"
-    - if: steps.cache.outputs.cache-hit != 'true' && (steps.nightly.outputs.used != 'true' || inputs.target == 'linux') && runner.os == 'Windows'
+    - if: runner.os == 'Windows'
       shell: bash
       run: |
         # QuickJS is C: bindgen needs libclang, which the image's LLVM has.
@@ -161,7 +202,8 @@ runs:
           release_dir="target/$RUST_TARGET/release"
         fi
         if [ "$NIGHTLY" != true ]; then
-          cargo build --release --locked -p nsh-cli "${target_args[@]}"
+          # A main commit, as a nightly is: the CLI then builds the app's Rust (nsh-extra) at this commit too.
+          NSH_CHANNEL=nightly cargo build --release --locked -p nsh-cli "${target_args[@]}"
           install -d "$out/bin"
           cp "$release_dir/nsh$exe" "$out/bin/"
         fi
