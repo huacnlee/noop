@@ -2532,8 +2532,8 @@ function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads
           open={open()}
           onOpenChange={({ open: o }) => open.set(o)}
           presentation="pageSheet"
-          sheetHeight={height()}
-          sheetGrabber
+          detents={[{ height: height() }]}
+          grabber
           accessibilityLabel={menuLabel()}
         >
           <View onLayout={({ bounds }) => height.set(Math.ceil(bounds.size.height))} style={{ gap: 22, paddingTop: 28, paddingBottom: 4 }}>
@@ -4686,15 +4686,29 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       if (end) list.scrollToEnd({ animated });
       else list.scrollToIndex({ index, viewOffset: 24, animated });
     };
-    const far = firstVisibleRow >= 0 && (index < firstVisibleRow - 1 || index > lastVisibleRow + 1);
+    // Out of sight (or unknown), never animate across the history: the glide is decoration with a fixed
+    // duration, so stage the target one viewport away without animation, re-stage while row measuring
+    // moves it, and only then glide the last screen.
+    const far = firstVisibleRow < 0 || index < firstVisibleRow - 1 || index > lastVisibleRow + 1;
     if (!animated || !far) { finish(); return; }
-    const direction = index > lastVisibleRow ? 1 : -1;
-    list.scrollToIndex({
+    const direction = end || index > lastVisibleRow ? 1 : -1;
+    const stage = () => list.scrollToIndex({
       index, viewPosition: end ? 1 : 0,
       viewOffset: (end ? 0 : 24) + direction * timelineHeight,
       animated: false,
     });
-    requestAnimationFrame(() => requestAnimationFrame(finish));
+    let tries = 0;
+    const settle = () => {
+      if (version !== jumpVersion || scroller !== list) return;
+      // Staged, the target sits about one viewport past the visible rows.
+      const span = lastVisibleRow - firstVisibleRow + 1;
+      const near = direction > 0 ? index - lastVisibleRow <= span + 2 : firstVisibleRow - index <= span + 2;
+      if (near || ++tries >= 4) { finish(); return; }
+      stage();
+      requestAnimationFrame(() => requestAnimationFrame(settle));
+    };
+    stage();
+    requestAnimationFrame(() => requestAnimationFrame(settle));
   }
   const jumpToEnd = () => {
     unseen.set(0);

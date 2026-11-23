@@ -1,9 +1,9 @@
 // Learn digest: only the owner's own words get in, and secrets never do.
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ownerText, readClaude, readCodex, redact } from "../src/sessions";
+import { collect, ownerText, readClaude, readCodex, redact } from "../src/sessions";
 
 // Fake values, assembled so the source never holds anything key-shaped.
 const body = (n: number) => "aB3".repeat(n).slice(0, n);
@@ -79,4 +79,24 @@ test("readers: the previous AI message is redacted before it is shortened", () =
   const turns = readCodex(jsonl([codexMsg("assistant", googleNew + " " + "y".repeat(380)), codexMsg("user", "继续做这个功能")]));
   expect(turns).toHaveLength(1);
   expect(turns[0].prev).not.toContain(googleNew.slice(-20));
+});
+
+test("collect: a session file that changes only re-sends turns newer than the last read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "noop-learn-"));
+  const f = join(dir, "claude", "-home-me-proj", "s.jsonl");
+  mkdirSync(join(f, ".."), { recursive: true });
+  const cfg = { learn: { claude_dir: join(dir, "claude"), codex_dir: join(dir, "codex") } } as any;
+  const ago = (min: number) => new Date(Date.now() - min * 60_000);
+  const age = (min: number) => utimesSync(f, ago(min), ago(min));
+  writeFileSync(f, JSON.stringify(claudeUser("把按钮对齐")) + "\n");
+  age(30);
+  expect(collect(cfg).turns).toBe(1);
+  appendFileSync(f, JSON.stringify({ type: "system", subtype: "compact_boundary", timestamp: ago(25).toISOString() }) + "\n");
+  age(25);
+  expect(collect(cfg).turns).toBe(0);
+  appendFileSync(f, JSON.stringify({ ...claudeUser("改成图标"), timestamp: ago(20).toISOString() }) + "\n");
+  age(20);
+  const r = collect(cfg);
+  expect(r.turns).toBe(1);
+  expect(readFileSync(r.file!, "utf8")).not.toContain("把按钮对齐");
 });

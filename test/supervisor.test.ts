@@ -202,7 +202,7 @@ test("trackedPrs reads PR urls from spec and repo #N from title, not from run lo
 });
 
 
-test("merged PRs wake a task once for acceptance checks instead of completing it", () => {
+test("merged PRs wake a task once for acceptance checks; waiting again afterwards closes it with a verification gap", () => {
   const id = "T-9406-test";
   const waiting = P("tasks", "waiting", `${id}.md`);
   const inbox = P("tasks", "inbox", `${id}.md`);
@@ -218,10 +218,13 @@ test("merged PRs wake a task once for acceptance checks instead of completing it
     expect(resumed.meta.resumed).toBe("yes");
     expect(resumed.body).toContain("Check remaining acceptance criteria");
     rmSync(inbox);
-    writeDoc(waiting, { ...resumed.meta, waiting_on: "Need screenshot" }, resumed.body!);
+    writeDoc(waiting, { ...resumed.meta, waiting_on: "Need screenshot", wait_kind: "ci" }, resumed.body!);
     supervise({}, "test", NOW, () => { throw new Error("Must not recheck a handled merge"); }, () => false);
-    expect(existsSync(waiting)).toBe(true);
+    expect(existsSync(waiting)).toBe(false);
     expect(existsSync(inbox)).toBe(false);
+    const closed = readDoc(done);
+    expect(closed.meta.status).toBe("done");
+    expect(closed.body).toContain("verification recorded as a gap: Need screenshot");
   } finally {
     for (const path of [waiting, inbox, done]) rmSync(path, { force: true });
   }

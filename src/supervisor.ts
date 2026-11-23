@@ -206,9 +206,20 @@ export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = 
     }
     if (task.meta.children || ctx.decision(task.meta.decision ?? "") === "open") continue;
     const signature = prs.slice().sort().join(",");
+    // Second wait after the merge wake (T-10748: T-10690 waited 3h+ for an extra screenshot after gpui-fast#177 merged):
+    // the PR is done, so extra checks become a recorded verification gap instead of another wait.
+    if (task.meta.supervisor_merged_prs === signature && task.folder === "waiting") {
+      const gap = task.meta.waiting_on ? ` Unfinished verification recorded as a gap: ${task.meta.waiting_on}` : "";
+      writeDoc(P("tasks", "done", `${task.meta.id}.md`), { ...task.meta, status: "done", finished: new Date(t).toISOString(), wake_at: undefined, wait_kind: undefined, claimed_by: undefined, verification_gap: task.meta.waiting_on },
+        `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} already merged and the task waited again; closed as done.${gap}\n`);
+      unlinkSync(task.path);
+      tasks.splice(tasks.indexOf(task), 1);
+      journal(host, L(`🧭 supervisor: ${task.meta.id} closed after waiting again on merged ${prs.join(", ")}`, `🧭 supervisor: ${task.meta.id} 的 ${prs.join("、")} 已合并却再次等待，已收尾关闭${task.meta.waiting_on ? `；验证缺口：${task.meta.waiting_on}` : ""}`)); merged++;
+      continue;
+    }
     if (task.meta.supervisor_merged_prs === signature || !prs.every((r) => readPrState(r) === "MERGED")) continue;
     writeDoc(P("tasks", "inbox", `${task.meta.id}.md`), { ...task.meta, status: undefined, finished: undefined, resumed: "yes", supervisor_merged_prs: signature, wake_at: undefined, wait_kind: undefined, claimed_by: undefined },
-      `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} merged while this task waited. Check remaining acceptance criteria and follow-ups; return done if the goal is met, otherwise continue the unfinished work. Do not wait for these PRs to merge again.\n`);
+      `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} merged while this task waited. Check remaining acceptance criteria and follow-ups; return done if the goal is met, otherwise continue the unfinished work. Do not wait for these PRs to merge again. After a merge only acceptance prerequisites remain: record any extra verification you cannot finish now (screenshots, device checks) as a verification gap in the summary and return done; returning waiting again closes this task automatically.\n`);
     unlinkSync(task.path);
     tasks.splice(tasks.indexOf(task), 1);
     journal(host, L(`🧭 supervisor: ${task.meta.id} resumed, ${prs.join(", ")} already merged`, `🧭 supervisor: ${task.meta.id} 唤醒核对收尾，${prs.join("、")} 已合并`)); merged++;

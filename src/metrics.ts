@@ -1,5 +1,6 @@
 // Fleet metrics → fleet/metrics.json; the architect uses them to evolve prompts, rules and memory.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { CODE, P, list, loadConfig, readDoc } from "./core";
 import { judgeAccuracy, routinesAwaitingApproval } from "./autonomy";
 
@@ -57,9 +58,15 @@ export function computeMetrics(days = 7) {
   }));
   const approvals = closedCards.filter((m) => m.kind === "proposals");
   const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/).length;
+  // Shadow scores are cumulative. Keep installed agents visible when their last task ages out of the window.
+  const shadowAgents = new Set(Object.keys(per));
+  for (const dir of list(P("agents"), /.*/)) {
+    if (existsSync(join(dir, "profile.md"))) shadowAgents.add(basename(dir));
+  }
   const out = {
-    shadow_judge: judgeAccuracy(),
-    shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])), proposal_batches: approvals.length, proposals_rejected_total: rejected,
+    shadow_judge: judgeAccuracy(undefined, closedCards),
+    shadow_judge_by_agent: Object.fromEntries(Array.from(shadowAgents, (a) => [a, judgeAccuracy(a, closedCards)])),
+    proposal_batches: approvals.length, proposals_rejected_total: rejected,
     // A routine that fires on schedule but whose copies wait for approval produces nothing; nothing else reports it.
     routines_starved: routinesAwaitingApproval(loadConfig()),
     window_days: days, generated: new Date().toISOString(), code: codeState(), agents,

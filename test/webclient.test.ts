@@ -6,8 +6,9 @@ import { join } from "path";
 import { ensureWebClient } from "../src/webclient";
 
 // Every tar call is a process spawn (~3s for Git's tar.exe on Windows under PowerShell, more under load), and most
-// tests make two (release() packs, ensureWebClient unpacks) — that overruns bun's 5s default.
-const TAR = 30_000;
+// tests make two (release() packs, ensureWebClient unpacks) — that overruns bun's 5s default. Under this host's load
+// (200-370) two spawns plus the unpack reached 37-53 s and rolled a release back, so keep 90 s of room.
+const TAR = 90_000;
 
 describe("ensureWebClient", () => {
   let root: string, dir: string, assets: Record<string, Uint8Array | string>, requests: string[];

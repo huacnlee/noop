@@ -107,6 +107,26 @@ export function routinesAwaitingApproval(cfg: Cfg): { name: string; copies: stri
     .sort((a, b) => a.since.localeCompare(b.since));
 }
 
+/** A copy waiting for approval whose own requirements no known host meets can never run: approving it only moves
+ *  it into the inbox, where retireUnrunnableCopy discards it one tick later. After #288 the scheduler stops minting
+ *  new copies of such a routine, so `supersedeProposed` never fires either and the copy sits in tasks/proposed for
+ *  good — keeping `routines_starved` red (pr-review T-2264 since 2026-11-20) and able to surface in an approval
+ *  batch as an option that cannot run. Retire it at the routine's next due tick, exactly like the inbox copy. */
+export function retireUnrunnableProposed(name: string, missing: (reqs: string[]) => string): { id: string; why: string }[] {
+  const out: { id: string; why: string }[] = [];
+  for (const p of list(P("tasks", "proposed"), /^T-.*\.md$/)) {
+    const { meta, body } = readDoc(p);
+    if (!isRoutine(meta, name) || meta.id !== fileId(p)) continue;
+    const pin = meta.host && meta.host !== "any" ? `host:${meta.host}` : "";
+    const why = missing([...(meta.requires ?? "").split(","), pin].map((s) => s.trim()).filter(Boolean));
+    if (!why) continue;
+    writeDoc(P("tasks", "rejected", `${meta.id}.md`), { ...meta, approval: "superseded:unrunnable" }, body + `\n\n## Note\nno known host has ${why}\n`);
+    unlinkSync(p);
+    out.push({ id: meta.id, why });
+  }
+  return out;
+}
+
 /** A newer run of a routine replaces its older unapproved copies: move them to rejected with a note. */
 export function supersedeProposed(name: string, newId: string, host?: string): string[] {
   const out: string[] = [];
@@ -245,9 +265,8 @@ export function resolveProposals(id: string, answer: string, by: string): boolea
 }
 
 /** Shadow-judge accuracy: how often the judge's would-be answer matched the owner's. */
-export function judgeAccuracy(agent?: string) {
-  const rows = list(P("decisions", "closed")).map((p) => readDoc(p).meta)
-    .filter((m) => m.shadow_verdict && /^owner/.test(m.answered_by ?? "") && (!agent || m.agent === agent));
+export function judgeAccuracy(agent?: string, closedCards = list(P("decisions", "closed")).map((p) => readDoc(p).meta)) {
+  const rows = closedCards.filter((m) => m.shadow_verdict && /^owner/.test(m.answered_by ?? "") && (!agent || m.agent === agent));
   // every owner-answered decision the judge also answered counts (held ones too): shadow_agree is set by closeDecision
   const scored = rows.filter((m) => m.shadow_agree === "yes" || m.shadow_agree === "no");
   const agree = scored.filter((m) => m.shadow_agree === "yes");

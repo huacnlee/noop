@@ -12,7 +12,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { RUN_LIMIT, STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent, runLimits } from "./runner";
 import { writeRules } from "./rules";
-import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, MAX_WAKES, tooManyWakes, waitMeta } from "./waits";
+import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, MAX_WAKES, sameWaitAgain, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -29,7 +29,7 @@ import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel,
 import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
-import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
+import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, retireUnrunnableProposed, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
 import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
@@ -138,6 +138,9 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
     // A routine no machine can run must not manufacture copies: say it once, then stay quiet until the fleet changes.
     const fit = unrunnableReason([r.requires ?? "", pin ? `host:${pin}` : ""].join(",").split(",").map((s) => s.trim()).filter(Boolean), [hostCaps(cfg), ...knownHostCaps()]);
     if (fit) {
+      // copies queued for approval before #288 stay in tasks/proposed for good unless they are retired here
+      const dead = retireUnrunnableProposed(r.name, (reqs) => unrunnableReason(reqs, [hostCaps(cfg), ...knownHostCaps()]));
+      if (dead.length) journal(host, `⏰ routine \`${r.name}\`: retired ${dead.map((d) => d.id).join(", ")} from proposed, no known host has ${dead[0].why}`);
       state[r.name] = new Date().toISOString();
       const key = `${r.name}#unrunnable`;
       if (state[key] !== fit) {
@@ -328,7 +331,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, gate_override: meta.gate_override, waiting_since: meta.waiting_since || now(), parked_at: now(), wake_at: w.wake_at, wait_kind: w.kind, wakes: wakes ? String(wakes) : undefined,
       waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_base: undefined },
       body + runNote + `\n**Waiting on:** ${res.waiting_on ?? "?"} (${w.kind === "human" ? "wakes on the owner's answer or an event" : `check again ${w.wake_at}`})\n`);
-    journal(host, w.kind === "human" ? L(`⏳ ${meta.id} waiting on you: ${res.waiting_on ?? ""} (no timer, continues on the event)`, `⏳ ${meta.id} 等你处理：${res.waiting_on ?? ""}（不定时唤醒，事件到达再继续）`) : L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""}, checking again in ${w.minutes} minutes`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}，${w.minutes} 分钟后再看`));
+    if (!sameWaitAgain(meta, res.waiting_on)) journal(host, w.kind === "human" ? L(`⏳ ${meta.id} waiting on you: ${res.waiting_on ?? ""} (no timer, continues on the event)`, `⏳ ${meta.id} 等你处理：${res.waiting_on ?? ""}（不定时唤醒，事件到达再继续）`) : w.kind === "event" ? L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""} (wakes when its check changes, at the latest ${w.wake_at})`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}（检查命令变化即唤醒，最迟 ${w.wake_at}）`) : L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""}, checking again in ${w.minutes} minutes`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}，${w.minutes} 分钟后再看`));
   } else if (res.status === "needs_decision") {
     const did = openDecision(meta, res, host);
     writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...done, decision: did }, body + runNote);
@@ -1136,8 +1139,24 @@ async function status(cfg: Cfg, brief = false) {
   console.log("\nopen decisions");
   for (const p of list(P("decisions", "open"))) {
     const m = readDoc(p).meta;
-    console.log(`  ${m.id} (${m.task}, ${m.agent}) ${m.question}  rec=${m.recommendation}${m.held ? "  [waiting on you]" : ""}`);
+    const age = cardAge(m);
+    // A proposals batch has no task/agent/recommendation: "(undefined, undefined) … rec=undefined" told the owner
+    // nothing and hid the one word that clears it. Name the item count and the command instead.
+    if (m.kind === "proposals") {
+      const n = (m.items ?? "").split(",").filter(Boolean).length;
+      console.log(`  ${m.id} proposals: ${n} item${n === 1 ? "" : "s"}${age}  ${m.question}  → noop decide ${m.id} "<1,3|all|none>"`);
+      continue;
+    }
+    console.log(`  ${m.id} (${m.task}, ${m.agent}) ${m.question}  rec=${m.recommendation}${m.held ? `  [waiting on you${age}]` : age}`);
   }
+}
+
+/** How long a card has waited, as status() shows it: "" under a day, " · 12d" after. Unparseable dates count as fresh. */
+export function cardAge(meta: Record<string, string>, nowMs = Date.now()): string {
+  const d = Date.parse(meta.created ?? meta.notified ?? "");
+  if (Number.isNaN(d)) return "";
+  const days = Math.floor((nowMs - d) / 86_400_000);
+  return days >= 1 ? ` · ${days}d` : "";
 }
 
 const HELP = `Noop — your own AI team

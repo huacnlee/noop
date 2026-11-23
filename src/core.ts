@@ -361,10 +361,17 @@ function yieldToPreferred(meta: Record<string, string>, caps: string[], cfg: Cfg
 /** A host's CPU pressure as its heartbeat reports it (0-1): measured utilisation when known, else load/cores. */
 const heartPressure = (s: any): number => (s?.cpuBusyPct == null ? (s?.loadRatio ?? 0) : s.cpuBusyPct / 100);
 
-/** Heavy work goes to the least-loaded capable online host. */
+/** Heavy work goes to the least-loaded capable online host. When no host has heavy headroom the copy waits forever
+ *  and nothing says so: evolve-deep T-0032 sat 9h behind the 25% free-memory gate on the only online host, which sat
+ *  at 17% of 24 GB. Like yieldToPreferred, that gate lapses after `heavy_wait_minutes` — memory only: the CPU side
+ *  still holds, and allowedParallel already refuses to dispatch anything below the hard memory floor. */
 function yieldHeavy(meta: Record<string, string>, cfg: Cfg, myLoad: number, heavyOk: boolean): boolean {
   if (meta.weight !== "heavy") return false;
-  if (!heavyOk) return true;
+  if (!heavyOk) {
+    const created = Date.parse(meta.created ?? "");
+    if (Number.isNaN(created) || Date.now() - created < (cfg.resources?.heavy_wait_minutes ?? 60) * 60_000) return true;
+    return myLoad >= (cfg.resources?.heavy_max_load ?? 0.5); // never start heavy work on a saturated host
+  }
   const me = hostName(cfg);
   return onlineHosts(cfg).some((h) => h.host !== me && matches(meta, h.caps) && h.stats
     && heartPressure(h.stats) + 0.2 < myLoad && h.busy === 0);
@@ -478,13 +485,20 @@ export const recentJournal = (days = 2) =>
 export function precedents(n = 30): string {
   // the latest answers, not the last file names: by name every P-… batch and D-C… card sorts after every D-0… card
   const at = (m: Record<string, string>) => m.answered ?? m.created ?? "";
-  // a menu the system closed because a refreshed one replaced it was never answered: not a precedent
-  return list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => !m.superseded_by).sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)).slice(-n)
+  return list(P("decisions", "closed")).map((p) => readDoc(p).meta)
+    .filter((m) => !m.superseded_by && m.answered_by !== "system")
+    .sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0)).slice(-n)
     .map((meta) => `- ${meta.id} [${meta.agent}] Q: ${meta.question}\n  → **${meta.answer}** (by ${meta.answered_by})`).join("\n");
 }
 
+/** The GitHub login `templates/config.toml` ships with. It is a real account, so signing "@your-github" pings a stranger
+ *  on every comment an instance posts before its owner edits [owner] github. */
+const TEMPLATE_GITHUB = "your-github";
+
 export function signature(agent: string, host: string, cfg: Cfg) {
-  return `🤖 [Noop](https://huacnlee.github.io/noop) (${agent}) · AI agent acting for @${cfg.owner?.github ?? "owner"}`;
+  const gh = (cfg.owner?.github ?? "").trim().replace(/^@/, "");
+  const who = gh && gh !== TEMPLATE_GITHUB ? `@${gh}` : "its owner"; // no login → no mention at all
+  return `🤖 [Noop](https://huacnlee.github.io/noop) (${agent}) · AI agent acting for ${who}`;
 }
 
 export function agentName(agent: string): string {

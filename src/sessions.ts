@@ -132,10 +132,12 @@ export function collect(cfg: Cfg, opts: { full?: boolean; maxChars?: number } = 
   let sessions = 0;
   for (const [tool, f] of files) {
     const m = statSync(f).mtimeMs;
-    if (typeof state[f] === "number" && state[f] >= m) continue;
+    const seen = typeof state[f] === "number" ? state[f] : 0;
+    if (seen >= m) continue;
     if (Date.now() - m < 10 * 60_000) continue; // skip live sessions
     const project = tool === "claude" ? basename(join(f, "..")).replace(/^-(home|Users)-[^-]+-/, "").replace(/^work-/, "").replace(/--claude-worktrees-.*$/, "") : "";
-    const t = tool === "claude" ? readClaude(f, project) : readCodex(f);
+    // Anything appended (compaction, attachments) bumps mtime; only turns written after the last read are new.
+    const t = (tool === "claude" ? readClaude(f, project) : readCodex(f)).filter((x) => !seen || Date.parse(x.ts) > seen);
     state[f] = m;
     if (t.length) { sessions++; turns.push(...t); }
   }
