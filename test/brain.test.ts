@@ -140,6 +140,28 @@ test("brain: nothing to say → nothing posted; invalid writes go back to the mo
   expect(out.calls.map((c) => [c.tool, c.ok])).toEqual([["amend_task", false], ["create_task", true]]);
 });
 
+test("brain: a request for work an open task already covers goes to that task, not a second one", async () => {
+  put("tasks/waiting/T-0300.md", "---\nid: T-0300\ntitle: gpui-fast: weekly upstream sync PR (Monday)\nagent: rust-maintainer\n---\nSync.\n");
+  try {
+    const { st, did } = store();
+    const posted: string[] = [];
+    const m = scripted(['{"calls":[{"tool":"create_task","args":{"title":"发布 gpui-fast 新版本","repo":"longbridge/gpui-fast"}}],"reply":"好"}',
+      '{"calls":[{"tool":"amend_task","args":{"id":"T-0300","text":"现在发布 gpui-fast 新版本"}}],"reply":"已交给 T-0300。"}']);
+    const out = await think({ text: "现在发布 gpui-fast 新版本" }, st, m, (r) => posted.push(r));
+    expect(m.seen[1]).toContain("possible duplicate: open T-0300");
+    expect(did).toEqual([{ tool: "amend_task", id: "T-0300", text: "现在发布 gpui-fast 新版本" }]);
+    expect(out.calls.map((c) => [c.tool, c.ok])).toEqual([["create_task", false], ["amend_task", true]]);
+    // clearly separate work on the same project still gets its own task
+    const n = scripted(['{"calls":[{"tool":"create_task","args":{"title":"gpui-fast: profile scrolling","new_work":true}}],"reply":"好"}']);
+    await think({ text: "另外分析 gpui-fast 滚动性能" }, st, n, () => {});
+    expect(did.at(-1)).toMatchObject({ tool: "create_task", title: "gpui-fast: profile scrolling", new_work: true });
+    // unrelated work is not held up
+    const k = scripted(['{"calls":[{"tool":"create_task","args":{"title":"Fix omamail sidebar"}}],"reply":"好"}']);
+    await think({ text: "修 omamail 侧栏" }, st, k, () => {});
+    expect(did.at(-1)).toMatchObject({ tool: "create_task", title: "Fix omamail sidebar" });
+  } finally { rmSync(join(DATA, "tasks/waiting/T-0300.md")); }
+});
+
 test("brain: a lookup that never ends still answers on the last round", async () => {
   const { st } = store();
   const look = '{"calls":[{"tool":"get_task","args":{"id":"T-0184"}}],"reply":""}';

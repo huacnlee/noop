@@ -13,7 +13,7 @@ import { channelPrompt } from "./channels";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { DATA, HOME_DIR, L, P, loadConfig, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
-import { type Ev, type FileRow, type ToolStore, type WriteOp, isWrite, listDecisions, listRoutines, listTasks, editMemoryEntry, runTool, toolsFor, writeOp } from "../cloud/src/tools";
+import { type Ev, type FileRow, type ToolStore, type WriteOp, isWrite, listDecisions, listRoutines, listTasks, similarOpenTasks, editMemoryEntry, runTool, toolsFor, writeOp } from "../cloud/src/tools";
 
 // ---------------------------------------------------------------- the local tool store (the data repo on this machine)
 
@@ -263,7 +263,8 @@ How to decide:
 - About an existing task, open or finished (corrections, ${L(`"no", "again…"`, `"不行", "再…"`)}, more requirements): amend_task on it with the owner's
   words, not a new task. A task is one conversation: amending a finished one reopens it under the same id. When it is
   waiting on the owner's decision card, the text answers that card. Use create_task with follows=<that task> only for
-  clearly separate new work.
+  clearly separate new work. Check Open tasks first: "release X", "merge X", "do the next step" while a task (or a
+  routine run) about X is open is that task's next step — amend it. create_task refuses a likely duplicate and names it.
 - ${L(`"remember / always do this / note this"`, `"记住/以后都这样/记下来"`)} or a standing rule for how the fleet should work: remember it (pick the file that fits;
   agents/<name>/memory.md when it only concerns one agent's kind of work). If it also asks for work, do both.
 - A complaint or change request about a product (Noop, NSH, ...) is work, not a rule: create_task only, never remember it.
@@ -369,7 +370,8 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
       const reads = turn.calls.filter((c) => !isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const writes = turn.calls.filter((c) => isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const unknown = turn.calls.filter((c) => !BRAIN_TOOLS.some((t) => t.name === c.tool));
-      const invalid = writes.map((c) => ({ c, op: writeOp(c.tool, c.args, st) })).filter((x) => typeof x.op === "string");
+      const invalid = writes.map((c) => ({ c, op: writeOp(c.tool, c.args, st) as WriteOp | string })).map((x) => ({ ...x, op: typeof x.op === "string" ? x.op : duplicate(st, x.op) ?? x.op }))
+        .filter((x) => typeof x.op === "string");
       // the last round answers with what it has: a lookup that never ends must not swallow the message
       if (!last && (reads.length || unknown.length || invalid.length)) {
         const results: string[] = [];
@@ -398,6 +400,17 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
   } finally { conv.close(); }
   res.ms.total = Date.now() - t0;
   return res;
+}
+
+/** A create_task whose work is already an open task (same project or PR): the brain is told to amend that task instead.
+ *  Only asked in rounds that can still answer (on the last one the task is created, the message is never lost). */
+export function duplicate(st: ToolStore, op: WriteOp): string | undefined {
+  if (op.tool !== "create_task" || (op as any).new_work) return;
+  const same = similarOpenTasks(st, op.title, op.repo);
+  if (!same.length) return;
+  return `possible duplicate: open ${same.map((t) => `${t.id} [${t.state}] ${t.title}`).join("; ")}. If the owner's message is a step or ` +
+    `follow-up of one of them (e.g. "release X now" while a release task for X is open), call amend_task on it instead. ` +
+    `Only if it is clearly separate work, call create_task again with new_work: true.`;
 }
 
 /** Latency log (one JSON line per message): ~/.noop/brain.jsonl, local to this machine. */
