@@ -2225,6 +2225,8 @@ const sidebarInset = 8;
 
 function Sidebar(props: {
   hub: Hub;
+  /** Cards the owner answered, including replies still in the outbox, so 待你决定 updates the moment one is sent. */
+  answered?: () => Set<string>;
   target: () => string | null;
   onPick: (ref: string) => void;
   /** Set a question aside: it leaves 待你决定 and is not asked again. */
@@ -2275,7 +2277,7 @@ function Sidebar(props: {
     return all.filter((c, i) => i < CHANNELS_SHOWN || c.slug === props.channel() || props.channels.unread(c) > 0);
   };
   const hiddenChannels = () => (channelsOpen() ? activeChannels().length - visibleChannels().length : 0);
-  const waits = computed(() => { const done = answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
+  const waits = computed(() => { const done = props.answered?.() ?? answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
   // the sidebar's right-click menu: end a task that can't go on without opening it
   const endTask = async (id: string, done: boolean) => {
     const running = (s()?.active ?? []).some((a) => a.id === id);
@@ -4579,6 +4581,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const focused = signal(false);
   const inputHeight = signal(28);
   const outbox = signal<Outgoing[]>([]);
+  const delivered = signal<Outgoing[]>([]);
   const atEnd = signal(true);
   /** The channel's head (name, goal, actions) has scrolled under the bar. */
   const headPassed = signal(false);
@@ -4610,6 +4613,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
   // one answer state for every view: the owner may answer a card in the main chat that a channel also shows
   const answered = computed(() => answeredIds(merge(hub.events(), shown())));
+  // every view's pending replies, not just this one's: the sidebar lists cards from all channels
+  const answeredAll = computed(() => answeredIds([...hub.events(), ...[...outbox(), ...delivered()].map((o) => ({ id: o.id, ts: o.ts, from: "owner", kind: "owner" as const, text: o.text, ref: o.ref ?? undefined }))]));
   /** The newest Markdown report in this conversation, and when its message was sent. */
   const latestDoc = computed((): (DocRef & { ts: string }) | null => {
     const list = shown();
@@ -4885,6 +4890,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     outbox.update((l) => l.map((x) => (x.id === id ? { ...x, state: "sending" } : x)));
     try {
       markSent(await hub.send(text, ref, files, false, id, channel));
+      delivered.update((d) => [...d.slice(-50), o]); // until the hub's own event arrives
       outbox.update((o) => o.filter((x) => x.id !== id));
     } catch {
       outbox.update((o) => o.map((x) => (x.id === id ? { ...x, state: "failed" } : x)));
@@ -5242,6 +5248,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
 
   const sidebar = (inDrawer: boolean) => (
     <Sidebar
+      answered={answeredAll}
       onRestart={() => void restartToUpdate()}
       hub={hub}
       target={target}

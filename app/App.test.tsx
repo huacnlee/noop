@@ -605,12 +605,13 @@ describe("channel", () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:opt-D-0001-B");
+    expect(app.shows("text:要不要升级依赖？")).toBe(true);
     await app.press("id:opt-D-0001-B");
+    // the sidebar's 待你决定 drops it the moment the answer is chosen, before it is even posted
+    expect(app.shows("text:要不要升级依赖？")).toBe(false);
     await app.waitUntil(() => posts.length === 1);
     expect(posts[0]).toMatchObject({ text: "D-0001 B" });
-    // the sidebar drops it at once, before the hub's status catches up
-    expect(app.shows("text:要不要升级依赖？")).toBe(true);
-    await app.waitUntil(() => !app.shows("text:要不要升级依赖？"));
+    expect(app.shows("text:要不要升级依赖？")).toBe(false);
   });
 
   test("a next-steps menu takes several items at once", async () => {
