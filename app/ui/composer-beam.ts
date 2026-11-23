@@ -22,11 +22,12 @@ fn shade(uv: vec2f) -> vec4f {
 
   let t = clamp(nsh.time / uniforms.duration, 0.0, 1.0);
   let offset = fract(arc / (4.0 * quarter) - t + 0.5) - 0.5;
-  let width = select(0.12, 0.045, offset > 0.0);
+  let width = select(0.16, 0.05, offset > 0.0);
   let beam = exp(-pow(abs(offset) / width, 2.0));
-  let rim = exp(-pow((depth - 1.0) / 1.35, 2.0));
-  let halo = exp(-max(depth, 0.0) / 5.5);
+  let rim = exp(-pow((depth - 1.2) / 1.8, 2.0));
+  let halo = exp(-max(depth, 0.0) / 12.0);
   let fade = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.88, 1.0, t));
-  let tint = mix(uniforms.tint.rgb, vec3f(0.78, 0.92, 1.0), rim * beam * 0.75);
-  return vec4f(tint, beam * fade * (0.63 * rim + 0.27 * halo) * smoothstep(-0.5, 0.5, depth));
+  let core = exp(-pow(abs(offset) / 0.02, 2.0));
+  let tint = mix(uniforms.tint.rgb, vec3f(0.85, 0.95, 1.0), rim * (0.4 * beam + 0.6 * core));
+  return vec4f(tint, beam * fade * min(1.0, 1.0 * rim + 0.42 * halo) * smoothstep(-0.5, 0.5, depth));
 }`;
