@@ -3191,6 +3191,7 @@ const SETTINGS_TABS = () => [
   ["parallel", L("Parallelism", "并行"), "layers"],
   ["commands", L("Commands", "常用指令"), "terminal"],
   ["mcp", "MCP", "components"],
+  ["claude", "Claude", "system"],
   ["storage", L("Storage", "存储"), "photos"],
   ["version", L("Version", "版本"), "github"],
   ["rules", L("Rules & memory", "规则与记忆"), "scroll"],
@@ -3352,11 +3353,13 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
         <Group title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
           <McpRows settings={props.settings} />
         </Group>
-        <Group title="Claude" hint={CLAUDE_HINT()}>
-          <ClaudeKeyRows settings={props.settings} />
-        </Group>
         <Group title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
           <SecretRows settings={props.settings} />
+        </Group>
+        </If>
+        <If when={on("claude")}>
+        <Group title="Claude" hint={CLAUDE_HINT()}>
+          <ClaudeKeyRows settings={props.settings} />
         </Group>
         </If>
         <If when={on("storage")}>
@@ -3627,17 +3630,20 @@ function ClaudeKeyRows(props: { settings: Settings }) {
   const set = (name: string) => (st.secrets() ?? []).find((k) => k.name === name);
   const open = (name: string) => { d.name.set(name); d.value.set(""); d.note.set(""); d.editing.set(name); };
   return (
-    <Each of={CLAUDE_KEYS} key={(k) => k.name}>
-      {(k, i) => (
-        <SettingsItem first={i() === 0} testID={`claude-key-${k().name}`} style={{ flexDirection: "row", alignItems: "center" }}>
-          <View role="button" accessibilityLabel={k().label()} onPress={() => open(k().name)} style={{ flex: 1, minWidth: 0, gap: 3 }}>
-            <Text style={{ fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().label()}</Text>
-            <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{set(k().name) ? L(`Set ${new Date(set(k().name)!.updated).toLocaleDateString()}`, `设置于 ${new Date(set(k().name)!.updated).toLocaleDateString()}`) : k().hint()}</Text>
-          </View>
-          <Text style={{ fontFamily: MONO, fontSize: 13, color: set(k().name) ? colors.faint : colors.info }}>{set(k().name) ? "••••••" : L("Set", "设置")}</Text>
-        </SettingsItem>
-      )}
-    </Each>
+    <>
+      <Each of={CLAUDE_KEYS} key={(k) => k.name}>
+        {(k, i) => (
+          <SettingsItem first={i() === 0} testID={`claude-key-${k().name}`} onPress={() => open(k().name)} style={{ flexDirection: "row", alignItems: "center" }}>
+              <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+                <Text style={{ fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().label()}</Text>
+                <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{set(k().name) ? L(`Set ${new Date(set(k().name)!.updated).toLocaleDateString()}`, `设置于 ${new Date(set(k().name)!.updated).toLocaleDateString()}`) : k().hint()}</Text>
+              </View>
+              <Text style={{ fontFamily: MONO, fontSize: 13, color: set(k().name) ? colors.faint : colors.info }}>{set(k().name) ? "••••••" : L("Set", "设置")}</Text>
+          </SettingsItem>
+        )}
+      </Each>
+      <SecretEditor settings={st} />
+    </>
   );
 }
 
@@ -3855,6 +3861,7 @@ function SecretEditor(props: { settings: Settings }) {
   const st = props.settings;
   const d = st.secretDraft;
   const isNew = () => d.editing() === "";
+  const exists = () => (st.secrets() ?? []).some((k) => k.name === d.editing());
   const close = () => d.editing.set(undefined);
   const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
   const ok = () => NAME.test(d.name().trim()) && !!d.value();
@@ -3877,7 +3884,7 @@ function SecretEditor(props: { settings: Settings }) {
     >
       <View style={{ width: "100%", maxWidth: 480, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
         <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
-          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{isNew() ? L("Add key", "添加密钥") : L("Replace key", "替换密钥")}</Text>
+          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{exists() ? L("Replace key", "替换密钥") : L("Add key", "添加密钥")}</Text>
           <IconButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
         </View>
         <View style={{ gap: 16, padding: 20 }}>
@@ -3890,12 +3897,12 @@ function SecretEditor(props: { settings: Settings }) {
           </If>
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingBottom: 20, paddingTop: 4 }}>
-          <If when={!isNew()}>
+          <If when={exists()}>
             <Button label={L("Delete", "删除")} variant="danger" icon="trash" onPress={() => void remove()} testID="secret-delete" />
           </If>
           <View style={{ flex: 1 }} />
           <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="secret-cancel" />
-          <Button label={isNew() ? L("Add", "添加") : L("Replace", "替换")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="secret-save" />
+          <Button label={exists() ? L("Replace", "替换") : L("Add", "添加")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="secret-save" />
         </View>
       </View>
     </Dialog>
@@ -4170,11 +4177,11 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       <Section title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
         <McpRows settings={props.settings} />
       </Section>
-      <Section title="Claude" hint={CLAUDE_HINT()}>
-        <ClaudeKeyRows settings={props.settings} />
-      </Section>
       <Section title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
         <SecretRows settings={props.settings} />
+      </Section>
+      <Section title="Claude" hint={CLAUDE_HINT()}>
+        <ClaudeKeyRows settings={props.settings} />
       </Section>
       <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />

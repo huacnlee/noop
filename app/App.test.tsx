@@ -2253,6 +2253,35 @@ describe("commands", () => {
     await app.waitUntil(() => sent.length === 2);
     expect(sent[1]).toEqual({ name: "GITHUB_TOKEN", value: null });
   });
+
+  test("settings has its own Claude section, and pressing anywhere on a row opens the key editor", async () => {
+    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
+    const sent: any[] = [];
+    let keys: { name: string; updated: string }[] = [];
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+      ...server(posts, puts, updates),
+      [`GET ${URL}/api/secrets`]: () => ({ body: { secrets: keys } }),
+      [`PUT ${URL}/api/secrets`]: (r: { body?: string | null }) => {
+        const b = JSON.parse(r.body!); sent.push(b);
+        keys = keys.filter((k) => k.name !== b.name);
+        if (b.value) keys.push({ name: b.name, updated: "2026-11-17T00:00:00Z" });
+        return { body: { secrets: keys } };
+      },
+    } });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-mcp");
+    expect(app.count("id:claude-key-ANTHROPIC_API_KEY")).toBe(0);
+    await app.press("id:settings-tab-claude");
+    await app.press("id:claude-key-ANTHROPIC_API_KEY");
+    await app.waitFor("id:secret-editor");
+    expect(app.count("id:secret-delete")).toBe(0);
+    await app.type("id:secret-value", "sk-ant-api-value");
+    await app.press("id:secret-save");
+    await app.waitUntil(() => sent.length === 1);
+    expect(sent[0]).toEqual({ name: "ANTHROPIC_API_KEY", value: "sk-ant-api-value" });
+    expect(app.shows("text:sk-ant-api-value")).toBe(false);
+  });
 });
 
 
