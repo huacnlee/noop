@@ -3,6 +3,7 @@
 // if framework code changed, pushes a branch + PR so every machine gets the fix. Inspired by Omarchy's
 // "something's wrong → ask AI to fix it" integration.
 import { $ } from "bun";
+import { codexMessages } from "./codex-output";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { arch, homedir, platform, release } from "node:os";
 import { join } from "node:path";
@@ -65,14 +66,15 @@ export async function medic(problem: string, cfg: Cfg, opts: { auto?: boolean; k
   const prompt = PROMPT(problem, await context(), cfg.medic?.push !== false);
   const cmd = cli === "claude"
     ? ["claude", "-p", "--output-format", "text", "--permission-mode", "bypassPermissions", "--disallowedTools", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)"]
-    : ["codex", "exec", "--skip-git-repo-check", "--approve-for-me", "-c", "sandbox_workspace_write.network_access=true", "-"];
+    : ["codex", "exec", "--json", "--skip-git-repo-check", "--approve-for-me", "-c", "sandbox_workspace_write.network_access=true", "-"];
   console.error(`🩺 medic (${cli}) is looking at: ${problem.split("\n")[0].slice(0, 120)}`);
   const p = Bun.spawn(cmd, { cwd: CODE, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe", env: { ...process.env, HUB_NO_MEDIC: "1" } });
   const timer = setTimeout(() => p.kill(), (cfg.medic?.timeout_minutes ?? 30) * 60_000);
-  const out = await new Response(p.stdout).text();
+  const [raw, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+  const out = cli === "codex" ? codexMessages(raw) : raw;
   await p.exited; clearTimeout(timer);
   const log = join(LOGDIR, `${new Date().toISOString().replace(/[:.]/g, "-")}-${kind}.log`);
-  writeFileSync(log, `${problem}\n\n${out}`);
+  writeFileSync(log, `${problem}\n\n${raw}\n\n[stderr]\n${err}`);
   const m = [...out.matchAll(/```json\s*(\{[\s\S]*?\})\s*```/g)].pop();
   let res: any = null; try { res = m ? JSON.parse(m[1]) : null; } catch {}
   const line = res ? `${res.fixed ? "✅ fixed" : "❌ not fixed"}: ${res.summary}${res.owner_action ? L(`\n👉 You need to run: ${res.owner_action}`, `\n👉 你需要执行: ${res.owner_action}`) : ""}${res.pr ? `\nPR: ${res.pr}` : ""}`

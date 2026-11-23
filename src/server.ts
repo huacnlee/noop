@@ -17,7 +17,7 @@ import { basename, join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { accountsInfo } from "./accounts";
 import { cliCommand, startModel } from "./runner";
-import { type Cfg, DATA, L, P, _commitPush, isEnglish, allowedClis, hostName, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
+import { type Cfg, DATA, JOURNAL_DAY, L, P, _commitPush, isEnglish, allowedClis, hostName, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
 import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
@@ -154,7 +154,7 @@ export async function forwardEvent(e: Omit<Event, "id" | "ts">, cfg: Cfg) {
 function journalLines(): string[] {
   const dir = P("journal");
   if (!existsSync(dir)) return [];
-  const files = readdirSync(dir).filter((f) => f.endsWith(".md")).sort().slice(-2);
+  const files = readdirSync(dir).filter((f) => JOURNAL_DAY.test(f)).sort().slice(-2);
   return files.flatMap((f) => readFileSync(`${dir}/${f}`, "utf8").split("\n").filter((l) => l.startsWith("- ")).map((l) => `${f.slice(0, 10)} ${l.slice(2)}`));
 }
 
@@ -401,7 +401,7 @@ export function withAttachments(text: string, files: string[], missing = 0): str
   if (!files.length && !missing) return text;
   const lines = files.map((f) => `- ${f}`);
   if (missing) lines.push(`- (${missing} more image(s) could not be downloaded)`);
-  return `${text.trim() || "(see the attached images)"}\n\nAttached images from the owner (absolute paths on the primary host; open them to see):\n${lines.join("\n")}`;
+  return `${text.trim() || "(see the attached images)"}\n\nAttached images from the owner (absolute paths on the primary host; open them to see; a .md is a long text the owner pasted):\n${lines.join("\n")}`;
 }
 
 export async function handleOwnerMessage(

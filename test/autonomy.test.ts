@@ -49,6 +49,10 @@ test("open batch with stale tasks is closed and rebuilt (no deadlock)", async ()
   // the task the owner never saw (T-0003) comes first: a rebuild must surface it, not bury it behind T-0002
   expect(readDoc(P("decisions", "open", "P-0002.md")).meta.items).toBe("T-0003,T-0002");
   expect(sent.length).toBe(2);
+  expect(core.precedents()).toBe("");
+  expect(A.resolveProposals("P-0002", "1", "owner(chat)")).toBe(true);
+  expect(core.precedents()).toContain("P-0002");
+  expect(core.precedents()).not.toContain("P-0001");
 });
 
 test("an unanswered batch stopped at nine never hides proposals that arrived later", async () => {
@@ -197,6 +201,49 @@ test("routine dedupe: parked (waiting/blocked) copies never block the next run",
   expect(A.routineQueued("parked")).toBe("");
 });
 
+test("routine dedupe: a checkpointed copy that will resume still blocks the next run", () => {
+  // the work-limit checkpoint parks the copy in tasks/waiting, but its pass is not finished: the daemon resumes it,
+  // so a copy minted in the meantime runs the same routine twice (T-2270 + T-2274, 2026-11-21)
+  writeDoc(P("tasks", "waiting", "T-0111.md"), {
+    id: "T-0111", source: "routine:triage-inbound", wait_kind: "ci", wait_minutes: "5",
+    waiting_on: "checkpoint saved after the work limit; resume T-0111 from /tmp/T-0111.log",
+  }, "");
+  expect(A.routineQueued("triage-inbound")).toBe("T-0111");
+  // an ordinary wait on CI has finished its pass and must not hold the next run back
+  writeDoc(P("tasks", "waiting", "T-0112.md"), { id: "T-0112", source: "routine:own-prs-ci", wait_kind: "ci", waiting_on: "CI run 123" }, "");
+  expect(A.routineQueued("own-prs-ci")).toBe("");
+});
+
+test("a queued copy no known host can run is retired, so the routine runs on its current config", () => {
+  // own-prs-ci T-0406 asked for cli:git (no host reports it) and held the routine from 2026-11-10 on
+  const missing = (reqs: string[]) => reqs.find((r) => !["os:macos", "cli:gh"].includes(r)) ?? "";
+  writeDoc(P("tasks", "inbox", "T-0121.md"), { id: "T-0121", source: "routine:own-prs-ci", requires: "cli:gh,cli:git", host: "any" }, "body");
+  expect(A.retireUnrunnableCopy("T-0121", missing)).toBe("cli:git");
+  expect(files("tasks", "inbox")).toEqual([]);
+  expect(readDoc(P("tasks", "rejected", "T-0121.md")).meta.approval).toBe("superseded:unrunnable");
+  writeDoc(P("tasks", "inbox", "T-0122.md"), { id: "T-0122", source: "routine:own-prs-ci", requires: "cli:gh" }, "body");
+  expect(A.retireUnrunnableCopy("T-0122", missing)).toBe(""); // a runnable copy stays queued
+  expect(A.routineQueued("own-prs-ci")).toBe("T-0122");
+});
+
+test("a proposed copy no known host can run is retired too, so routines_starved stops reporting it", () => {
+  // pr-review requires os:linux in a macOS-only fleet: #288 stops minting new copies, so the copy that was already
+  // waiting for approval (T-2264, 2026-11-20) is never superseded and would sit in tasks/proposed for good
+  const missing = (reqs: string[]) => reqs.find((r) => r === "os:linux") ?? "";
+  const cfgA = { autonomy: { level: "onboarding" }, routine: [{ name: "pr-review", requires: "os:linux" }] } as any;
+  writeDoc(P("tasks", "proposed", "T-0301.md"), { id: "T-0301", title: "t", agent: "reviewer", source: "routine:pr-review", created: ago(60), requires: "os:linux" }, "body");
+  expect(A.routinesAwaitingApproval(cfgA).map((r) => r.name)).toEqual(["pr-review"]);
+  expect(A.retireUnrunnableProposed("pr-review", missing)).toEqual([{ id: "T-0301", why: "os:linux" }]);
+  expect(files("tasks", "proposed")).toEqual([]);
+  expect(readDoc(P("tasks", "rejected", "T-0301.md")).meta.approval).toBe("superseded:unrunnable");
+  expect(A.routinesAwaitingApproval(cfgA)).toEqual([]);
+  // a runnable copy still waits for the owner, and another routine's copies are left alone
+  writeDoc(P("tasks", "proposed", "T-0302.md"), { id: "T-0302", title: "t", agent: "reporter", source: "routine:pr-review", created: ago(60) }, "body");
+  writeDoc(P("tasks", "proposed", "T-0303.md"), { id: "T-0303", title: "t", agent: "reviewer", source: "routine:other", created: ago(60), requires: "os:linux" }, "body");
+  expect(A.retireUnrunnableProposed("pr-review", missing)).toEqual([]);
+  expect(files("tasks", "proposed")).toEqual(["T-0302.md", "T-0303.md"]);
+});
+
 test("a copy parked on an unanswered decision is found only while that decision is open", () => {
   writeDoc(P("decisions", "open", "D-0004.md"), { id: "D-0004", question: "告警源？" }, "x");
   writeDoc(P("tasks", "waiting", "T-0201.md"), {
@@ -319,4 +366,34 @@ test("built-in routines: every config has security-check (read-only, each machin
   expect(r[0].every).toBe("daily 08:00");
   expect(r[0].builtin).toBeUndefined();
   rmSync(P("config.toml"));
+});
+
+test("a routine whose copies wait for approval is reported, not silently dead", () => {
+  // onboarding lets evolve/daily-report/learn/idle copy run; anything else is batched for the owner
+  const first = ago(600);
+  task("proposed", "T-0031", "routine:weekly-report", first);
+  task("proposed", "T-0032", "routine:weekly-report", ago(120));
+  task("proposed", "T-0033", "routine:evolve");      // allowed → not waiting on the owner
+  task("proposed", "T-0034", "followup");            // not a routine copy
+  const out = A.routinesAwaitingApproval({ ...cfg, routine: [...cfg.routine, { name: "weekly-report" }] });
+  expect(out.map((r) => r.name)).toEqual(["weekly-report"]);
+  expect(out[0].copies).toEqual(["T-0031", "T-0032"]);
+  expect(out[0].since).toBe(first); // oldest copy, so the owner sees how long it has been dead
+});
+
+test("a copy whose routine was removed from config.toml is a leftover, not a routine waiting on the owner", () => {
+  // the owner deleted workflow-coach from config.toml; its old copy stays in tasks/proposed and nothing can approve it
+  task("proposed", "T-0051", "routine:workflow-coach", ago(2880));
+  expect(A.routinesAwaitingApproval(cfg)).toEqual([]);
+  // the same copy under a config that still declares the routine is reported again
+  const kept = { ...cfg, routine: [...cfg.routine, { name: "workflow-coach" }] };
+  expect(A.routinesAwaitingApproval(kept).map((r) => r.copies)).toEqual([["T-0051"]]);
+});
+
+test("a read-only or auto routine is never reported as waiting for approval", () => {
+  task("proposed", "T-0041", "routine:uptime-watch"); // readonly = true in cfg
+  task("proposed", "T-0042", "routine:uptime-watch");
+  expect(A.routinesAwaitingApproval(cfg)).toEqual([]);
+  const auto = { autonomy: { level: "onboarding", auto_routines: ["uptime-watch"] }, routine: cfg.routine };
+  expect(A.routinesAwaitingApproval(auto)).toEqual([]);
 });

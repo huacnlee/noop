@@ -265,6 +265,22 @@ export function imageType(type: string | undefined, name: string): string | null
   return IMAGE_EXT[(name.match(/\.(\w+)$/)?.[1] ?? "").toLowerCase()] ?? null;
 }
 
+/** A paste this long goes with the message as a Markdown file, not into the box: it would bury the draft and the timeline. */
+export const PASTE_FILE_CHARS = 4000;
+export const PASTE_FILE_LINES = 80;
+export function pasteAsFile(text: string): boolean {
+  if (text.length > PASTE_FILE_CHARS) return true;
+  let lines = 1;
+  for (let i = text.indexOf("\n"); i >= 0 && lines <= PASTE_FILE_LINES; i = text.indexOf("\n", i + 1)) lines++;
+  return lines > PASTE_FILE_LINES;
+}
+/** `text` put in place of `start..end` of `value`; `at` is where the caret goes after it. */
+export function insertText(value: string, text: string, sel: { start: number; end: number } | null): { value: string; at: number } {
+  const start = Math.min(sel?.start ?? value.length, value.length);
+  const end = Math.max(start, Math.min(sel?.end ?? start, value.length));
+  return { value: value.slice(0, start) + text + value.slice(end), at: start + text.length };
+}
+
 /** Why a file cannot be attached ("" when it can). */
 export function attachProblem(type: string | null, size: number, count: number): string {
   if (!type) return L("Only images can be sent", "只能发送图片");

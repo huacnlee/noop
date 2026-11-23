@@ -32,15 +32,19 @@ test("metrics attribute retained rejected tasks to their recorded disposition", 
     rejected("T-11", { approval: "rejected:P-5" });
     rejected("T-12", { approval: "rejected:P-6" });
 
+    rejected("T-13", { approval: "superseded:D-M0020" });
+    rejected("T-14", { approval: "superseded:unrunnable" });
+    rejected("T-15", { approval: "superseded:unknown" });
+
     const run = Bun.spawnSync([process.execPath, "src/cli.ts", "metrics", "1"], {
       env: { ...process.env, NOOP_HOME: root, HUB_DATA: data, HUB_SYNC: "local" },
     });
     expect(run.exitCode).toBe(0);
     const metrics = JSON.parse(readFileSync(join(data, "fleet", "metrics.json"), "utf8"));
-    expect(metrics.proposals_rejected_total).toBe(12);
+    expect(metrics.proposals_rejected_total).toBe(15);
     expect(metrics.rejected_task_reasons).toEqual({
-      scope: "all_retained_records", system_superseded: 1, cancelled: 1,
-      owner_batch_none: 1, owner_batch_unselected: 1, unclassified: 8,
+      scope: "all_retained_records", system_superseded: 2, system_unrunnable: 1, cancelled: 1,
+      owner_batch_none: 1, owner_batch_unselected: 1, unclassified: 9,
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

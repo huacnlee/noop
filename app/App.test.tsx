@@ -1215,6 +1215,21 @@ describe("images", () => {
     expect(posts[0]).toMatchObject({ text: "", attachments: ["/media/shot-1.png"] });
   });
 
+  test("a long paste goes as a Markdown file; a short one goes into the box", async () => {
+    const posts: { text: string; attachments?: string[] }[] = [];
+    const uploads: string[] = [];
+    const app = await open("./App.tsx", { ...desk, network: withUploads(posts, uploads) });
+    await app.waitFor("id:composer");
+    await app.paste("id:composer", { text: "看这个" });
+    expect(app.value("id:composer")).toBe("看这个");
+    await app.paste("id:composer", { text: Array(200).fill("log line").join("\n") });
+    await app.waitFor("id:pasted-doc");
+    expect(app.value("id:composer")).toBe("看这个");
+    await app.submit("id:composer");
+    await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
+    expect(posts[0]).toMatchObject({ text: "看这个", attachments: ["/media/shot-1.png"] });
+  });
+
   test("in a channel a pasted image sends there, and sending lands on the newest message", async () => {
     const chans = [{ slug: "nsh-i18n", name: "NSH i18n", goal: "NSH 多语言", status: "active", created: ts(-900), last_activity: ts(60), stale: false, count: 0, refs: [], items: [] }];
     const talk = Array.from({ length: 60 }, (_, i) => ({ id: `c${i}`, ts: ts(i), from: "lead@primary", kind: "notice", text: `Channel line ${i}\n${"Some longer content. ".repeat(6)}`, channel: "nsh-i18n" }));

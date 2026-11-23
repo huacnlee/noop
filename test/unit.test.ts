@@ -54,9 +54,19 @@ test("external signature links the Noop name to its site", () => {
   );
 });
 
+test("external signature never mentions the template's placeholder login", () => {
+  const tail = (github?: string) => signature("lead", "host", { owner: { github } } as Cfg).split(" · ")[1];
+  expect(tail("your-github")).toBe("AI agent acting for its owner");
+  expect(tail(undefined)).toBe("AI agent acting for its owner");
+  expect(tail("")).toBe("AI agent acting for its owner");
+  expect(tail("@huacnlee")).toBe("AI agent acting for @huacnlee");
+});
+
 test("result parsing", () => {
   expect(parseResult('blah\n```json\n{"status":"done","summary":"ok"}\n```').status).toBe("done");
   expect(parseResult("no block").status).toBe("failed");
+  expect(parseResult('```json\n{"status":"done","followups":[{"title":"A"},{"title":"B"}]}\n```').summary).toBe("Dispatched 2: A; B");
+  expect(parseResult('```json\n{"status":"done"}\n```').summary).toBe("(done, no summary)");
   // codex sometimes ends its reply with a bare JSON object instead of a fenced ```json block
   expect(parseResult('{"status":"done","summary":"ok"}').status).toBe("done");
 });
@@ -321,6 +331,22 @@ test("pickTask: a task no machine here can run (needs another OS) never holds ba
   const picked = pickTask(cfg);
   if (picked === null && !Bun.which("claude") && !Bun.which("codex")) return; // no AI CLI here: nothing is pickable
   expect(picked).toContain("T-9002");
+});
+
+test("pickTask: a heavy task no host has headroom for starts after heavy_wait_minutes, never on a saturated host", async () => {
+  const { pickTask, writeDoc, P } = await import("../src/core");
+  const cfg = { clis: { default: ["claude", "codex"] } } as any;
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 2 * 3600_000).toISOString();
+  // heavyOk=false everywhere here: no host reports heavy headroom (the evolve-deep case: memory under 25%)
+  writeDoc(P("tasks", "inbox", "T-9011.md"), { id: "T-9011", title: "heavy, waited 2h", agent: "lead", weight: "heavy", priority: "urgent", planned: now, created: old }, "x");
+  writeDoc(P("tasks", "inbox", "T-9013.md"), { id: "T-9013", title: "heavy, just queued", agent: "lead", weight: "heavy", priority: "urgent", planned: now, created: now }, "y");
+  if (!Bun.which("claude") && !Bun.which("codex")) return; // no AI CLI here: nothing is pickable
+  expect(pickTask(cfg, 0.2, false)).toContain("T-9011"); // waited long enough: the gate lapses, the fresh copy still waits
+  expect(pickTask(cfg, 0.95, false) ?? "").not.toContain("T-9011"); // saturated host: still no heavy work
+  rmSync(P("tasks", "inbox", "T-9011.md"));
+  expect(pickTask(cfg, 0.2, false) ?? "").not.toContain("T-9013");
+  rmSync(P("tasks", "inbox", "T-9013.md"));
 });
 
 test("a reply to an agent's message goes to the brain with that task, never as an amendment of the last decision", async () => {
@@ -642,6 +668,23 @@ test("checkWaits: a wait that finished while the daemon was down still wakes aft
   rmSync(flag, { force: true });
 });
 
+test("Codex keeps the completed result before an empty hook turn and ignores tool output", async () => {
+  const { codexMessages } = await import("../src/codex-output");
+  const result = '```json\n{"status":"done","summary":"captured"}\n```';
+  const lines = [
+    { type: "item.completed", item: { type: "agent_message", text: result } },
+    { type: "item.completed", item: { type: "command_execution", aggregated_output: '```json\n{"status":"failed"}\n```' } },
+    { type: "item.completed", item: { type: "agent_message", text: "" } },
+    { type: "turn.completed" },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const cfg = { clis: { codex: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
+  const log = `${tmpdir()}/noop-codex-${process.pid}.log`;
+  try {
+    expect(parseResult(await runAgent("codex", "", tmpdir(), cfg, log))).toMatchObject({ status: "done", summary: "captured" });
+    expect(parseResult(codexMessages(lines))).toMatchObject({ status: "done", summary: "captured" });
+  } finally { rmSync(log, { force: true }); }
+});
+
 test("gate_override relaxes only the approvable gates", () => {
   const cfg = { gates: { extra: ["Bash(kubectl delete:*)"] } } as unknown as Cfg;
   const full = cliCommand("claude", cfg);
@@ -744,4 +787,10 @@ test("readAll names the files that no longer fit instead of dropping them silent
     expect(out.endsWith("C".repeat(300))).toBe(true);
     expect(out.length).toBeLessThan(400 + first.length + 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a long paste uploads as Markdown; other text types stay refused", async () => {
+  const { uploadProblem } = await import("../cloud/src/uploads");
+  expect(uploadProblem("text/markdown", 10)).toBeNull();
+  expect(uploadProblem("text/html", 10)?.status).toBe(415);
 });

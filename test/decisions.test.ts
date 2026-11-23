@@ -163,3 +163,16 @@ test("a different task still gets its own card", () => {
   const b = dec.openDecision({ id: "T-0011", agent: "lead" }, r, "h");
   expect(a).not.toBe(b);
 });
+
+test("a fresh menu card closes the older unanswered one and parks its idle task", () => {
+  const r = (q: string) => ({ status: "needs_decision", summary: "idle", question: q, recommendation: "1", options: ["1. a", "2. b"] }) as any;
+  core.writeDoc(core.P("tasks", "blocked", "T-0401.md"), { id: "T-0401", agent: "chief-of-staff", kind: "menu", source: "idle" }, "old menu");
+  const old = dec.openDecision({ id: "T-0401", agent: "chief-of-staff", kind: "menu" }, r("What next?"), "h");
+  const neu = dec.openDecision({ id: "T-0402", agent: "chief-of-staff", kind: "menu" }, r("What next?"), "h");
+  expect(existsSync(core.P("decisions", "open", `${old}.md`))).toBe(false);
+  expect(closed(old).answer).toBe("superseded (refreshed)");
+  expect(closed(old).answered_by).toBe("system");
+  expect(existsSync(core.P("decisions", "open", `${neu}.md`))).toBe(true);
+  expect(existsSync(core.P("tasks", "blocked", "T-0401.md"))).toBe(false);
+  expect(core.readDoc(core.P("tasks", "rejected", "T-0401.md")).meta.approval).toBe("superseded:T-0402");
+});

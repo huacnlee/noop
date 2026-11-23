@@ -63,6 +63,19 @@ test("keep going first: retired host → reroute, answered card → resume, no w
   expect(classify(task({ id: "T-5", children: "T-6" }), ctx())).toBeNull(); // delegated parent
 });
 
+test("a next-steps menu whose card was replaced is parked, never woken to ask again", () => {
+  // 2026-11-19: T-0059 and T-0062 each closed the other's menu card, so every tick one of them was "answered but
+  // did not continue" → resumed → raised a card that replaced the other → 17 cards in 14 hours, none answered.
+  const closed = ctx({ decision: () => "closed" });
+  const m = classify(task({ id: "T-1", decision: "D-9", kind: "menu", source: "idle" }, "blocked"), closed)!;
+  expect(m.action).toBe("park");
+  expect(m.cause).toBe("menu:D-9");
+  // an ordinary task on a closed card still resumes: that path carries a real answer into the run
+  expect(classify(task({ id: "T-2", decision: "D-9" }, "blocked"), closed)!.action).toBe("resume");
+  // a menu task woken by the owner's own answer arrives in the inbox, not blocked; open cards keep it parked
+  expect(classify(task({ id: "T-3", decision: "D-9", kind: "menu" }, "blocked"), ctx({ decision: () => "open" }))).toBeNull();
+});
+
 test("parked on the owner: human waits and blocked waits naming an open card are never clock-escalated", () => {
   const late = { created: new Date(NOW - 5 * H).toISOString() }; // well past maxAgeHours
   expect(classify(task({ id: "T-1", ...late, wait_kind: "human" }), ctx())).toBeNull();
@@ -135,6 +148,25 @@ test("supervise(): one card per cause, never twice; answering resumes every task
   expect(readFileSync(P("journal", `${new Date().toLocaleDateString("sv-SE")}.md`), "utf8")).toContain("supervisor ran");
 });
 
+test("supervise(): a replaced menu task goes to tasks/rejected instead of coming back as a new card", () => {
+  const id = "T-9501-test";
+  const blocked = P("tasks", "blocked", `${id}.md`);
+  const rejected = P("tasks", "rejected", `${id}.md`);
+  const card = P("decisions", "closed", "D-9501.md");
+  try {
+    mkdirSync(P("tasks", "rejected"), { recursive: true });
+    writeDoc(blocked, { id, title: "Propose next actions (fleet idle)", agent: "chief-of-staff", kind: "menu", source: "idle", decision: "D-9501", created: new Date(NOW).toISOString() }, "menu");
+    writeDoc(card, { id: "D-9501", kind: "menu", task: id, answer: "superseded by D-9502", answered_by: "chief-of-staff" }, "c");
+    const n = supervise({}, "test", NOW, () => "OPEN");
+    expect(n.parked).toBe(1);
+    expect(n.resume).toBe(0);
+    expect(existsSync(blocked)).toBe(false);
+    expect(existsSync(P("tasks", "inbox", `${id}.md`))).toBe(false);
+    expect(readDoc(rejected).meta.approval).toBe("superseded:D-9501");
+    expect(supervise({}, "test", NOW, () => "OPEN").parked).toBe(0); // gone: never parked twice
+  } finally { for (const p of [blocked, rejected, P("tasks", "inbox", `${id}.md`), card]) rmSync(p, { force: true }); }
+});
+
 test("closeDecision on a supervisor card never sets gate_override", () => {
   writeDoc(P("decisions", "open", "D-9001.md"), { id: "D-9001", task: "T-0201", tasks: "T-0201,T-0202", supervisor_cause: "no-wait", question: "q" }, "c");
   for (const id of ["T-0201", "T-0202"]) writeDoc(P("tasks", "blocked", `${id}.md`), { id, title: id, decision: "D-9001" }, "b");
@@ -170,7 +202,7 @@ test("trackedPrs reads PR urls from spec and repo #N from title, not from run lo
 });
 
 
-test("merged PRs wake a task once for acceptance checks instead of completing it", () => {
+test("merged PRs wake a task once for acceptance checks; waiting again afterwards closes it with a verification gap", () => {
   const id = "T-9406-test";
   const waiting = P("tasks", "waiting", `${id}.md`);
   const inbox = P("tasks", "inbox", `${id}.md`);
@@ -186,10 +218,13 @@ test("merged PRs wake a task once for acceptance checks instead of completing it
     expect(resumed.meta.resumed).toBe("yes");
     expect(resumed.body).toContain("Check remaining acceptance criteria");
     rmSync(inbox);
-    writeDoc(waiting, { ...resumed.meta, waiting_on: "Need screenshot" }, resumed.body!);
+    writeDoc(waiting, { ...resumed.meta, waiting_on: "Need screenshot", wait_kind: "ci" }, resumed.body!);
     supervise({}, "test", NOW, () => { throw new Error("Must not recheck a handled merge"); }, () => false);
-    expect(existsSync(waiting)).toBe(true);
+    expect(existsSync(waiting)).toBe(false);
     expect(existsSync(inbox)).toBe(false);
+    const closed = readDoc(done);
+    expect(closed.meta.status).toBe("done");
+    expect(closed.body).toContain("verification recorded as a gap: Need screenshot");
   } finally {
     for (const path of [waiting, inbox, done]) rmSync(path, { force: true });
   }

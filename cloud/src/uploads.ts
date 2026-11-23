@@ -3,7 +3,8 @@
 
 export const MAX_UPLOAD = 10 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 10;
-const UPLOAD_TYPES = /^image\/(png|jpeg|gif|webp|heic|heif|avif|bmp)$/;
+// text/markdown: a long paste the app sends as a file instead of a wall of text in the message
+const UPLOAD_TYPES = /^(image\/(png|jpeg|gif|webp|heic|heif|avif|bmp)|text\/markdown)$/;
 
 /** The image's real type from its first bytes. Phone clients often send no type, "image/jpg" or
  * "application/octet-stream" for photos; trusting the bytes is both more lenient and safer. */
@@ -25,8 +26,8 @@ export function sniffImage(head: Uint8Array, declared = ""): string {
 
 /** Why the owner's upload is refused (null: it is taken). SVG is refused: it can carry script. */
 export function uploadProblem(type: string, size: number): { error: string; status: number } | null {
-  if (!UPLOAD_TYPES.test(type)) return { error: "images only (png, jpeg, gif, webp, heic, bmp)", status: 415 };
-  if (size > MAX_UPLOAD) return { error: "image too large (10 MB max)", status: 413 };
+  if (!UPLOAD_TYPES.test(type)) return { error: "images (png, jpeg, gif, webp, heic, bmp) or Markdown only", status: 415 };
+  if (size > MAX_UPLOAD) return { error: "file too large (10 MB max)", status: 413 };
   if (!size) return { error: "empty file", status: 400 };
   return null;
 }

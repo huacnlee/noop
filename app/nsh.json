@@ -3,6 +3,7 @@
   "id": "dev.noop.app",
   "version": "1.0.1",
   "build": 1,
+  "features": ["websocket"],
   "updater": {
     "url": "https://noop.allsum.io/api/updates/direct/latest.json",
     "publicKey": "th7UtLhBOa73Bx2s+DZlmlH4EhKcxk5YLYHZQxSgb6I=",

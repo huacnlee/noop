@@ -72,4 +72,7 @@ test("a fleet day stays under the free-plan target", async () => {
   console.log(`fleet day: ${requests} requests (target ${TARGET.requests}), ~${rowsWritten} rows written (target ${TARGET.rowsWritten})`);
   expect(requests).toBeLessThanOrEqual(TARGET.requests);
   expect(rowsWritten).toBeLessThanOrEqual(TARGET.rowsWritten);
-}, 600_000); // filesystem-bound (~4k lock/state writes): ~2 min on a busy Mac with a nearly full disk, so 120 s was too tight
+}, 1_200_000); // filesystem-bound (a lock + state write per simulated minute): ~2 min on an idle Mac, but 601-651 s
+// measured on this host at load 100-370 with a 99%-full disk and 15-23 GB of swap in use, where the local lock/state
+// writes stall. The 600 s guard rolled three valid releases back in one day; 1200 s keeps the same assertions and
+// simulated day and only moves the wall-clock guard.

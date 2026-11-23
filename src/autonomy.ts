@@ -26,6 +26,11 @@ export function needsApproval(cfg: Cfg, source: string): boolean {
 const QUEUED = ["inbox", "active", "waiting", "blocked"];
 const isRoutine = (m: Record<string, string>, name: string) => (m.source ?? "").replace(/^approved:/, "") === `routine:${name}`;
 
+/** A copy parked by the work-limit checkpoint (src/cli.ts checkpointFallback): its pass is NOT finished — the daemon
+ *  resumes it — so it must keep blocking a fresh copy, or the resumed run races one minted meanwhile. */
+const isCheckpointWait = (m: Record<string, string>) =>
+  m.wait_kind === "ci" && (m.waiting_on ?? "").startsWith("checkpoint saved after the work limit");
+
 /** Id of a copy of this routine that is queued or running (so a new run would be redundant), else "".
  *  `host`: a per-machine routine (scheduler "each") only counts its own machine's copies. */
 export function routineQueued(name: string, host?: string): string {
@@ -33,8 +38,9 @@ export function routineQueued(name: string, host?: string): string {
     const m = readDoc(p).meta;
     if (!isRoutine(m, name) || (host && m.host !== host)) continue;
     // a copy parked on something slow (CI, the owner clicking merge) has finished its pass: the next run must still
-    // pick up new PRs/issues instead of the backlog piling up behind it
-    if (s === "waiting" || s === "blocked") continue;
+    // pick up new PRs/issues instead of the backlog piling up behind it. A work-limit checkpoint is the exception:
+    // it resumes, so minting now gives the same routine two concurrent runs (T-2270 + T-2274, 2026-11-21).
+    if ((s === "waiting" || s === "blocked") && !isCheckpointWait(m)) continue;
     return m.id;
   }
   return "";
@@ -76,6 +82,51 @@ export function noteStuckRoutine(cfg: Cfg, name: string, id: string, state: Reco
   void notify(`例行任务 ${name} 已经 ${mins} 分钟没有新的一轮：上一次的 ${id} 在等一台满足 ${m.requires} 的在线主机，之后每轮都被跳过。`, cfg, { kind: "notice", ref: id });
 }
 
+/** Routines that fire on schedule but can only start once the owner approves a batch: their copies wait in
+ *  tasks/proposed. In config.toml such a routine looks healthy and the scheduler really does mint a copy every
+ *  period, so nothing anywhere says it never produced anything — an owner who does not answer cards gets a dead
+ *  routine that reads as a working one (`weekly-report` / `workflow-coach` under onboarding, 2026-11-20). */
+export function routinesAwaitingApproval(cfg: Cfg): { name: string; copies: string[]; since: string }[] {
+  const out = new Map<string, { name: string; copies: string[]; since: number }>();
+  for (const p of list(P("tasks", "proposed"), /^T-.*\.md$/)) {
+    const m = readDoc(p).meta;
+    const source = m.source ?? "";
+    const name = source.match(/^routine:(.+)$/)?.[1];
+    if (!name || !needsApproval(cfg, source)) continue; // runs without approval, or not a routine copy
+    // The routine itself may have been removed from config.toml (its copies then sit in tasks/proposed for good).
+    // Nothing will ever mint or approve it again, so it is a leftover, not a routine waiting on the owner.
+    if (!(cfg.routine ?? []).some((r: any) => r.name === name)) continue;
+    const created = Date.parse(m.created ?? "");
+    const e = out.get(name) ?? { name, copies: [], since: Number.isNaN(created) ? Date.now() : created };
+    e.copies.push(m.id);
+    if (!Number.isNaN(created)) e.since = Math.min(e.since, created);
+    out.set(name, e);
+  }
+  return [...out.values()]
+    .map((e) => ({ name: e.name, copies: e.copies, since: new Date(e.since).toISOString() }))
+    .sort((a, b) => a.since.localeCompare(b.since));
+}
+
+/** A copy waiting for approval whose own requirements no known host meets can never run: approving it only moves
+ *  it into the inbox, where retireUnrunnableCopy discards it one tick later. After #288 the scheduler stops minting
+ *  new copies of such a routine, so `supersedeProposed` never fires either and the copy sits in tasks/proposed for
+ *  good — keeping `routines_starved` red (pr-review T-2264 since 2026-11-20) and able to surface in an approval
+ *  batch as an option that cannot run. Retire it at the routine's next due tick, exactly like the inbox copy. */
+export function retireUnrunnableProposed(name: string, missing: (reqs: string[]) => string): { id: string; why: string }[] {
+  const out: { id: string; why: string }[] = [];
+  for (const p of list(P("tasks", "proposed"), /^T-.*\.md$/)) {
+    const { meta, body } = readDoc(p);
+    if (!isRoutine(meta, name) || meta.id !== fileId(p)) continue;
+    const pin = meta.host && meta.host !== "any" ? `host:${meta.host}` : "";
+    const why = missing([...(meta.requires ?? "").split(","), pin].map((s) => s.trim()).filter(Boolean));
+    if (!why) continue;
+    writeDoc(P("tasks", "rejected", `${meta.id}.md`), { ...meta, approval: "superseded:unrunnable" }, body + `\n\n## Note\nno known host has ${why}\n`);
+    unlinkSync(p);
+    out.push({ id: meta.id, why });
+  }
+  return out;
+}
+
 /** A newer run of a routine replaces its older unapproved copies: move them to rejected with a note. */
 export function supersedeProposed(name: string, newId: string, host?: string): string[] {
   const out: string[] = [];
@@ -87,6 +138,22 @@ export function supersedeProposed(name: string, newId: string, host?: string): s
     out.push(meta.id);
   }
   return out;
+}
+
+/** A copy waiting in the inbox for a capability no known host has never starts, and while it waits every later run is
+ *  skipped as "still queued", so editing the routine's `requires` never takes effect (own-prs-ci T-0406 asked for
+ *  cli:git, which no host reports, and held the routine from 2026-11-10 on). Retires such a copy to tasks/rejected
+ *  and returns the missing capability, else "". `missing` returns the first requirement no known host meets. */
+export function retireUnrunnableCopy(id: string, missing: (reqs: string[]) => string): string {
+  const f = P("tasks", "inbox", `${id}.md`);
+  if (!existsSync(f)) return "";
+  const { meta, body } = readDoc(f);
+  const pin = meta.host && meta.host !== "any" ? `host:${meta.host}` : "";
+  const why = missing([...(meta.requires ?? "").split(","), pin].map((s) => s.trim()).filter(Boolean));
+  if (!why) return "";
+  writeDoc(P("tasks", "rejected", `${id}.md`), { ...meta, approval: "superseded:unrunnable" }, body + `\n\n## Note\nno known host has ${why}\n`);
+  unlinkSync(f);
+  return why;
 }
 
 /** Judge may only auto-decide outside onboarding. */
@@ -204,9 +271,8 @@ export function resolveProposals(id: string, answer: string, by: string): boolea
 }
 
 /** Shadow-judge accuracy: how often the judge's would-be answer matched the owner's. */
-export function judgeAccuracy(agent?: string) {
-  const rows = list(P("decisions", "closed")).map((p) => readDoc(p).meta)
-    .filter((m) => m.shadow_verdict && /^owner/.test(m.answered_by ?? "") && (!agent || m.agent === agent));
+export function judgeAccuracy(agent?: string, closedCards = list(P("decisions", "closed")).map((p) => readDoc(p).meta)) {
+  const rows = closedCards.filter((m) => m.shadow_verdict && /^owner/.test(m.answered_by ?? "") && (!agent || m.agent === agent));
   // every owner-answered decision the judge also answered counts (held ones too): shadow_agree is set by closeDecision
   const scored = rows.filter((m) => m.shadow_agree === "yes" || m.shadow_agree === "no");
   const agree = scored.filter((m) => m.shadow_agree === "yes");
