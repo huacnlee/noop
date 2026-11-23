@@ -76,3 +76,17 @@ test("quota cooldown selects API then returns to subscription automatically", as
     expect(pickAccount(cfg, ["claude"])?.auth).toBe("oauth");
   } finally { writeFileSync(state, saved); }
 });
+
+test("shared Claude keys from Settings win over a machine's settings.json, without mixing in its base URL", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "noop-api-"));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ env: { ANTHROPIC_API_KEY: "local", ANTHROPIC_BASE_URL: "https://gw.local" } }));
+  expect(claudeApiEnv(dir, {})).toEqual({ ANTHROPIC_API_KEY: "local", ANTHROPIC_BASE_URL: "https://gw.local" });
+  expect(claudeApiEnv(dir, { ANTHROPIC_API_KEY: "shared" })).toEqual({ ANTHROPIC_API_KEY: "shared" });
+  expect(claudeApiEnv(dir, { ANTHROPIC_API_KEY: "shared", ANTHROPIC_BASE_URL: "https://gw.team" })).toEqual({ ANTHROPIC_API_KEY: "shared", ANTHROPIC_BASE_URL: "https://gw.team" });
+});
+
+test("a shared setup-token is the subscription login on every machine", async () => {
+  const { claudeOAuthToken } = await import("../src/accounts");
+  const a = { cli: "claude", name: "default", dir: "", default: true, auth: "oauth" as const };
+  expect(claudeOAuthToken(a, { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-shared" })).toBe("sk-ant-oat-shared");
+});

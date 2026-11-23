@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Cfg, L, hostName, journal, HOME_DIR } from "./core";
 import { notify } from "./notify";
+import { cachedSecrets } from "./secrets";
 
 const HOME = join(HOME_DIR, "accounts");
 const STATE = join(HOME, "state.json");
@@ -33,14 +34,24 @@ export function accounts(cfg: Cfg, cli: string): Account[] {
   return [primary];
 }
 
-/** Credentials stay on the machine; underscore-prefixed entries are the owner's parked fallback. */
-export function claudeApiEnv(dir = join(homedir(), ".claude")): Record<string, string> {
+/** Claude API credentials, in order: the team's shared keys set once in Noop's Settings → Keys (every machine), then
+ *  this machine's ~/.claude/settings.json, where underscore-prefixed entries are the owner's parked fallback.
+ *  A shared key always comes with its own base URL (or none): a machine's gateway URL never pairs with a shared key. */
+export const CLAUDE_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+export function claudeApiEnv(dir = join(homedir(), ".claude"), shared: Record<string, string> = cachedSecrets()): Record<string, string> {
+  if (shared.ANTHROPIC_API_KEY) return Object.fromEntries([["ANTHROPIC_API_KEY", shared.ANTHROPIC_API_KEY], ...(shared.ANTHROPIC_BASE_URL ? [["ANTHROPIC_BASE_URL", shared.ANTHROPIC_BASE_URL]] : [])]);
   try {
     const env = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))?.env ?? {};
     return Object.fromEntries(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
       .map((key) => [key, env[key] || env[`_${key}`]])
       .filter(([, value]) => typeof value === "string" && value.length));
   } catch { return {}; }
+}
+
+/** The subscription login: a `claude setup-token` token shared in Settings → Keys (one login, every machine),
+ *  else the one this machine's assisted login saved. */
+export function claudeOAuthToken(a: Account, shared: Record<string, string> = cachedSecrets()): string | undefined {
+  return shared.CLAUDE_CODE_OAUTH_TOKEN || load().accounts[key(a)]?.token;
 }
 
 /** Override user-level API auth without rewriting settings or putting secrets in argv. */
@@ -141,7 +152,7 @@ export function accountEnv(a: Account): Record<string, string> {
   if (a.auth === "api") Object.assign(env, claudeApiEnv(a.default ? undefined : a.dir), { NOOP_CLAUDE_AUTH: "api", CLAUDE_CODE_OAUTH_TOKEN: "" });
   // setup-token is saved in Noop's account state, including the default account.
   if (a.cli === "claude" && a.auth !== "api") {
-    const tok = load().accounts[key(a)]?.token;
+    const tok = claudeOAuthToken(a);
     if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
   }
   if (a.default) return env;

@@ -52,4 +52,6 @@ export async function sharedSecrets(cfg: Cfg, fetcher: typeof fetch = fetch): Pr
   cache = { at: Date.now(), values };
   return values;
 }
+/** The last fetched shared values, for synchronous readers (account selection). Empty until the first fetch. */
+export const cachedSecrets = (): Record<string, string> => cache.values;
 export const _resetSecretCache = () => { cache = { at: 0, values: {} }; };
