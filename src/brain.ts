@@ -173,6 +173,35 @@ export class ClaudeModel implements Model {
   }
 }
 
+/** Tries each model in turn: when one fails mid-conversation (timeout, quota, logged out, process died), the next one
+ * gets a fresh process, the turns so far are replayed, and the failing turn is sent again. Only when every model fails
+ * does the error reach the caller (which then routes the message to the lead without a model). */
+export class FallbackModel implements Model {
+  constructor(private models: Model[], private onFallback?: (from: number, err: unknown) => void) {}
+  async open(system: string) {
+    const sent: string[] = [];
+    let i = 0;
+    let conv: Awaited<ReturnType<Model["open"]>> | null = null;
+    const attempt = async (text: string): Promise<string> => {
+      for (;;) {
+        try {
+          if (!conv) { conv = await this.models[i].open(system); for (const t of sent) await conv.send(t); }
+          return await conv.send(text);
+        } catch (err) {
+          try { conv?.close(); } catch {}
+          conv = null;
+          if (++i >= this.models.length) throw err;
+          this.onFallback?.(i - 1, err);
+        }
+      }
+    };
+    return {
+      send: async (text: string) => { const out = await attempt(text); sent.push(text); return out; },
+      close: () => { try { conv?.close(); } catch {} },
+    };
+  }
+}
+
 // ---------------------------------------------------------------- the brain
 
 const BRAIN_TOOLS = toolsFor("brain");

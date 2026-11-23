@@ -25,7 +25,7 @@ import { medic } from "./medic";
 import { githubStarved } from "./github";
 import { doctor, visual } from "./visual";
 import { ackInbound, answerFromChat, appendEvent, cancelTask, feed, handleOwnerMessage, mediaDays, pendingInbound, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
-import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
+import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, FallbackModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
 import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
@@ -1012,8 +1012,14 @@ async function daemon(cfg: Cfg) {
     },
   });
   setApplyOp((op) => runTool(store, op?.tool, op));
-  const model = new ClaudeModel(String(cfg.router?.model ?? "claude-haiku-5-5"), String(cfg.router?.cli ?? "claude"), (cfg.router?.timeout_seconds ?? 45) * 1000);
-  if (isPrimary(cfg, host) && Bun.which(String(cfg.router?.cli ?? "claude"))) model.warm(systemPrompt());
+  // the chat model, then fallbacks (router.fallback: model names, default Sonnet): a stuck or out-of-quota model no longer
+  // turns the owner's message into a "chat assistant unavailable" note while another model would have answered
+  const routerCli = String(cfg.router?.cli ?? "claude"), routerTimeout = (cfg.router?.timeout_seconds ?? 45) * 1000;
+  const primaryModel = new ClaudeModel(String(cfg.router?.model ?? "claude-haiku-5-5"), routerCli, routerTimeout);
+  const fallbackNames: string[] = Array.isArray(cfg.router?.fallback) ? cfg.router.fallback.map(String) : ["claude-sonnet-5-5"];
+  const model = new FallbackModel([primaryModel, ...fallbackNames.map((n) => new ClaudeModel(n, routerCli, routerTimeout))],
+    (from, err) => console.error(`chat brain: model ${from === 0 ? String(cfg.router?.model ?? "claude-haiku-5-5") : fallbackNames[from - 1]} failed (${err}); trying the next one`));
+  if (isPrimary(cfg, host) && Bun.which(routerCli)) primaryModel.warm(systemPrompt());
   if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered, sentAt, thread, channel }) => {
     const got = Date.now();
     const room = channel ? channels().find((c) => c.slug === channel) : undefined;
