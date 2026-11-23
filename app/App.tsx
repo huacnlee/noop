@@ -756,13 +756,15 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
   const ratio = signal(16 / 10);
   const zoomed = signal(false);
   const frame: ViewStyle = { borderRadius: radius.inset, backgroundColor: colors.inset };
+  const compact = (props.siblings ?? []).filter((path) => isImage(path) || isVideo(path)).length > 1;
+  const tile = { width: 144, height: 108 };
   if (isDoc(props.path)) return <DocAttachment src={src} name={attachmentName(props.path)} />;
-  if (isVideo(props.path)) return <Video src={src} controls paused style={{ ...frame, borderWidth: 1, borderColor: colors.border, width: "100%", maxWidth: 480, aspectRatio: 16 / 9 }} />;
+  if (isVideo(props.path)) return <Video src={src} controls paused style={{ ...frame, borderWidth: 1, borderColor: colors.border, ...(compact ? tile : { width: "100%" as const, maxWidth: 480, aspectRatio: 16 / 9 }) }} />;
   // a log, a patch, a pptx: the image decoder can only fail on it, which reads as an expired image
   if (!isImage(props.path)) return <FileAttachment src={src} name={attachmentName(props.path)} />;
   // a thumbnail that keeps the timeline readable; press it to see the full image
   const THUMB = 240;
-  const size = () => (ratio() >= 1 ? { width: THUMB, height: THUMB / ratio() } : { width: THUMB * ratio(), height: THUMB });
+  const size = () => compact ? tile : (ratio() >= 1 ? { width: THUMB, height: THUMB / ratio() } : { width: THUMB * ratio(), height: THUMB });
   const gone = signal(false); // past the media retention (or otherwise unavailable)
   // the message's images, which the zoomed view pages through in a loop
   const images = () => (props.siblings ?? [props.path]).filter(isImage);
@@ -770,7 +772,7 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
     <If
       when={!gone()}
       else={
-        <View testID="media-gone" style={{ ...frame, width: THUMB, height: 72, alignItems: "center", justifyContent: "center" }}>
+        <View testID="media-gone" style={{ ...frame, ...(compact ? tile : { width: THUMB, height: 72 }), alignItems: "center", justifyContent: "center" }}>
           <Text style={{ fontSize: 13.5, color: colors.faint }}>{L("Image expired", "图片已过期")}</Text>
         </View>
       }
