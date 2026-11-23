@@ -8,6 +8,7 @@
 // owner messages reach this daemon over the existing owner→fleet inbox (long-polled, so within milliseconds), and the
 // reply goes back as a normal feed event.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { type Account, accountEnv, accounts, claudeAuthArgs, classify, reportFailure, usable } from "./accounts";
 import { channelPrompt } from "./channels";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
@@ -124,14 +125,15 @@ const BRAIN_DIR = join(HOME_DIR, "brain"); // empty cwd: no project CLAUDE.md, n
 
 /** `claude -p` in stream-json mode, spawned ahead of time so a message only pays for the model call (~1.5 s), not the
  * CLI start (~2 s). One process per conversation (no history carries over); the next one is spawned as this one is used. */
-export class ClaudeModel implements Model {
+class ClaudeProcessModel implements Model {
   private next: { proc: ReturnType<typeof Bun.spawn>; system: string } | null = null;
-  constructor(private model = "claude-haiku-5-5", private cli = "claude", private timeoutMs = 45_000) {}
+  constructor(private model = "claude-haiku-5-5", private cli = "claude", private timeoutMs = 45_000, private account?: Account) {}
   private spawn(system: string) {
     mkdirSync(BRAIN_DIR, { recursive: true });
+    const authEnv = this.account ? accountEnv(this.account) : {};
     const proc = Bun.spawn([this.cli, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--model", this.model, "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
-      "--no-session-persistence", "--system-prompt", system], { cwd: BRAIN_DIR, stdin: "pipe", stdout: "pipe", stderr: "ignore", env: { ...process.env, ...userSettingsEnv() } });
+      "--no-session-persistence", "--system-prompt", system, ...claudeAuthArgs(authEnv)], { cwd: BRAIN_DIR, stdin: "pipe", stdout: "pipe", stderr: "ignore", env: { ...process.env, ...userSettingsEnv(), ...authEnv } });
     return { proc, system };
   }
   /** Spawn the next process now (the daemon calls this at start), so the first message is fast too. */
@@ -173,11 +175,49 @@ export class ClaudeModel implements Model {
   }
 }
 
+/** Chat shares the task runner's account priority, cooldowns, and assisted login. */
+export class ClaudeModel implements Model {
+  private processes = new Map<string, ClaudeProcessModel>();
+  constructor(private model = "claude-haiku-5-5", private cli = "claude", private timeoutMs = 45_000) {}
+  private candidates() {
+    return accounts(loadConfig(), "claude").filter(usable);
+  }
+  private process(a: Account) {
+    const key = `${a.name}:${a.auth ?? "default"}`;
+    let model = this.processes.get(key);
+    if (!model) {
+      model = new ClaudeProcessModel(this.model, this.cli, this.timeoutMs, a);
+      this.processes.set(key, model);
+    }
+    return model;
+  }
+  warm(system: string) { const a = this.candidates()[0]; if (a) this.process(a).warm(system); }
+  async open(system: string) {
+    const cfg = loadConfig();
+    const models: Model[] = this.candidates().map((a) => ({ open: async (prompt: string) => {
+      const session = await this.process(a).open(prompt);
+      return {
+        close: () => session.close(),
+        send: async (text: string) => {
+          try { return await session.send(text); }
+          catch (error) {
+            const kind = classify(String(error));
+            if (kind) await reportFailure(a, kind, String(error), cfg);
+            throw error;
+          }
+        },
+      };
+    } }));
+    if (!models.length) throw new Error("No Claude account available");
+    return new FallbackModel(models, undefined, (err) => classify(String(err)) !== null).open(system);
+  }
+}
+
 /** Tries each model in turn: when one fails mid-conversation (timeout, quota, logged out, process died), the next one
  * gets a fresh process, the turns so far are replayed, and the failing turn is sent again. Only when every model fails
  * does the error reach the caller (which then routes the message to the lead without a model). */
 export class FallbackModel implements Model {
-  constructor(private models: Model[], private onFallback?: (from: number, err: unknown) => void) {}
+  constructor(private models: Model[], private onFallback?: (from: number, err: unknown) => void, private canFallback: (err: unknown) => boolean = () => true) {}
   async open(system: string) {
     const sent: string[] = [];
     let i = 0;
@@ -190,7 +230,7 @@ export class FallbackModel implements Model {
         } catch (err) {
           try { conv?.close(); } catch {}
           conv = null;
-          if (++i >= this.models.length) throw err;
+          if (!this.canFallback(err) || ++i >= this.models.length) throw err;
           this.onFallback?.(i - 1, err);
         }
       }

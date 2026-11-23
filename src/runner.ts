@@ -9,6 +9,7 @@ import {
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
 import { claudeMcpConfig, codexMcpLaunch, mcpServers, usableMcp, withOAuth } from "../app/mcp-servers";
+import { claudeAuthArgs } from "./accounts";
 import { sharedSecrets } from "./secrets";
 
 export type Result = {
@@ -249,7 +250,7 @@ export async function mcpLaunch(cli: string, cfg: Cfg, secrets?: Record<string, 
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
   extraEnv: Record<string, string> = {}, retryEmpty = true): Promise<string> {
   const mcp = await mcpLaunch(cli, cfg).catch(() => ({ args: [] as string[], env: {} as Record<string, string>, file: undefined }));
-  const cmd = cliCommand(cli, cfg, gateOverride, mcp.args);
+  const cmd = cliCommand(cli, cfg, gateOverride, [...mcp.args, ...(cli === "claude" ? claudeAuthArgs(extraEnv) : [])]);
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
   const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
