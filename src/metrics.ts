@@ -1,5 +1,5 @@
 // Fleet metrics → fleet/metrics.json; the architect uses them to evolve prompts, rules and memory.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { CODE, P, list, loadConfig, readDoc } from "./core";
 import { judgeAccuracy, routinesAwaitingApproval } from "./autonomy";
@@ -16,7 +16,19 @@ export function codeState(root = CODE) {
   if (!commit) return null; // no git checkout (source tarball, container image with .git stripped)
   const behind = git("rev-list", "--count", "HEAD..origin/main");
   const dirty = git("status", "--porcelain", "--untracked-files=no").split("\n").filter(Boolean).length;
-  return { commit, behind_origin: /^\d+$/.test(behind) ? Number(behind) : null, dirty_files: dirty };
+  return { commit, behind_origin: /^\d+$/.test(behind) ? Number(behind) : null, dirty_files: dirty, origin_fetched_minutes: refAgeMinutes(root) };
+}
+
+/** Minutes since this checkout last fetched from origin. `behind_origin` is measured against the local `origin/main`
+ *  ref, so on a host that has not fetched for days it reports a six-day-old checkout as current: on 2026-11-23 this
+ *  host ran 4c2a3d2 (11-17) with behind_origin 0 while main had moved 52 commits, including the fix that stops a
+ *  replaced menu task from being resumed. Without this number "0 commits behind" cannot be told apart from "never
+ *  looked". null when the checkout has no fetch record at all (source tarball, shallow clone). */
+export function refAgeMinutes(root = CODE): number | null {
+  for (const rel of [".git/FETCH_HEAD", ".git/refs/remotes/origin/main"]) {
+    try { return Math.max(0, Math.round((Date.now() - statSync(join(root, rel)).mtimeMs) / 60_000)); } catch {}
+  }
+  return null;
 }
 
 export function computeMetrics(days = 7) {
