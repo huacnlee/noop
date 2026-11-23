@@ -18,7 +18,7 @@ on:
       - scripts/setup-linux-deps.sh
       - install-client.sh
       - install-client.ps1
-      - app/nsh.json
+      - nsh.json
       - app/build-web.sh
   workflow_dispatch:
 
@@ -73,7 +73,7 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          version=$(python3 -c 'import json; print(json.load(open("app/nsh.json"))["version"])')
+          version=$(python3 -c 'import json; print(json.load(open("nsh.json"))["version"])')
           [ "$GITHUB_REF_TYPE" != tag ] || version="${GITHUB_REF_NAME#v}"
           python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel "$CHANNEL"
           args=(--build "$GITHUB_RUN_NUMBER")
@@ -222,7 +222,7 @@ jobs:
           for f in *; do l=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]'); [ "$f" = "$l" ] || mv "$f" "$l"; done
           ls -l
       # OTA: the app's code as a package signed with the release key (certified by the root whose public key is in
-      # app/nsh.json). Installed apps on every platform, iOS and Android included, run it from their next launch when
+      # nsh.json). Installed apps on every platform, iOS and Android included, run it from their next launch when
       # its build is newer than theirs and their NSH runtime is new enough; otherwise they take the whole app below.
       # It has this run's build number, as the apps packaged above do, so only older installs pick it up.
       - name: Sign OTA packages and write channel manifests
