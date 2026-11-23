@@ -1718,8 +1718,10 @@ describe("voice input", () => {
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("label:Voice input");
     await app.type("id:composer", "提醒我：");
+    expect(app.count("id:composer-sweep")).toBe(0);
     await app.press("label:Voice input");
     await app.waitUntil(() => app.speechRequests().length === 1);
+    await app.waitFor("id:composer-sweep");
     expect(app.speechRequests()[0].lang).toBe("zh-CN");
     await app.waitFor("label:Stop voice input");
     expect(app.shows("text:Listening…")).toBe(true);
