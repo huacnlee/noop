@@ -12,7 +12,7 @@ export type FileRow = { path: string; text: string; updated: string };
 /** A write. `tool` is the tool name; the rest are its validated arguments. */
 export type WriteOp =
   | { tool: "send_message"; text: string; reply_to?: string }
-  | { tool: "create_task"; title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[] }
+  | { tool: "create_task"; title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[]; new_work?: boolean }
   | { tool: "amend_task"; id: string; text: string }
   | { tool: "cancel_task"; id: string }
   | { tool: "set_priority"; id: string; priority: Priority }
@@ -79,6 +79,21 @@ export function listTasks(st: ToolStore, state = "open", query = "", limit = 50,
   return states.flatMap((s) => st.list(`tasks/${s}/`).filter((f) => /^tasks\/[^/]+\/T-[^/]*\.md$/.test(f.path)).map((f) => taskRow(f.path, f.text, f.updated)))
     .filter((t) => !q || `${t.id} ${t.title} ${t.repo ?? ""} ${t.agent ?? ""}`.toLowerCase().includes(q))
     .sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? "")).slice(Math.max(0, offset), Math.max(0, offset) + Math.max(1, Math.min(limit, 200)));
+}
+/** Names that pin a task to one thing: hyphenated project names (gpui-fast), repo names, PR/issue numbers (#2913). */
+const entities = (text: string) => new Set([
+  ...(text.toLowerCase().match(/[a-z0-9]+(?:[-_][a-z0-9]+)+/g) ?? []).filter((w) => !/^\d+(-\d+)*$/.test(w) && !/^(t|d|p)-\d+$/.test(w)),
+  ...(text.match(/#\d{2,}/g) ?? []),
+]);
+/** Open tasks that look like the same work as a new one: they name the same project or PR. A routine run and the owner's
+ *  later "release X now" are one job, so the brain must add to the open task instead of starting a second one. */
+export function similarOpenTasks(st: ToolStore, title: string, repo?: string): TaskRow[] {
+  const mine = entities(`${title} ${repo ? repo.split("/").pop() : ""}`);
+  if (!mine.size) return [];
+  return listTasks(st, "open", "", 200).filter((t) => {
+    const theirs = entities(`${t.title} ${t.repo ? t.repo.split("/").pop() : ""}`);
+    return [...mine].some((e) => theirs.has(e));
+  }).slice(0, 5);
 }
 export function parseTaskBody(title: string | undefined, body: string) {
   // the owner's words (a quote) or the task's own first paragraph; daemon notes ("Requeued after ...") are not the request
@@ -269,7 +284,8 @@ export const TOOLS: Tool[] = [
     inputSchema: obj({ title: str("Short imperative title"), details: str("Goal, context and acceptance criteria — everything the agent needs, in the owner's words"),
       repo: str("Optional repo, e.g. longbridge/nsh"), agent: str("Optional agent name from list_agents (default: lead, who plans and delegates)"),
       channels: { type: "array", description: "Work topics matched by goal: existing slugs, or {name, goal} for a new channel; empty for none", items: { anyOf: [{ type: "string" }, { type: "object", properties: { name: { type: "string" }, goal: { type: "string" } }, required: ["name", "goal"], additionalProperties: false }] }, maxItems: 3 },
-      follows: str("Optional: the task (T-…) this continues or corrects; the new task reads its result") }, ["title"]),
+      follows: str("Optional: the task (T-…) this continues or corrects; the new task reads its result"),
+      new_work: { type: "boolean", description: "Set only when an open task about the same project/PR exists and this is clearly separate work, not a step of it" } }, ["title"]),
     description: "Hand a piece of work to the fleet. An agent picks it up, does it and reports back in the feed. Use for anything that takes more than a quick answer (code, reviews, releases, research)." },
   { name: "amend_task", title: "Add to a task", annotations: RW, write: true,
     inputSchema: obj({ id: str("A task, open or finished, e.g. T-0184"), text: str("What to add or change, in the owner's words") }, ["id", "text"]),
@@ -315,7 +331,7 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
       const agent = s(a.agent);
       if (agent && !st.read(`agents/${agent}/profile.md`)) return `unknown agent ${agent} (see list_agents)`;
       return { tool: name, title: s(a.title).slice(0, 120), details: s(a.details).slice(0, 20_000) || undefined, repo: s(a.repo) || undefined,
-        agent: agent || undefined, follows: TASK_ID.test(s(a.follows)) ? s(a.follows) : undefined, ...(Array.isArray(a.channels) ? { channels: a.channels.slice(0, 3) } : {}) };
+        agent: agent || undefined, follows: TASK_ID.test(s(a.follows)) ? s(a.follows) : undefined, ...(Array.isArray(a.channels) ? { channels: a.channels.slice(0, 3) } : {}), ...(a.new_work === true ? { new_work: true } : {}) };
     }
     case "amend_task": {
       const id = s(a.id);

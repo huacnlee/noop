@@ -55,6 +55,8 @@ export const corner = {
   composerCompact: (touch ? 44 : 36) / 2 + 4,
   /** A sheet or an iOS menu: the softest floating surface, as the system's. */
   sheet: 24,
+  /** A centered dialog (the settings editors). */
+  dialog: 16,
   field: 10,
   control: 8,
   item: 8,

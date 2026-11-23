@@ -605,12 +605,13 @@ describe("channel", () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:opt-D-0001-B");
+    expect(app.shows("text:要不要升级依赖？")).toBe(true);
     await app.press("id:opt-D-0001-B");
+    // the sidebar's 待你决定 drops it the moment the answer is chosen, before it is even posted
+    expect(app.shows("text:要不要升级依赖？")).toBe(false);
     await app.waitUntil(() => posts.length === 1);
     expect(posts[0]).toMatchObject({ text: "D-0001 B" });
-    // the sidebar drops it at once, before the hub's status catches up
-    expect(app.shows("text:要不要升级依赖？")).toBe(true);
-    await app.waitUntil(() => !app.shows("text:要不要升级依赖？"));
+    expect(app.shows("text:要不要升级依赖？")).toBe(false);
   });
 
   test("a next-steps menu takes several items at once", async () => {
@@ -2247,40 +2248,28 @@ describe("commands", () => {
     expect(sent[0]).toEqual({ name: "GITHUB_TOKEN", value: "ghp_live_value" });
     await app.waitFor("id:secret-row-GITHUB_TOKEN");
     expect(app.shows("text:ghp_live_value")).toBe(false);
-    await app.press("label:Replace key GITHUB_TOKEN");
+    await app.press("id:secret-row-GITHUB_TOKEN"); // the whole row opens the editor
     expect(app.value("id:secret-value")).toBe("");
     await app.press("id:secret-delete");
     await app.waitUntil(() => sent.length === 2);
     expect(sent[1]).toEqual({ name: "GITHUB_TOKEN", value: null });
-  });
-
-  test("settings has its own Claude section, and pressing anywhere on a row opens the key editor", async () => {
-    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
-    const sent: any[] = [];
-    let keys: { name: string; updated: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
-      ...server(posts, puts, updates),
-      [`GET ${URL}/api/secrets`]: () => ({ body: { secrets: keys } }),
-      [`PUT ${URL}/api/secrets`]: (r: { body?: string | null }) => {
-        const b = JSON.parse(r.body!); sent.push(b);
-        keys = keys.filter((k) => k.name !== b.name);
-        if (b.value) keys.push({ name: b.name, updated: "2026-11-17T00:00:00Z" });
-        return { body: { secrets: keys } };
-      },
-    } });
-    await app.press("id:user-menu");
-    await app.press("id:settings");
-    await app.press("id:settings-tab-mcp");
-    expect(app.count("id:claude-key-ANTHROPIC_API_KEY")).toBe(0);
+    // Claude credentials live in their own tab, not under MCP
+    expect(app.count("id:claude-key-set-ANTHROPIC_API_KEY")).toBe(0);
     await app.press("id:settings-tab-claude");
-    await app.press("id:claude-key-ANTHROPIC_API_KEY");
+    expect(app.count("id:secret-row-GITHUB_TOKEN")).toBe(0);
+    // an unset Claude credential: its Set button opens the editor under the variable's name, with nothing to delete yet
+    await app.press("id:claude-key-set-ANTHROPIC_API_KEY");
     await app.waitFor("id:secret-editor");
+    await app.waitFor("text:Set API Key");
     expect(app.count("id:secret-delete")).toBe(0);
-    await app.type("id:secret-value", "sk-ant-api-value");
+    await app.type("id:secret-value", "sk-ant-live");
     await app.press("id:secret-save");
-    await app.waitUntil(() => sent.length === 1);
-    expect(sent[0]).toEqual({ name: "ANTHROPIC_API_KEY", value: "sk-ant-api-value" });
-    expect(app.shows("text:sk-ant-api-value")).toBe(false);
+    await app.waitUntil(() => sent.length === 3);
+    expect(sent[2]).toEqual({ name: "ANTHROPIC_API_KEY", value: "sk-ant-live" });
+    await app.waitUntil(() => app.count("id:claude-key-set-ANTHROPIC_API_KEY") === 0);
+    // once set, pressing anywhere on its row replaces it
+    await app.press("id:claude-key-ANTHROPIC_API_KEY");
+    await app.waitFor("text:Replace API Key");
   });
 });
 

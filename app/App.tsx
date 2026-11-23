@@ -2225,6 +2225,8 @@ const sidebarInset = 8;
 
 function Sidebar(props: {
   hub: Hub;
+  /** Cards the owner answered, including replies still in the outbox, so 待你决定 updates the moment one is sent. */
+  answered?: () => Set<string>;
   target: () => string | null;
   onPick: (ref: string) => void;
   /** Set a question aside: it leaves 待你决定 and is not asked again. */
@@ -2275,7 +2277,7 @@ function Sidebar(props: {
     return all.filter((c, i) => i < CHANNELS_SHOWN || c.slug === props.channel() || props.channels.unread(c) > 0);
   };
   const hiddenChannels = () => (channelsOpen() ? activeChannels().length - visibleChannels().length : 0);
-  const waits = computed(() => { const done = answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
+  const waits = computed(() => { const done = props.answered?.() ?? answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
   // the sidebar's right-click menu: end a task that can't go on without opening it
   const endTask = async (id: string, done: boolean) => {
     const running = (s()?.active ?? []).some((a) => a.id === id);
@@ -3191,7 +3193,7 @@ const SETTINGS_TABS = () => [
   ["parallel", L("Parallelism", "并行"), "layers"],
   ["commands", L("Commands", "常用指令"), "terminal"],
   ["mcp", "MCP", "components"],
-  ["claude", "Claude", "system"],
+  ["claude", "Claude", "lock"],
   ["storage", L("Storage", "存储"), "photos"],
   ["version", L("Version", "版本"), "github"],
   ["rules", L("Rules & memory", "规则与记忆"), "scroll"],
@@ -3353,13 +3355,15 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
         <Group title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
           <McpRows settings={props.settings} />
         </Group>
-        <Group title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
-          <SecretRows settings={props.settings} />
-        </Group>
         </If>
         <If when={on("claude")}>
         <Group title="Claude" hint={CLAUDE_HINT()}>
-          <ClaudeKeyRows settings={props.settings} />
+          <ClaudeKeyRows settings={props.settings} editor />
+        </Group>
+        </If>
+        <If when={on("mcp")}>
+        <Group title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
+          <SecretRows settings={props.settings} />
         </Group>
         </If>
         <If when={on("storage")}>
@@ -3547,63 +3551,44 @@ function CommandEditor(props: { settings: Settings }) {
     close();
     await save({ commands: savedCommands(view()).filter((c) => c.name !== n) });
   };
-  const focused = signal(false);
   return (
-    <Dialog
+    <FormDialog
       testID="command-editor"
       open={editing() !== undefined}
-      animation="fade"
-      onOpenChange={({ open }) => !open && close()}
-      backdropClass="bg-scrim"
-      style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}
-    >
-      <View style={{ width: "100%", maxWidth: 560, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
-        <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
-          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{isNew() ? L("New command", "新建指令") : L("Edit command", "编辑指令")}</Text>
-          <IconButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
-        </View>
-        <View style={{ gap: 16, padding: 20 }}>
-          <Field label={L("Name", "名称")} value={name()} onChange={(v) => { name.set(v); note.set(""); }} placeholder={L("e.g. daily-report", "例如：日报")} testID="command-name" autoFocus={isNew()} hint={clean() ? L(`Type /${clean()} in the message box to use it`, `在输入框里输入 /${clean()} 选用`) : L("Type / and the name in the message box to use it", "在输入框里输入 / 加名称选用")} />
-          <View style={{ gap: 7 }}>
-            <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{L("Message to the team", "发给团队的话")}</Text>
-            <Input
-              testID="command-text"
-              multiline
-              value={text()}
-              onChange={({ value }) => { text.set(value); note.set(""); }}
-              onFocus={() => focused.set(true)}
-              onBlur={() => focused.set(false)}
-              placeholder={L("e.g. Summarize today’s progress on each project as a daily report,\none section per project, conclusion first.", "例如：把今天各项目的进展整理成日报发给我，\n按项目分段，每段先说结论。")}
-              class="placeholder:text-faint"
-              style={{
-                height: 140,
-                paddingHorizontal: 14,
-                paddingVertical: 10,
-                borderRadius: corner.field,
-                borderWidth: 1,
-                borderColor: focused() ? colors.accent : colors.fieldBorder,
-                backgroundColor: colors.field,
-                fontSize: 15.5,
-                lineHeight: 23,
-                color: colors.text,
-                ...(focused() ? { outlineStyle: "solid", outlineWidth: 3, outlineColor: alpha(colors.accent, 0.12) } : {}),
-              }}
-            />
-          </View>
-          <If when={note()}>
-            <Text testID="command-note" style={{ fontSize: 13.5, color: colors.danger }}>{note()}</Text>
-          </If>
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingBottom: 20 }}>
+      onClose={close}
+      width={540}
+      title={isNew() ? L("New command", "新建指令") : L("Edit command", "编辑指令")}
+      subtitle={isNew() ? L("A message you send often, one / away in the message box.", "常发的一段话，在输入框里输入 / 即可选用。") : `/${editing()}`}
+      footer={
+        <>
           <If when={!isNew()}>
-            <Button label={L("Delete", "删除")} variant="danger" icon="trash" onPress={() => void remove()} testID="command-delete" />
+            <Button label={L("Delete", "删除")} variant="ghost" tone="danger" onPress={() => void remove()} testID="command-delete" />
           </If>
           <View style={{ flex: 1 }} />
           <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="command-cancel" />
           <Button label={isNew() ? L("Add", "添加") : L("Save", "保存")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="command-save" />
-        </View>
+        </>
+      }
+    >
+      <Field label={L("Name", "名称")} value={name()} onChange={(v) => { name.set(v); note.set(""); }} placeholder={L("e.g. daily-report", "例如：日报")} testID="command-name" autoFocus={isNew()} hint={clean() ? L(`Type /${clean()} in the message box to use it`, `在输入框里输入 /${clean()} 选用`) : L("Type / and the name in the message box to use it", "在输入框里输入 / 加名称选用")} />
+      <View style={{ gap: 6 }}>
+        <FieldLabel label={L("Message to the team", "发给团队的话")} />
+        <Input
+          testID="command-text"
+          multiline
+          value={text()}
+          onChange={({ value }) => { text.set(value); note.set(""); }}
+          placeholder={L("e.g. Summarize today’s progress on each project as a daily report,\none section per project, conclusion first.", "例如：把今天各项目的进展整理成日报发给我，\n按项目分段，每段先说结论。")}
+          class="placeholder:text-faint"
+          hoverStyle={fieldHover()}
+          focusStyle={focusRing()}
+          style={{ ...fieldLook(), height: 140, paddingVertical: 9, fontSize: touch ? 16 : 14.5, lineHeight: 22 }}
+        />
       </View>
-    </Dialog>
+      <If when={note()}>
+        <Text testID="command-note" style={{ fontSize: 13, color: colors.danger }}>{note()}</Text>
+      </If>
+    </FormDialog>
   );
 }
 
@@ -3622,8 +3607,19 @@ const CLAUDE_HINT = () => L(
   "登录一次，所有机器共用：在任意一台电脑上运行 `claude setup-token`，把得到的令牌粘贴到这里。各机器优先使用订阅账号，额度用尽时自动改用 API Key，额度恢复后切回。未填写的项沿用各机器自己的登录和 ~/.claude/settings.json。",
 );
 
+/** The end of a stored key's row: masked dots and a chevron, the whole row opening its editor. */
+function SetSecretMark() {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.faint }}>••••••</Text>
+      <Icon name="chevron" size={14} tint={colors.faint} />
+    </View>
+  );
+}
+
 /** The Claude credentials: fixed rows that open the shared-key editor on their own name. */
-function ClaudeKeyRows(props: { settings: Settings }) {
+/** `editor`: render the key editor here too, for a page that has no Keys list (the wide Claude tab). */
+function ClaudeKeyRows(props: { settings: Settings; editor?: boolean }) {
   const st = props.settings;
   const d = st.secretDraft;
   void st.loadSecrets();
@@ -3631,18 +3627,25 @@ function ClaudeKeyRows(props: { settings: Settings }) {
   const open = (name: string) => { d.name.set(name); d.value.set(""); d.note.set(""); d.editing.set(name); };
   return (
     <>
-      <Each of={CLAUDE_KEYS} key={(k) => k.name}>
-        {(k, i) => (
-          <SettingsItem first={i() === 0} testID={`claude-key-${k().name}`} onPress={() => open(k().name)} style={{ flexDirection: "row", alignItems: "center" }}>
-              <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
-                <Text style={{ fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().label()}</Text>
-                <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{set(k().name) ? L(`Set ${new Date(set(k().name)!.updated).toLocaleDateString()}`, `设置于 ${new Date(set(k().name)!.updated).toLocaleDateString()}`) : k().hint()}</Text>
-              </View>
-              <Text style={{ fontFamily: MONO, fontSize: 13, color: set(k().name) ? colors.faint : colors.info }}>{set(k().name) ? "••••••" : L("Set", "设置")}</Text>
-          </SettingsItem>
-        )}
-      </Each>
+    <Each of={CLAUDE_KEYS} key={(k) => k.name}>
+      {(k, i) => (
+        <SettingsItem first={i() === 0} testID={`claude-key-${k().name}`} onPress={() => open(k().name)} style={{ flexDirection: "row", alignItems: "center" }}>
+          <View accessibilityLabel={k().label()} style={{ flex: 1, minWidth: 0, gap: 3 }}>
+            <Text style={{ fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().label()}</Text>
+            <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{set(k().name) ? L(`Set ${new Date(set(k().name)!.updated).toLocaleDateString()}`, `设置于 ${new Date(set(k().name)!.updated).toLocaleDateString()}`) : k().hint()}</Text>
+          </View>
+          <If
+            when={set(k().name)}
+            else={<Button label={L("Set", "设置")} size="sm" variant="secondary" onPress={() => open(k().name)} testID={`claude-key-set-${k().name}`} />}
+          >
+            <SetSecretMark />
+          </If>
+        </SettingsItem>
+      )}
+    </Each>
+    <If when={props.editor}>
       <SecretEditor settings={st} />
+    </If>
     </>
   );
 }
@@ -3713,27 +3716,21 @@ function McpRows(props: { settings: Settings }) {
 
 /** A multi-line monospace field, for "KEY=value" lines. */
 function PairsField(props: { label: string; value: string; onChange: (v: string) => void; placeholder: string; hint: string; testID: string }) {
-  const focused = signal(false);
   return (
-    <View style={{ gap: 7 }}>
-      <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{props.label}</Text>
+    <View style={{ gap: 6 }}>
+      <FieldLabel label={props.label} />
       <Input
         testID={props.testID}
         multiline
         value={props.value}
         onChange={({ value }) => props.onChange(value)}
-        onFocus={() => focused.set(true)}
-        onBlur={() => focused.set(false)}
         placeholder={props.placeholder}
         class="placeholder:text-faint"
-        style={{
-          height: 88, paddingHorizontal: 14, paddingVertical: 10, borderRadius: corner.field, borderWidth: 1,
-          borderColor: focused() ? colors.accent : colors.fieldBorder, backgroundColor: colors.field,
-          fontFamily: MONO, fontSize: 13.5, lineHeight: 20, color: colors.text,
-          ...(focused() ? { outlineStyle: "solid", outlineWidth: 3, outlineColor: alpha(colors.accent, 0.12) } : {}),
-        }}
+        hoverStyle={fieldHover()}
+        focusStyle={focusRing()}
+        style={{ ...fieldLook(), height: 88, paddingVertical: 9, fontFamily: MONO, fontSize: 13, lineHeight: 20 }}
       />
-      <Text style={{ fontSize: 13, lineHeight: 18, color: colors.faint }}>{props.hint}</Text>
+      <FieldHint text={props.hint} />
     </View>
   );
 }
@@ -3778,55 +3775,48 @@ function McpEditor(props: { settings: Settings }) {
   };
   const edit = (f: (v: string) => void) => (v: string) => { f(v); d.note.set(""); };
   return (
-    <Dialog
+    <FormDialog
       testID="mcp-editor"
       open={d.editing() !== undefined}
-      animation="fade"
-      onOpenChange={({ open }) => !open && close()}
-      backdropClass="bg-scrim"
-      style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}
-    >
-      <View style={{ width: "100%", maxWidth: 560, maxHeight: "100%", borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
-        <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
-          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{isNew() ? L("Add MCP server", "添加 MCP 服务") : L("Edit MCP server", "编辑 MCP 服务")}</Text>
-          <IconButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
-        </View>
-        <Scroll style={{ flexShrink: 1 }}>
-          <View style={{ gap: 16, padding: 20 }}>
-            <Field label={L("Name", "名称")} value={d.name()} onChange={edit(d.name.set)} placeholder={L("e.g. github", "例如：github")} testID="mcp-name" autoFocus={isNew()} />
-            <Segmented
-              options={[{ value: "stdio", label: L("Command (stdio)", "本地命令（stdio）") }, { value: "http", label: L("Remote (HTTP)", "远程（HTTP）") }] as const}
-              value={d.type()}
-              onChange={(v) => { d.type.set(v); d.note.set(""); }}
-              fill
-            />
-            <If
-              when={d.type() === "http"}
-              else={
-                <>
-                  <Field label={L("Command", "命令")} value={d.command()} onChange={edit(d.command.set)} placeholder="npx -y @modelcontextprotocol/server-github" testID="mcp-command" hint={L("Each machine runs it, so it must be installed there.", "每台机器各自运行，需要在机器上可用。")} />
-                  <PairsField label={L("Environment", "环境变量")} value={d.env()} onChange={edit(d.env.set)} placeholder={"GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN}"} hint={L("One KEY=value per line.", "每行一个 KEY=value。")} testID="mcp-env" />
-                </>
-              }
-            >
-              <Field label={L("Address", "地址")} value={d.url()} onChange={edit(d.url.set)} placeholder="https://mcp.example.com/mcp" testID="mcp-url" keyboardType="url" autoComplete="url" />
-              <PairsField label={L("Headers", "请求头")} value={d.headers()} onChange={edit(d.headers.set)} placeholder={"Authorization: Bearer ${EXAMPLE_TOKEN}"} hint={L("One Name: value per line.", "每行一个 Name: value。")} testID="mcp-headers" />
-            </If>
-            <If when={d.note()}>
-              <Text testID="mcp-note" style={{ fontSize: 13.5, color: colors.danger }}>{d.note()}</Text>
-            </If>
-          </View>
-        </Scroll>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingBottom: 20, paddingTop: 4 }}>
+      onClose={close}
+      width={540}
+      scroll
+      title={isNew() ? L("Add MCP server", "添加 MCP 服务") : L("Edit MCP server", "编辑 MCP 服务")}
+      subtitle={isNew() ? L("Every agent on every machine can use its tools.", "所有机器上的成员都能使用它的工具。") : d.editing()}
+      footer={
+        <>
           <If when={!isNew()}>
-            <Button label={L("Delete", "删除")} variant="danger" icon="trash" onPress={() => void remove()} testID="mcp-delete" />
+            <Button label={L("Delete", "删除")} variant="ghost" tone="danger" onPress={() => void remove()} testID="mcp-delete" />
           </If>
           <View style={{ flex: 1 }} />
           <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="mcp-cancel" />
           <Button label={isNew() ? L("Add", "添加") : L("Save", "保存")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="mcp-save" />
-        </View>
-      </View>
-    </Dialog>
+        </>
+      }
+    >
+      <Field label={L("Name", "名称")} value={d.name()} onChange={edit(d.name.set)} placeholder={L("e.g. github", "例如：github")} testID="mcp-name" autoFocus={isNew()} />
+      <Segmented
+        options={[{ value: "stdio", label: L("Command (stdio)", "本地命令（stdio）") }, { value: "http", label: L("Remote (HTTP)", "远程（HTTP）") }] as const}
+        value={d.type()}
+        onChange={(v) => { d.type.set(v); d.note.set(""); }}
+        fill
+      />
+      <If
+        when={d.type() === "http"}
+        else={
+          <>
+            <Field label={L("Command", "命令")} value={d.command()} onChange={edit(d.command.set)} placeholder="npx -y @modelcontextprotocol/server-github" testID="mcp-command" hint={L("Each machine runs it, so it must be installed there.", "每台机器各自运行，需要在机器上可用。")} />
+            <PairsField label={L("Environment", "环境变量")} value={d.env()} onChange={edit(d.env.set)} placeholder={"GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN}"} hint={L("One KEY=value per line.", "每行一个 KEY=value。")} testID="mcp-env" />
+          </>
+        }
+      >
+        <Field label={L("Address", "地址")} value={d.url()} onChange={edit(d.url.set)} placeholder="https://mcp.example.com/mcp" testID="mcp-url" keyboardType="url" autoComplete="url" />
+        <PairsField label={L("Headers", "请求头")} value={d.headers()} onChange={edit(d.headers.set)} placeholder={"Authorization: Bearer ${EXAMPLE_TOKEN}"} hint={L("One Name: value per line.", "每行一个 Name: value。")} testID="mcp-headers" />
+      </If>
+      <If when={d.note()}>
+        <Text testID="mcp-note" style={{ fontSize: 13, color: colors.danger }}>{d.note()}</Text>
+      </If>
+    </FormDialog>
   );
 }
 
@@ -3841,12 +3831,12 @@ function SecretRows(props: { settings: Settings }) {
     <>
       <Each of={list()} key={(k) => k.name}>
         {(k, i) => (
-          <SettingsItem first={i() === 0} testID={`secret-row-${k().name}`} style={{ flexDirection: "row", alignItems: "center" }}>
-            <View role="button" accessibilityLabel={L(`Replace key ${k().name}`, `替换密钥 ${k().name}`)} onPress={() => open(k().name)} style={{ flex: 1, minWidth: 0, gap: 3 }}>
+          <SettingsItem first={i() === 0} testID={`secret-row-${k().name}`} onPress={() => open(k().name)} style={{ flexDirection: "row", alignItems: "center" }}>
+            <View accessibilityLabel={L(`Replace key ${k().name}`, `替换密钥 ${k().name}`)} style={{ flex: 1, minWidth: 0, gap: 3 }}>
               <Text style={{ fontFamily: MONO, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().name}</Text>
               <Text style={{ fontSize: 12.5, color: colors.faint }}>{L(`Set ${new Date(k().updated).toLocaleDateString()}`, `设置于 ${new Date(k().updated).toLocaleDateString()}`)}</Text>
             </View>
-            <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.faint }}>••••••</Text>
+            <SetSecretMark />
           </SettingsItem>
         )}
       </Each>
@@ -3861,7 +3851,6 @@ function SecretEditor(props: { settings: Settings }) {
   const st = props.settings;
   const d = st.secretDraft;
   const isNew = () => d.editing() === "";
-  const exists = () => (st.secrets() ?? []).some((k) => k.name === d.editing());
   const close = () => d.editing.set(undefined);
   const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
   const ok = () => NAME.test(d.name().trim()) && !!d.value();
@@ -3873,39 +3862,47 @@ function SecretEditor(props: { settings: Settings }) {
   };
   const remove = async () => { const n = d.editing()!; close(); await st.putSecret(n, null); };
   const edit = (f: (v: string) => void) => (v: string) => { f(v); d.note.set(""); };
+  // a Claude credential is edited under its friendly name, with the variable it sets underneath
+  const known = () => CLAUDE_KEYS.find((k) => k.name === d.editing());
+  // a Claude credential row opens this editor before anything is stored under its name
+  const stored = () => (st.secrets() ?? []).some((k) => k.name === d.editing());
   return (
-    <Dialog
+    <FormDialog
       testID="secret-editor"
       open={d.editing() !== undefined}
-      animation="fade"
-      onOpenChange={({ open }) => !open && close()}
-      backdropClass="bg-scrim"
-      style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}
-    >
-      <View style={{ width: "100%", maxWidth: 480, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
-        <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 20, paddingRight: 10, height: 56, borderBottomWidth: 0.5, borderBottomColor: surfaceEdge() }}>
-          <Text style={{ flex: 1, fontSize: 17, fontWeight: "600", color: colors.text }}>{exists() ? L("Replace key", "替换密钥") : L("Add key", "添加密钥")}</Text>
-          <IconButton icon="close" label={L("Close", "关闭")} shortcut="Esc" onPress={close} />
-        </View>
-        <View style={{ gap: 16, padding: 20 }}>
-          <If when={isNew()} else={<Text style={{ fontFamily: MONO, fontSize: 15, color: colors.text }}>{d.name()}</Text>}>
-            <Field label={L("Name", "名称")} value={d.name()} onChange={edit(d.name.set)} placeholder="GITHUB_TOKEN" testID="secret-name" autoFocus hint={L("Write it as ${NAME} in an MCP server.", "在 MCP 服务里写成 ${NAME}。")} />
-          </If>
-          <Field label={L("Value", "值")} value={d.value()} onChange={edit(d.value.set)} masked placeholder={isNew() ? "" : L("New value", "新的值")} testID="secret-value" autoFocus={!isNew()} onSubmit={() => ok() && void submit()} />
-          <If when={d.note()}>
-            <Text testID="secret-note" style={{ fontSize: 13.5, color: colors.danger }}>{d.note()}</Text>
-          </If>
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingBottom: 20, paddingTop: 4 }}>
-          <If when={exists()}>
-            <Button label={L("Delete", "删除")} variant="danger" icon="trash" onPress={() => void remove()} testID="secret-delete" />
+      onClose={close}
+      title={isNew() ? L("Add key", "添加密钥") : known() ? (stored() ? L(`Replace ${known()!.label()}`, `替换 ${known()!.label()}`) : L(`Set ${known()!.label()}`, `设置 ${known()!.label()}`)) : L("Replace key", "替换密钥")}
+      subtitle={isNew() ? L("Every machine can use it; it is never shown again after saving.", "所有机器都能使用，保存后不再显示。") : d.editing()}
+      mono={!isNew()}
+      footer={
+        <>
+          <If when={!isNew() && stored()}>
+            <Button label={L("Delete", "删除")} variant="ghost" tone="danger" onPress={() => void remove()} testID="secret-delete" />
           </If>
           <View style={{ flex: 1 }} />
           <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="secret-cancel" />
-          <Button label={exists() ? L("Replace", "替换") : L("Add", "添加")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="secret-save" />
-        </View>
-      </View>
-    </Dialog>
+          <Button label={isNew() ? L("Add", "添加") : stored() ? L("Replace", "替换") : L("Save", "保存")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="secret-save" />
+        </>
+      }
+    >
+      <If when={isNew()}>
+        <Field label={L("Name", "名称")} value={d.name()} onChange={edit(d.name.set)} placeholder="GITHUB_TOKEN" testID="secret-name" autoFocus hint={L("Write it as ${NAME} in an MCP server.", "在 MCP 服务里写成 ${NAME}。")} />
+      </If>
+      <Field
+        label={isNew() || !stored() ? L("Value", "值") : L("New value", "新的值")}
+        value={d.value()}
+        onChange={edit(d.value.set)}
+        masked
+        placeholder={L("Paste it here", "粘贴到这里")}
+        testID="secret-value"
+        autoFocus={!isNew()}
+        hint={isNew() || !stored() ? undefined : L("The current value stays until you replace it.", "替换之前，仍使用当前的值。")}
+        onSubmit={() => ok() && void submit()}
+      />
+      <If when={d.note()}>
+        <Text testID="secret-note" style={{ fontSize: 13, color: colors.danger }}>{d.note()}</Text>
+      </If>
+    </FormDialog>
   );
 }
 
@@ -4177,11 +4174,11 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       <Section title={L("MCP servers", "MCP 服务")} hint={MCP_HINT()}>
         <McpRows settings={props.settings} />
       </Section>
-      <Section title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
-        <SecretRows settings={props.settings} />
-      </Section>
       <Section title="Claude" hint={CLAUDE_HINT()}>
         <ClaudeKeyRows settings={props.settings} />
+      </Section>
+      <Section title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
+        <SecretRows settings={props.settings} />
       </Section>
       <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />
@@ -4625,6 +4622,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const focused = signal(false);
   const inputHeight = signal(28);
   const outbox = signal<Outgoing[]>([]);
+  const delivered = signal<Outgoing[]>([]);
   const atEnd = signal(true);
   /** The channel's head (name, goal, actions) has scrolled under the bar. */
   const headPassed = signal(false);
@@ -4656,6 +4654,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
   // one answer state for every view: the owner may answer a card in the main chat that a channel also shows
   const answered = computed(() => answeredIds(merge(hub.events(), shown())));
+  // every view's pending replies, not just this one's: the sidebar lists cards from all channels
+  const answeredAll = computed(() => answeredIds([...hub.events(), ...[...outbox(), ...delivered()].map((o) => ({ id: o.id, ts: o.ts, from: "owner", kind: "owner" as const, text: o.text, ref: o.ref ?? undefined }))]));
   /** The newest Markdown report in this conversation, and when its message was sent. */
   const latestDoc = computed((): (DocRef & { ts: string }) | null => {
     const list = shown();
@@ -4931,6 +4931,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     outbox.update((l) => l.map((x) => (x.id === id ? { ...x, state: "sending" } : x)));
     try {
       markSent(await hub.send(text, ref, files, false, id, channel));
+      delivered.update((d) => [...d.slice(-50), o]); // until the hub's own event arrives
       outbox.update((o) => o.filter((x) => x.id !== id));
     } catch {
       outbox.update((o) => o.map((x) => (x.id === id ? { ...x, state: "failed" } : x)));
@@ -5288,6 +5289,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
 
   const sidebar = (inDrawer: boolean) => (
     <Sidebar
+      answered={answeredAll}
       onRestart={() => void restartToUpdate()}
       hub={hub}
       target={target}
@@ -6008,6 +6010,95 @@ function DropTarget(props: { files: string[] }) {
 
 // ---------------------------------------------------------------- connect
 
+/**
+ * The settings editors' dialog (keys, MCP servers, commands): one frame for all of them. A floating card with a soft
+ * drop instead of a hard edge, the title (and what it edits, `subtitle`) in the header without a rule under it, and
+ * the footer's actions: a destructive one (`danger`) on the leading side, as quiet text, Cancel and the main action
+ * on the trailing side.
+ */
+function FormDialog(props: {
+  testID: string;
+  open: boolean;
+  title: string;
+  subtitle?: string;
+  /** The subtitle is an identifier (a key's name): monospace. */
+  mono?: boolean;
+  width?: number;
+  onClose: () => void;
+  footer: JSX.Element;
+  /** The body scrolls when it outgrows the window (the MCP server form). */
+  scroll?: boolean;
+  children: JSX.Element;
+}) {
+  const body = <View style={{ gap: 18, paddingHorizontal: 24, paddingTop: 18, paddingBottom: 4 }}>{props.children}</View>;
+  return (
+    <Dialog
+      testID={props.testID}
+      open={props.open}
+      animation="fade"
+      onOpenChange={({ open }) => !open && props.onClose()}
+      backdropClass="bg-scrim"
+      style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}
+    >
+      <View
+        style={{
+          width: "100%",
+          maxWidth: props.width ?? 460,
+          maxHeight: "100%",
+          borderRadius: corner.dialog,
+          borderCurve: "continuous",
+          borderWidth: 0.5,
+          borderColor: alpha(colors.text, isDark() ? 0.14 : 0.08),
+          backgroundColor: colors.surface,
+          boxShadow: isDark() ? "0 24px 56px -12px rgba(0,0,0,0.6), 0 2px 8px rgba(0,0,0,0.3)" : "0 24px 56px -16px rgba(0,0,0,0.22), 0 2px 8px rgba(0,0,0,0.06)",
+          overflow: "hidden",
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12, paddingLeft: 24, paddingRight: 14, paddingTop: 18 }}>
+          <View style={{ flex: 1, minWidth: 0, gap: 4, paddingTop: 2 }}>
+            <Text style={{ fontSize: font.lg, lineHeight: leading.lg, fontWeight: "600", color: colors.text }}>{props.title}</Text>
+            <If when={props.subtitle}>
+              <Text testID={`${props.testID}-subtitle`} style={{ fontSize: props.mono ? 12.5 : font.xs + 1, lineHeight: leading.xs + 2, color: colors.muted, numberOfLines: 2, ...(props.mono ? { fontFamily: MONO } : {}) }}>{props.subtitle}</Text>
+            </If>
+          </View>
+          <IconButton icon="close" size="sm" label={L("Close", "关闭")} shortcut="Esc" onPress={props.onClose} />
+        </View>
+        <If when={props.scroll} else={body}>
+          <Scroll style={{ flexShrink: 1 }}>{body}</Scroll>
+        </If>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 24, paddingTop: 22, paddingBottom: 20 }}>{props.footer}</View>
+      </View>
+    </Dialog>
+  );
+}
+
+/** A form field's label: quieter than the dialog's title, so the fields read as one group under it. */
+function FieldLabel(props: { label: string }) {
+  return <Text style={{ fontSize: font.xs + 1, lineHeight: leading.xs, fontWeight: "500", color: colors.muted }}>{props.label}</Text>;
+}
+
+/** A field's hint under it. */
+function FieldHint(props: { text: string }) {
+  return <Text style={{ fontSize: font.xs, lineHeight: leading.xs + 1, color: colors.faint }}>{props.text}</Text>;
+}
+
+/**
+ * The look every text field of a form shares (`Field`, a multi-line field): the field fill and hairline, a firmer edge
+ * under the pointer, and on focus Noop's ring (`focusRing`) rather than a solid accent outline.
+ */
+const fieldLook = (): ViewStyle => ({
+  paddingHorizontal: 12,
+  borderRadius: corner.field,
+  borderCurve: "continuous",
+  borderWidth: 1,
+  borderColor: colors.fieldBorder,
+  backgroundColor: colors.field,
+  color: colors.text,
+  transitionProperty: "border-color, outline-color",
+  transitionDuration: 120,
+});
+const fieldHover = (): ViewStyle => ({ borderColor: alpha(colors.text, 0.24) });
+
 function Field(props: {
   label: string;
   value: string;
@@ -6023,10 +6114,9 @@ function Field(props: {
   maxLength?: number;
   big?: boolean;
 }) {
-  const focused = signal(false);
   return (
-    <View style={{ gap: 7 }}>
-      <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{props.label}</Text>
+    <View style={{ gap: 6 }}>
+      <FieldLabel label={props.label} />
       <Input
         testID={props.testID}
         value={props.value}
@@ -6042,23 +6132,17 @@ function Field(props: {
         submitBehavior="submit"
         onSubmit={() => props.onSubmit?.()}
         onChange={({ value }) => props.onChange(value)}
-        onFocus={() => focused.set(true)}
-        onBlur={() => focused.set(false)}
+        hoverStyle={fieldHover()}
+        focusStyle={focusRing()}
         style={{
-          height: props.big ? 56 : 44,
-          paddingHorizontal: 14,
-          borderRadius: corner.field,
-          borderWidth: 1,
-          borderColor: focused() ? colors.accent : colors.fieldBorder,
-          backgroundColor: colors.field,
-          fontSize: 16,
-          color: colors.text,
+          ...fieldLook(),
+          height: props.big ? 56 : touch ? 44 : 36,
+          fontSize: touch ? 16 : 14.5,
           ...(props.big ? { fontSize: 26, letterSpacing: 10, textAlign: "center", fontVariant: ["tabular-nums"] } : {}),
-          ...(focused() ? { outlineStyle: "solid", outlineWidth: 3, outlineColor: alpha(colors.accent, 0.12) } : {}),
         }}
       />
       <If when={props.hint}>
-        <Text style={{ fontSize: 13, lineHeight: 19, color: colors.muted }}>{props.hint}</Text>
+        <FieldHint text={props.hint!} />
       </If>
     </View>
   );
