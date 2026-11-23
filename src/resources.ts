@@ -209,6 +209,7 @@ function cleanupSteps(cfg: Cfg, busyRepos: Set<string>): Step[] {
   const rm = async (p: string) => { const s = await sizeOf(p); rmSync(p, { recursive: true, force: true }); return s; };
   const repos = () => workRepos(cfg).filter((r) => ![...busyRepos].some((b) => b === r || b.startsWith(r + "/")));
   return [
+    { name: "scratch checkouts of closed tasks", run: async () => (await reapScratch(cfg, busyRepos, true)).bytes },
     { name: "hub run logs > 14d", run: async () => {
       let n = 0; const d = P("logs", "runs");
       if (existsSync(d)) for (const f of readdirSync(d)) if (ageDays(join(d, f)) > 14) n += await rm(join(d, f));
@@ -258,6 +259,108 @@ function cleanupSteps(cfg: Cfg, busyRepos: Set<string>): Step[] {
   ];
 }
 
+// ------------------------------------------------------------------ agent scratch checkouts / worktrees
+// Agents put one checkout or `git worktree` per task under ~/.agent-hub/work; nothing ever removed them, so a busy
+// host collected 1000+ directories. Reap the ones whose task is closed, keeping anything that still holds work.
+
+/** Task ids a scratch dir name refers to: "t10829-prof", "gf-10648", "nsh-T-H0057" → T-10829, T-10648, T-H0057. */
+export function taskIdsInName(name: string): string[] {
+  const out = new Set<string>();
+  for (const m of name.matchAll(/(?:^|[^a-z0-9])t-?([a-z]?\d{3,})(?![0-9])/gi)) out.add(`T-${m[1].toUpperCase()}`);
+  for (const m of name.matchAll(/(?:^|[-_])(\d{4,5})(?![0-9])/g)) out.add(`T-${m[1]}`);
+  return [...out];
+}
+
+/** Ids of tasks that may still use their scratch dir (active, waiting, blocked, inbox). */
+function openTaskIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const st of ["active", "waiting", "blocked", "inbox"]) {
+    const d = P("tasks", st);
+    if (existsSync(d)) for (const f of readdirSync(d)) if (f.endsWith(".md")) ids.add(f.slice(0, -3));
+  }
+  return ids;
+}
+
+/** Newest mtime among the dir and a few files that move whenever someone works in it. */
+function scratchIdleDays(dir: string): number {
+  const probes = [dir, join(dir, ".git"), join(dir, ".git", "index"), join(dir, ".git", "HEAD"), join(dir, "target")];
+  return Math.min(...probes.filter(existsSync).map(ageDays));
+}
+
+/** A git checkout still holding work: uncommitted changes, or commits on a local branch no remote has. */
+async function holdsUnpushedWork(dir: string): Promise<boolean> {
+  if (!existsSync(join(dir, ".git"))) return false;
+  const st = await $`git -C ${dir} status --porcelain --untracked-files=normal`.quiet().nothrow();
+  if (st.exitCode !== 0) return true; // can't tell: keep it
+  if (st.stdout.toString().split("\n").some((l) => l.trim() && !/^\?\? (target|node_modules|dist|build)\/?$/.test(l.trim()))) return true;
+  const head = await $`git -C ${dir} log --oneline -1 HEAD --not --remotes`.quiet().nothrow();
+  if (head.stdout.toString().trim()) return true;
+  // only a standalone clone owns its branches; a worktree's other branches belong to the main repo
+  if (lstatSync(join(dir, ".git")).isDirectory()) {
+    const br = await $`git -C ${dir} log --oneline -1 --branches --not --remotes`.quiet().nothrow();
+    if (br.stdout.toString().trim()) return true;
+  }
+  return false;
+}
+
+/** Removes a scratch dir; a linked worktree is unregistered from its main repo too. Returns bytes freed. */
+async function removeScratch(dir: string): Promise<number> {
+  const size = await sizeOf(dir);
+  const gitFile = join(dir, ".git");
+  if (existsSync(gitFile) && lstatSync(gitFile).isFile()) {
+    const m = readFileSync(gitFile, "utf8").match(/gitdir:\s*(.+)/);
+    const common = m ? m[1].trim().replace(/\/worktrees\/[^/]+\/?$/, "") : "";
+    rmSync(dir, { recursive: true, force: true });
+    if (common && existsSync(common)) await $`git --git-dir=${common} worktree prune`.quiet().nothrow();
+  } else rmSync(dir, { recursive: true, force: true });
+  return size;
+}
+
+export type ScratchVerdict = "keep-open-task" | "keep-busy" | "keep-recent" | "keep-work" | "remove";
+
+/** Decide one scratch dir. Pure over its inputs apart from the git probe, so the rules are testable. */
+export async function judgeScratch(dir: string, o: { open: Set<string>; busy: Set<string>; idleDays: number; minIdleDays: number;
+  closedIdleDays: number; hasWork?: (d: string) => Promise<boolean> }): Promise<ScratchVerdict> {
+  const name = dir.split("/").pop() ?? "";
+  if ([...o.busy].some((b) => b === dir || b.startsWith(dir + "/"))) return "keep-busy";
+  const ids = taskIdsInName(name);
+  if (ids.some((id) => o.open.has(id))) return "keep-open-task";
+  // a dir named after a closed task goes after a short grace; an unnamed one (shared per-repo checkout) must idle longer
+  if (o.idleDays < (ids.length ? o.closedIdleDays : o.minIdleDays)) return "keep-recent";
+  if (await (o.hasWork ?? holdsUnpushedWork)(dir)) return "keep-work";
+  return "remove";
+}
+
+/** Scratch roots: resources.scratch_dirs, default ~/.agent-hub/work. ~/work is the owner's and is never reaped. */
+const scratchRoots = (cfg: Cfg): string[] =>
+  (cfg.resources?.scratch_dirs ?? ["~/.agent-hub/work"]).map((d: string) => d.replace(/^~/, homedir())).filter(existsSync);
+
+let lastScratchReap = 0;
+
+/** Removes scratch checkouts/worktrees of closed tasks. Runs at most once per `everyMs` unless forced (low disk). */
+export async function reapScratch(cfg: Cfg, busyRepos: Set<string>, force = false, everyMs = 6 * 3600_000): Promise<{ removed: number; bytes: number; kept: number }> {
+  const res = { removed: 0, bytes: 0, kept: 0 };
+  if (!force && Date.now() - lastScratchReap < everyMs) return res;
+  lastScratchReap = Date.now();
+  const r = cfg.resources ?? {};
+  const open = openTaskIds();
+  for (const root of scratchRoots(cfg)) for (const name of readdirSync(root)) {
+    const dir = join(root, name);
+    try {
+      if (name.startsWith(".") || lstatSync(dir).isSymbolicLink()) continue;
+      const isDir = lstatSync(dir).isDirectory();
+      const idleDays = isDir ? scratchIdleDays(dir) : ageDays(dir);
+      const v = await judgeScratch(dir, { open, busy: busyRepos, idleDays,
+        minIdleDays: r.scratch_idle_days ?? 7, closedIdleDays: r.scratch_closed_task_days ?? 1,
+        hasWork: isDir ? undefined : async () => false });
+      if (v !== "remove") { res.kept++; continue; }
+      res.bytes += isDir ? await removeScratch(dir) : (() => { const s = statSync(dir).size; rmSync(dir, { force: true }); return s; })();
+      res.removed++;
+    } catch { res.kept++; }
+  }
+  return res;
+}
+
 let lastCleanup = 0;
 
 // Debounce the low-disk alert: no point paging the owner every 30 min about a disk that is not getting worse
@@ -295,6 +398,9 @@ async function cleanupBlindSpot(cfg: Cfg): Promise<{ en: string; zh: string } | 
 /** Runs tiered cleanup until disk is back above target. Returns a human summary or null if nothing needed. */
 export async function ensureDisk(cfg: Cfg, host: string, busyRepos: Set<string>, alert: (t: string) => Promise<unknown>) {
   const r = cfg.resources ?? {};
+  // closed tasks' scratch dirs go on a schedule, not only when the disk is already low
+  const reaped = await reapScratch(cfg, busyRepos).catch(() => null);
+  if (reaped?.removed) journal(host, `🧹 removed ${reaped.removed} scratch checkouts of closed tasks, freed ${gb(reaped.bytes)}GB`);
   const low = (s: Stats) => s.diskFreeGB < (r.disk_min_gb ?? 30) || s.diskFreePct < (r.disk_min_pct ?? 10);
   let s = sample(cfg);
   if (!low(s) || Date.now() - lastCleanup < 30 * 60_000) return null;

@@ -86,3 +86,25 @@ test("cleanupLine stays silent when a pass freed nothing", () => {
   expect(cleanupLine(80e6, [], 10)).toBeNull(); // noise floor
   expect(cleanupLine(2.5e9, ["rust incremental caches: 2.5GB"], 43)).toBe("🧹 disk cleanup freed 2.5GB → 43GB free (rust incremental caches: 2.5GB)");
 });
+
+test("taskIdsInName finds the task a scratch dir was made for", () => {
+  const { taskIdsInName } = require("../src/resources");
+  expect(taskIdsInName("t10829-prof")).toEqual(["T-10829"]);
+  expect(taskIdsInName("gf-10648")).toEqual(["T-10648"]);
+  expect(taskIdsInName("nsh-T-H0057")).toEqual(["T-H0057"]);
+  expect(taskIdsInName("allsum-nsh-T10105")).toEqual(["T-10105"]);
+  expect(taskIdsInName("noop")).toEqual([]);
+  expect(taskIdsInName("gf178")).toEqual([]); // a PR number, not a task id
+});
+
+test("judgeScratch keeps open-task, busy, recent and unpushed dirs and removes the rest", async () => {
+  const { judgeScratch } = require("../src/resources");
+  const base = { open: new Set(["T-10866"]), busy: new Set<string>(), minIdleDays: 7, closedIdleDays: 1, hasWork: async () => false };
+  expect(await judgeScratch("/w/noop-T-10866", { ...base, idleDays: 30 })).toBe("keep-open-task");
+  expect(await judgeScratch("/w/nsh", { ...base, busy: new Set(["/w/nsh/sub"]), idleDays: 30 })).toBe("keep-busy");
+  expect(await judgeScratch("/w/t10500-x", { ...base, idleDays: 0.5 })).toBe("keep-recent");
+  expect(await judgeScratch("/w/t10500-x", { ...base, idleDays: 2 })).toBe("remove");
+  expect(await judgeScratch("/w/nsh", { ...base, idleDays: 2 })).toBe("keep-recent"); // shared checkout idles longer
+  expect(await judgeScratch("/w/nsh", { ...base, idleDays: 8 })).toBe("remove");
+  expect(await judgeScratch("/w/t10500-x", { ...base, idleDays: 9, hasWork: async () => true })).toBe("keep-work");
+});

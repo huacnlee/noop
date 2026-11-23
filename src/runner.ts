@@ -123,7 +123,7 @@ ${deadlinePrompt(limits)}
 ${channelPrompt()}
 
 # Task ${meta.id}: ${meta.title}
-Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.agent-hub/work — never inside the hub folder ${ROOT}, which syncs to the cloud   Host capabilities: ${meta.host_caps ?? ""}
+Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.agent-hub/work — never inside the hub folder ${ROOT}, which syncs to the cloud. Reuse an existing checkout of the repo there when one is clean (e.g. ~/.agent-hub/work/<repo>, `git fetch` + new branch) instead of cloning again; only add a worktree when you need to edit in parallel, name it after the task (e.g. <repo>-${meta.id}), and remove it (`git worktree remove`) once its branch is pushed and you return done — keep it only while returning waiting   Host capabilities: ${meta.host_caps ?? ""}
 Priority: ${meta.priority}   Source: ${meta.source}
 
 ${body}
