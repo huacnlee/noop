@@ -415,7 +415,7 @@ describe("channel", () => {
         { ts: ts(5), host: "linux-box", cli: "codex", status: "done", summary: "已修复登录页布局，桌面验证通过" },
       ] } },
     }, width: 1200, height: 800, platform: "macos" });
-    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.press("text:T-0005 >> nth=0");
     await app.waitFor("id:task-talk");
     await app.waitFor("text:已修复登录页布局，桌面验证通过");
     expect(app.shows("text:请修复登录页在手机上的布局")).toBe(true);
@@ -464,8 +464,8 @@ describe("channel", () => {
       [`GET ${URL}/media/*`]: { body: "# Acceptance\n\nCopy works on every page." },
       [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0005", title: "修复登录页", agent: "dev", state: "done", created: ts(1), runs: [] } },
     } });
-    await app.waitFor("id:task-chip-T-0005 >> nth=0");
-    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.waitFor("text:T-0005 >> nth=0");
+    await app.press("text:T-0005 >> nth=0");
     await app.waitFor("id:task-talk");
     await app.type("id:task-composer", "草稿");
     await app.keyboard.press("a");
@@ -529,7 +529,7 @@ describe("channel", () => {
     await app.waitFor("text:主要结果在主会话");
     expect(app.shows("text:只在任务里说的话")).toBe(false);
     expect(app.shows("text:任务里的回复")).toBe(false);
-    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.press("text:T-0005 >> nth=0");
     await app.waitFor("text:很久以前的对话");
     expect(app.shows("text:只在任务里说的话")).toBe(true);
     expect(app.shows("text:任务里的回复")).toBe(true);
@@ -2275,17 +2275,23 @@ describe("commands", () => {
 
 
 test("channels share per-message read state with main chat, and Menu can mark all as read", async () => {
-  const older = { id: "shared-old", ts: ts(-300), from: "agent", kind: "notice", text: "Shared channel result", ref: "T-0700" };
-  const later = Array.from({ length: 240 }, (_, i) => ({ id: `unread-${i}`, ts: ts(-290 + i), from: "agent", kind: "notice", text: `Other result ${i}` }));
+  const older = { id: "shared-old", ts: ts(59), from: "agent", kind: "notice", text: "Shared channel result", ref: "T-0700" };
   const c = { slug: "omamail", name: "Omamail", goal: "Mail quality", status: "active", created: ts(-900), last_activity: older.ts, stale: false, count: 1,
     items: [{ id: "T-0700", kind: "task", title: "Review mail", state: "done", updated: older.ts }] };
+  const later: unknown[] = [];
   const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "linux", network: {
-    ...hub([], [older, ...later]),
+    ...hub([]),
+    [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }),
     [`GET ${URL}/api/channels`]: { body: { channels: [c, { ...c, slug: "mail-perf", name: "Mail performance" }] } },
     [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0700", title: "Review mail", agent: "lead", state: "done", request: "Review mail", runs: [], steps: [], events: [older] } },
     [`GET ${URL}/api/channels/feed?*`]: { body: { events: [older, { id: "step", ts: ts(-299), from: "agent", kind: "notice", text: "Running cargo test", ref: "T-0700", thread: true }, { id: "ack", ts: ts(-298), from: "hub", kind: "notice", text: "收到 D-1", ref: "T-0700" }] } },
   } });
-  await app.waitFor("id:side-channel-unread-omamail");
+  // The main chat reads everything at or above its newest row on screen, so the result arrives while a machine page is open.
+  await app.waitFor("Channel");
+  await app.press("label:Load 42% · Disk 120 GB free · 1 running");
+  await app.waitFor("Machine linux-box");
+  later.push(older);
+  await app.waitFor("id:side-channel-unread-omamail", { timeout: 10000 });
   await app.waitFor("id:side-channel-unread-mail-perf");
   await app.press("id:side-channel-omamail");
   await app.waitFor("text:Shared channel result");
@@ -2297,7 +2303,10 @@ test("channels share per-message read state with main chat, and Menu can mark al
   });
   expect(app.shows("id:side-channel-unread-omamail")).toBe(false);
   expect(app.shows("id:side-channel-unread-mail-perf")).toBe(false);
+  // a main-chat result arriving while the channel is open stays unread, for Mark all as read to clear
+  later.push({ id: "main-new", ts: ts(59.5), from: "agent", kind: "notice", text: "Main chat result" });
   await app.press("id:user-menu");
+  await app.waitUntil(() => app.enabled("id:mark-all-read"), { timeout: 10000 });
   await app.press("id:mark-all-read");
   await app.waitUntil(() => { const raw = app.storage()[`hub.read:${URL}`]; return !!raw && !!JSON.parse(raw).through; });
   expect(app.shows("id:menu-unread-count")).toBe(false);
