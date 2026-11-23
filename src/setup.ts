@@ -125,7 +125,23 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
   const g = (...a: string[]) => $`git ${a}`.cwd(CODE).quiet().nothrow();
   if (!existsSync(join(CODE, ".git"))) return false;
   await g("fetch", "-q", "origin");
-  const head = (await g("rev-parse", "HEAD")).stdout.toString().trim();
+  // The install must track main. A task that branched inside it (e.g. an evolve PR) leaves it following that
+  // branch, which reads as "already current" forever. Go back to main once main has all of the branch's work.
+  const branch = (await g("rev-parse", "--abbrev-ref", "HEAD")).stdout.toString().trim();
+  if (branch && branch !== "main" && (await g("rev-parse", "--verify", "-q", "origin/main")).exitCode === 0) {
+    const unmerged = (await g("cherry", "origin/main", "HEAD")).stdout.toString().split("\n").some((l) => l.startsWith("+"));
+    const dirtyNow = dirtyPaths((await g("status", "--porcelain", "--untracked-files=no")).stdout.toString()).length > 0;
+    if (unmerged || dirtyNow || (await g("checkout", "-q", "main")).exitCode !== 0) {
+      if (updateBlocked(`on branch ${branch}`)) {
+        try {
+          const { loadConfig, hostName, journal } = await import("./core");
+          journal(hostName(loadConfig()), `⏸ self-update blocked — the install is on branch ${branch} (unmerged work or local edits), not main.`);
+        } catch {}
+      }
+      return false;
+    }
+  }
+  const head =(await g("rev-parse", "HEAD")).stdout.toString().trim();
   const up = (await g("rev-parse", "@{u}")).stdout.toString().trim();
   if (!up || head === up) return false;
   if (!opts.force && updateRejected(up)) return false; // already failed its tests here; wait for the next release
