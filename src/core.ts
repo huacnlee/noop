@@ -1,3 +1,4 @@
+import "./test-isolation";
 // noop core — shared files as the world (stigmergy; synced via the owner's Worker, src/sync.ts), task queue, agent runner, journal, memory.
 import { OFFLINE_AFTER_MINUTES } from "../cloud/src/budget";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";

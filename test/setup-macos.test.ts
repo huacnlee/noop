@@ -33,7 +33,7 @@ test("primary initialization works on the current OS and survives reinitializati
     const data = join(root, "data");
     const env = { ...process.env, NOOP_HOME: root, HUB_DATA: data, HUB_SYNC: "local", HUB_SYNC_FAKE: "" };
     for (const args of [["--primary"], []]) {
-      const result = Bun.spawnSync([process.execPath, "src/cli.ts", "init", ...args], { env });
+      const result = Bun.spawnSync([process.execPath, "src/cli.ts", "init", ...args], { env, cwd: join(import.meta.dir, "..") });
       expect(result.exitCode).toBe(0);
       expect(readFileSync(join(data, "config.toml"), "utf8")).toContain(`primary = "${hostname().split(".")[0]}"`);
       expect(existsSync(join(data, "tasks/inbox"))).toBe(true);

@@ -15,3 +15,6 @@ const W = mkdtempSync(join(tmpdir(), "hub-test-"));
 process.env.NOOP_HOME = join(W, "home");
 process.env.HUB_DATA = join(W, "data");
 process.env.HUB_SYNC = "local";
+
+// Core and sync refuse test imports unless this isolation setup ran first.
+(globalThis as any)[Symbol.for("noop.test.isolated")] = true;

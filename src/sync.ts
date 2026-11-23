@@ -1,3 +1,4 @@
+import "./test-isolation";
 // Data sync: ~/.noop/data is a local working mirror of the fleet files stored in the owner's own
 // Cloudflare Worker (cloud/src/files.ts). Agents and code keep reading/writing plain files; this module
 //   pull()        applies remote changes since the last seen rev (remote wins for paths changed on both sides,
