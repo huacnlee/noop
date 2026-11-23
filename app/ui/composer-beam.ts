@@ -23,7 +23,7 @@ fn shade(uv: vec2f) -> vec4f {
   let t = clamp(nsh.time / uniforms.duration, 0.0, 1.0);
   // A long comet: short bright head, long tail that shifts cyan -> blue -> indigo.
   let offset = fract(arc / (4.0 * quarter) - t * 1.25 + 0.5) - 0.5;
-  let tail = clamp(-offset / 0.38, 0.0, 1.0);
+  let tail = clamp(-offset / 0.45, 0.0, 1.0);
   let beam = select(exp(-pow(offset / 0.025, 2.0)), pow(1.0 - tail, 1.6), offset <= 0.0);
   let cyan = vec3f(0.25, 0.85, 1.0);
   let violet = vec3f(0.55, 0.35, 1.0);
@@ -31,10 +31,10 @@ fn shade(uv: vec2f) -> vec4f {
   hue = mix(hue, violet, smoothstep(0.45, 1.0, tail));
   // Everything stays inside the border: a thin rim just inside the edge plus a soft inward glow.
   let inside = smoothstep(0.0, 1.0, depth);
-  let rim = exp(-pow((depth - 1.2) / 1.4, 2.0));
-  let halo = exp(-max(depth, 0.0) / 18.0);
+  let rim = exp(-pow((depth - 1.4) / 2.0, 2.0));
+  let halo = exp(-max(depth, 0.0) / 26.0);
   let head = exp(-pow(offset / 0.015, 2.0));
-  let color = mix(hue, vec3f(0.92, 0.97, 1.0), rim * head * 0.7);
+  let color = mix(hue, vec3f(0.92, 0.97, 1.0), rim * head * 0.9);
   let fade = smoothstep(0.0, 0.1, t) * (1.0 - smoothstep(0.82, 1.0, t));
-  return vec4f(color, beam * fade * inside * min(1.0, rim + 0.4 * halo));
+  return vec4f(color, beam * fade * inside * min(1.0, 1.15 * rim + 0.7 * halo + 0.35 * head));
 }`;
