@@ -21,13 +21,20 @@ fn shade(uv: vec2f) -> vec4f {
   if (p.x < 0.0) { arc = 4.0 * quarter - arc; }
 
   let t = clamp(nsh.time / uniforms.duration, 0.0, 1.0);
-  let offset = fract(arc / (4.0 * quarter) - t + 0.5) - 0.5;
-  let width = select(0.16, 0.05, offset > 0.0);
-  let beam = exp(-pow(abs(offset) / width, 2.0));
-  let rim = exp(-pow((depth - 1.2) / 1.8, 2.0));
-  let halo = exp(-max(depth, 0.0) / 12.0);
-  let fade = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.88, 1.0, t));
-  let core = exp(-pow(abs(offset) / 0.02, 2.0));
-  let tint = mix(uniforms.tint.rgb, vec3f(0.85, 0.95, 1.0), rim * (0.4 * beam + 0.6 * core));
-  return vec4f(tint, beam * fade * min(1.0, 1.0 * rim + 0.42 * halo) * smoothstep(-0.5, 0.5, depth));
+  // A long comet: short bright head, long tail that shifts cyan -> blue -> indigo.
+  let offset = fract(arc / (4.0 * quarter) - t * 1.25 + 0.5) - 0.5;
+  let tail = clamp(-offset / 0.38, 0.0, 1.0);
+  let beam = select(exp(-pow(offset / 0.025, 2.0)), pow(1.0 - tail, 1.6), offset <= 0.0);
+  let cyan = vec3f(0.45, 0.85, 1.0);
+  let violet = vec3f(0.55, 0.45, 1.0);
+  var hue = mix(cyan, uniforms.tint.rgb, smoothstep(0.0, 0.45, tail));
+  hue = mix(hue, violet, smoothstep(0.45, 1.0, tail));
+  // Everything stays inside the border: a thin rim just inside the edge plus a soft inward glow.
+  let inside = smoothstep(0.0, 1.0, depth);
+  let rim = exp(-pow((depth - 1.0) / 1.0, 2.0));
+  let halo = exp(-max(depth, 0.0) / 14.0);
+  let head = exp(-pow(offset / 0.015, 2.0));
+  let color = mix(hue, vec3f(0.92, 0.97, 1.0), rim * head * 0.7);
+  let fade = smoothstep(0.0, 0.1, t) * (1.0 - smoothstep(0.82, 1.0, t));
+  return vec4f(color, beam * fade * inside * min(1.0, 0.9 * rim + 0.28 * halo));
 }`;
