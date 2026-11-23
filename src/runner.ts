@@ -395,7 +395,7 @@ function parsed(text: string): Result | null {
   } catch { return null; }
 }
 
-/** Models occasionally put a literal line break, a bare `"` or a lone backslash inside a JSON string. Keep the text, make the block parseable.
+/** Models occasionally put a literal line break, a bare `"` or a lone backslash inside a JSON string, or a stray word between members. Keep the text, make the block parseable.
  * A `"` inside a string is a stray quote unless the next non-space character can follow a value (`:`, `,`, `}`, `]`, end). */
 function repairJson(json: string): string {
   let out = "", inString = false, escaped = false;
@@ -414,6 +414,14 @@ function repairJson(json: string): string {
       const next = json[j] ?? "";
       if (next === "" || next === "," || next === ":" || next === "}" || next === "]") { inString = false; out += c; }
       else out += '\\"';
+      continue;
+    }
+    if (!inString && /[A-Za-z_]/.test(c)) {
+      // a stray bare word between members (codex wrote `"…",\n tml "channels"` in T-2208) is noise: drop it,
+      // keeping the JSON literals and a number's exponent
+      const word = /^[A-Za-z_]+/.exec(json.slice(i))![0];
+      if (/^(true|false|null)$/.test(word) || /[\d.]$/.test(out)) out += word;
+      i += word.length - 1;
       continue;
     }
     if (inString && c === "\n") out += "\\n";

@@ -76,6 +76,14 @@ test("result parsing keeps a lone backslash such as a Windows drive path", () =>
   expect(parseResult(out)).toMatchObject({ status: "done", summary: "can't reach D:\\、USB drives" });
 });
 
+test("result parsing drops a stray bare word between members", () => {
+  // a real run (T-2208, 2026-11-23) finished its work and was re-run because codex wrote this
+  const out = '```json\n{\n  "status": "done",\n  "summary": "ok",\n tml "channels": ["c"]\n}\n```';
+  expect(parseResult(out)).toMatchObject({ status: "done", summary: "ok", channels: ["c"] });
+  // literals and exponents survive the repair
+  expect(parseResult('```json\n{"status":"done","summary":"ok",x "n":1e3,"b":true,"z":null}\n```')).toMatchObject({ n: 1000, b: true, z: null });
+});
+
 test("result parsing repairs a raw line break inside a JSON string", () => {
   const out = '```json\n{"status":"delegated","summary":"ok","followups":[{"title":"x","body":"line one\n","agent":"a"}]}\n```';
   expect(parseResult(out)).toMatchObject({ status: "delegated", followups: [{ title: "x", body: "line one\n", agent: "a" }] });
