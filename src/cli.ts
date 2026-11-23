@@ -719,6 +719,11 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
+  // A channel nobody reads stays quiet: with this many cards already unanswered, one more menu is one more unread line.
+  // Off by default (0); a fleet turns it on with [idle] max_open_cards = N. 2026-11-23: four open cards, none answered
+  // in seven days, and the idle menu kept adding one every few hours.
+  const maxOpen = cfg.idle?.max_open_cards ?? 0;
+  if (maxOpen > 0 && list(P("decisions", "open"), /^[DP]-.*\.md$/).length >= maxOpen) return;
   // Re-offer after the latest unanswered menu's cooldown, regardless of filename order.
   const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta)
     .filter((m) => m.kind === "menu")
