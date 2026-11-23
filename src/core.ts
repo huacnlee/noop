@@ -358,6 +358,31 @@ function yieldToPreferred(meta: Record<string, string>, caps: string[], cfg: Cfg
   return onlineHosts(cfg).some((h) => h.host !== hostName(cfg) && prefer.every((r) => h.caps.includes(r)));
 }
 
+/** The owner's machine priority (`fleet.host_priority`, e.g. { "omarchy-lb": 10, "macbook": -5 }; settable from settings.json).
+ *  Higher goes first; unlisted machines are 0. It only orders machines that can all run a task: `requires` / `host:` pins
+ *  and the task's own `prefer` still win. */
+export const hostPriority = (cfg: Cfg, host: string): number => Number(cfg.fleet?.host_priority?.[host] ?? 0) || 0;
+
+/** Device condition: an online machine counts as free for more work only with CPU and memory headroom. */
+export const hostHasRoom = (h: HostBeat): boolean => {
+  const s = h.stats;
+  if (!s) return h.busy === 0;
+  return heartPressure(s) < 0.75 && (s.memFreePct == null || s.memFreePct >= 15) && (s.diskFreeGB == null || s.diskFreeGB >= 5);
+};
+
+/** Leave the task for a higher-priority online machine that can run it and has room. Like `prefer`, the wait lapses after
+ *  `prefer_wait_minutes`, so a busy or broken preferred machine never holds the queue. */
+function yieldToPriority(meta: Record<string, string>, cfg: Cfg): boolean {
+  const table = cfg.fleet?.host_priority;
+  if (!table || !Object.keys(table).length) return false;
+  const waitMs = (cfg.fleet?.prefer_wait_minutes ?? 10) * 60_000;
+  const since = Date.parse(meta.planned || meta.created);
+  if (!Number.isNaN(since) && Date.now() - since > waitMs) return false;
+  const me = hostName(cfg), mine = hostPriority(cfg, me), prefer = reqList(meta.prefer);
+  return onlineHosts(cfg).some((h) => h.host !== me && hostPriority(cfg, h.host) > mine && matches(meta, h.caps)
+    && prefer.every((r) => h.caps.includes(r)) && hostHasRoom(h));
+}
+
 /** A host's CPU pressure as its heartbeat reports it (0-1): measured utilisation when known, else load/cores. */
 const heartPressure = (s: any): number => (s?.cpuBusyPct == null ? (s?.loadRatio ?? 0) : s.cpuBusyPct / 100);
 
@@ -383,7 +408,7 @@ export function pickTask(cfg: Cfg, myLoad = 0, heavyOk = true): string | null {
   const cands = list(P("tasks", "inbox"), /^T-.*\.md$/)
     .map((p) => ({ p, m: readDoc(p).meta }))
     // the planner decides where a task runs first; unplanned tasks wait for it (at most plan_wait_minutes)
-    .filter(({ m }) => (m.planned || Date.now() - Date.parse(m.created ?? "") > (cfg.fleet?.plan_wait_minutes ?? 3) * 60_000) && matches(m, caps) && chooseCli(m, cfg) && !yieldToPreferred(m, caps, cfg) && !yieldHeavy(m, cfg, myLoad, heavyOk))
+    .filter(({ m }) => (m.planned || Date.now() - Date.parse(m.created ?? "") > (cfg.fleet?.plan_wait_minutes ?? 3) * 60_000) && matches(m, caps) && chooseCli(m, cfg) && !yieldToPreferred(m, caps, cfg) && !yieldToPriority(m, cfg) && !yieldHeavy(m, cfg, myLoad, heavyOk))
     .sort((a, b) => (rank[a.m.priority] ?? 2) - (rank[b.m.priority] ?? 2) || a.p.localeCompare(b.p));
   return cands[0]?.p ?? null;
 }

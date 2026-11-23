@@ -10,6 +10,7 @@ primary = "__PRIMARY__"            # always-on macOS or Linux machine: runs rout
 offline_after_minutes = 8             # no heartbeat for this long → host considered offline (at least 8: heartbeats go up every ~5 min)
 reap_after_minutes = 20               # active task on an offline host → requeued
 prefer_wait_minutes = 10              # soft 'prefer' waits at most this long for an online preferred host
+# host_priority = { "my-linux-pc" = 10, "my-laptop" = -5 }  # higher-priority machines take tasks first while online with free CPU/memory; unlisted = 0
 
 [update]
 check_minutes = 30                    # self-update framework code (git ff + bun test, auto-rollback)

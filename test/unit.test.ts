@@ -794,3 +794,23 @@ test("a long paste uploads as Markdown; other text types stay refused", async ()
   expect(uploadProblem("text/markdown", 10)).toBeNull();
   expect(uploadProblem("text/html", 10)?.status).toBe(415);
 });
+
+test("pickTask: a higher-priority online machine with room takes the task first; a saturated one or a long wait does not hold it", async () => {
+  const { pickTask, writeDoc, P, hostName } = await import("../src/core");
+  const { writeFileSync, mkdirSync, rmSync } = await import("node:fs");
+  if (!Bun.which("claude") && !Bun.which("codex")) return;
+  const cfg: any = { clis: { default: ["claude", "codex"] }, fleet: { host_priority: { "prio-big": 10 } } };
+  mkdirSync(P("fleet", "hosts"), { recursive: true });
+  const beat = (stats: any) => writeFileSync(P("fleet", "hosts", "prio-big.json"), JSON.stringify({ host: "prio-big", caps: [], seen: new Date().toISOString(), busy: 0, version: "1", stats }));
+  const now = new Date().toISOString();
+  writeDoc(P("tasks", "inbox", "T-9031.md"), { id: "T-9031", title: "fresh", agent: "lead", priority: "urgent", planned: now, created: now }, "x");
+  try {
+    beat({ cpuBusyPct: 5, memFreePct: 60 });
+    expect(pickTask(cfg) ?? "").not.toContain("T-9031"); // the idle higher-priority machine gets it
+    beat({ cpuBusyPct: 95, memFreePct: 60 });
+    expect(pickTask(cfg)).toContain("T-9031"); // it is saturated: this machine runs it
+    cfg.fleet.host_priority[hostName(cfg)] = 20;
+    beat({ cpuBusyPct: 5, memFreePct: 60 });
+    expect(pickTask(cfg)).toContain("T-9031"); // this machine ranks higher
+  } finally { rmSync(P("fleet", "hosts", "prio-big.json"), { force: true }); rmSync(P("tasks", "inbox", "T-9031.md"), { force: true }); }
+});
