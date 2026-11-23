@@ -2745,6 +2745,24 @@ function Chip(props: { label: string; on: boolean; onPress: () => void; testID?:
   );
 }
 
+/** A stepper for one machine's task priority: higher takes tasks first, 0 is the default, negative only when others can't. */
+function PriorityInput(props: { host: string; value: number; onChange: (value: number) => void }) {
+  return (
+    <NumberField
+      testID={`priority-${props.host}`}
+      accessibilityLabel={L(`Task priority of ${props.host}`, `${props.host} 的任务优先级`)}
+      value={props.value}
+      min={-10}
+      max={10}
+      onChange={(value) => { if (value >= -10 && value <= 10 && value !== props.value) props.onChange(value); }}
+    />
+  );
+}
+const PRIORITY_HINT = () => L(
+  "Higher takes tasks first. While a higher machine is online, can run the task and isn't overloaded, others wait up to 10 minutes. 0 by default; a task's required or named machine still wins.",
+  "数字大的机器先接任务：它在线、能跑这个任务且不忙时，其他机器最多等 10 分钟。默认 0；任务指定的机器或硬性要求仍然优先。",
+);
+
 /** A shared stepper for the per-machine parallel limit. */
 function ParallelInput(props: { value: number; onChange: (value: number) => void }) {
   return (
@@ -3279,6 +3297,18 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
                   <ParallelInput value={e().max_parallel ?? 2} onChange={(value) => save(patches.maxParallel(value))} />
                 </View>
               </Group>
+              <If when={(e().hosts ?? []).length > 0}>
+              <Group title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
+                <Each of={e().hosts ?? []}>
+                  {(h) => (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
+                      <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{h().host}</Text>
+                      <PriorityInput host={h().host} value={h().priority} onChange={(value) => save(patches.hostPriority(h().host, value))} />
+                    </View>
+                  )}
+                </Each>
+              </Group>
+              </If>
               </If>
             </View>
           )}
@@ -4057,6 +4087,15 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
                 }
               />
             </Section>
+            <If when={(e().hosts ?? []).length > 0}>
+              <Section title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
+                <Each of={e().hosts ?? []}>
+                  {(h, i) => (
+                    <SetRow first={i() === 0} label={h().host} trailing={<PriorityInput host={h().host} value={h().priority} onChange={(value) => save(patches.hostPriority(h().host, value))} />} />
+                  )}
+                </Each>
+              </Section>
+            </If>
           </View>
         )}
       </If>

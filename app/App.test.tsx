@@ -1475,6 +1475,31 @@ describe("team settings", () => {
     await app.waitFor("id:composer");
   });
 
+  test("sets a machine's task priority", async () => {
+    const puts: unknown[] = [];
+    let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2, hosts: [{ host: "mini", priority: 0 }] }, options: { clis: [], autonomy: [] } };
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: {
+        ...hub([]),
+        [`GET ${URL}/api/settings`]: () => ({ body: view }),
+        [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
+          const p = JSON.parse(r.body!);
+          puts.push(p);
+          view = { ...view, effective: { ...view.effective, hosts: [{ host: "mini", priority: p.fleet.host_priority.mini }] } };
+          return { body: view };
+        },
+      },
+    });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-parallel");
+    await app.waitFor("text:Machine priority");
+    await app.press("id:priority-mini-inc");
+    await app.waitUntil(() => puts.length === 1);
+    expect(puts).toEqual([{ fleet: { host_priority: { mini: 1 } } }]);
+  });
+
   test("picks how long images are kept", async () => {
     const puts: unknown[] = [];
     let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2 }, options: { clis: [], autonomy: [] } };

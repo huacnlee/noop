@@ -17,7 +17,7 @@ import { basename, join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { accountsInfo } from "./accounts";
 import { cliCommand, startModel } from "./runner";
-import { type Cfg, DATA, JOURNAL_DAY, L, P, _commitPush, isEnglish, allowedClis, hostName, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
+import { type Cfg, DATA, JOURNAL_DAY, L, P, _commitPush, isEnglish, allowedClis, hostName, hostPriority, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
 import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
@@ -234,7 +234,7 @@ export function status() {
 }
 
 // ---------------------------------------------------------------- settings (UI-adjustable, shared via data repo)
-const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days", "mcp_servers"]; // whitelisted top-level keys
+const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days", "mcp_servers", "fleet"]; // whitelisted (fleet: only host_priority) top-level keys
 
 /** What an agent is for, from its profile's first line: "# Name (中文名) — what it does". */
 /** Chinese titles and one-liners for the built-in roles (a profile's own Chinese "(标题)" and text still win where present). */
@@ -298,6 +298,7 @@ export function settingsView() {
       routines: (cfg.routine ?? []).map((r: any) => ({ name: r.name, desc: routineDesc(r), every: r.every, agent: r.agent, enabled: r.enabled !== false })),
       max_parallel: cfg.host?.max_parallel ?? null,
       media_days: mediaDays(cfg),
+      hosts: knownHosts().map((host) => ({ host, priority: hostPriority(cfg, host) })),
     },
     options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
   };
@@ -305,6 +306,9 @@ export function settingsView() {
 
 let settingsHook: ((summary: string) => Promise<void>) | null = null;
 export const onSettingsSaved = (fn: (summary: string) => Promise<void>) => { settingsHook = fn; };
+
+/** Every machine that has ever sent a heartbeat (fleet/hosts/<host>.json), online or not. */
+const knownHosts = () => (existsSync(P("fleet", "hosts")) ? readdirSync(P("fleet", "hosts")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort() : []);
 
 export async function saveSettings(patch: Record<string, unknown>) {
   const cur = existsSync(P("settings.json")) ? JSON.parse(readFileSync(P("settings.json"), "utf8")) : {};
@@ -314,6 +318,13 @@ export async function saveSettings(patch: Record<string, unknown>) {
     return o;
   };
   const clean = Object.fromEntries(Object.entries(patch).filter(([k]) => SETTABLE.includes(k)));
+  if ("fleet" in clean) {
+    // only the machine priority is set from the app; other [fleet] keys (primary, …) stay in config.toml
+    const table = (clean.fleet as any)?.host_priority;
+    const prio: Record<string, number> = {};
+    for (const [h, v] of Object.entries(table && typeof table === "object" ? table : {})) if (/^[\w.-]+$/.test(h) && Number.isFinite(Number(v))) prio[h] = Math.max(-99, Math.min(99, Math.round(Number(v))));
+    if (Object.keys(prio).length) clean.fleet = { host_priority: prio }; else delete clean.fleet;
+  }
   if ("mcp_servers" in clean) {
     // the whole list replaces the saved one. The app checks each entry first; here an entry that still fails
     // (a literal secret above all: the data repo syncs through the cloud) is left out rather than failing the save,

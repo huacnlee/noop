@@ -315,6 +315,8 @@ export type SettingsView = {
     routines: { name: string; desc?: string; every: string; agent: string; enabled: boolean }[];
     max_parallel: number | null;
     media_days?: number;
+    /** Machines and their task priority (higher takes tasks first; 0 by default). */
+    hosts?: { host: string; priority: number }[];
   };
   options: { clis: string[][]; autonomy: string[] };
 };
@@ -361,6 +363,7 @@ export const patches = {
   routine: (name: string, change: { enabled?: boolean; every?: string }) => ({ routines: { [name]: change } }),
   maxParallel: (n: number) => ({ host: { max_parallel: n } }),
   mediaDays: (days: number) => ({ media_days: days }),
+  hostPriority: (host: string, priority: number) => ({ fleet: { host_priority: { [host]: priority } } }),
   /** The whole list: an array replaces the saved one. */
   commands: (list: Command[]) => ({ commands: list }),
 };
