@@ -146,6 +146,7 @@ import {
   type Attachment,
   attachProblem,
   ATTACH_MAX_BYTES,
+  textDocName,
   ATTACH_MAX_COUNT,
   insertText,
   pasteAsFile,
@@ -1786,6 +1787,9 @@ function createAttachments() {
   const note = signal<string | null>(null);
   let seq = 0;
   function attach(file: Blob, name: string, fromPicker = false) {
+    // a Markdown or text file goes with the message as a document, like a long paste
+    const doc = fromPicker ? null : textDocName(file.type, name);
+    if (doc && !imageType(file.type, name)) return attachDoc(file, doc);
     // the photo picker only returns images, but phones often give them no type or extension; the server reads the bytes
     const type = imageType(file.type, name) ?? (fromPicker ? "image/jpeg" : null);
     const problem = attachProblem(type, file.size, list().length);
@@ -1806,7 +1810,7 @@ function createAttachments() {
     for (const u of uris) {
       const path = filePath(u);
       const name = path.split(/[\\/]/).pop() ?? "image";
-      if (!imageType(undefined, name)) { note.set(L("Only images can be sent", "只能发送图片")); continue; }
+      if (!imageType(undefined, name) && !textDocName(undefined, name)) { note.set(L("Only images and text files can be sent", "只能发送图片和文本文件")); continue; }
       try {
         const bytes = await fs.readFile(path);
         attach(new Blob([bytes as Uint8Array<ArrayBuffer>]), name);
@@ -1817,11 +1821,15 @@ function createAttachments() {
   }
   /** A long paste, kept as a Markdown file that goes with the message (read in the reader, not dumped into the box). */
   function attachText(text: string) {
+    attachDoc(new Blob([text]), `pasted-${seq + 1}.md`);
+  }
+  /** A Markdown document that goes with the message: a long paste or a pasted/dropped text file. */
+  function attachDoc(content: Blob, name: string) {
     if (list().length >= ATTACH_MAX_COUNT) return note.set(attachProblem("text/markdown", 0, list().length));
-    const file = new Blob([text], { type: "text/markdown" });
-    if (file.size > ATTACH_MAX_BYTES) return note.set(L("Pasted text must be 10 MB or less", "粘贴的文字不能超过 10 MB"));
+    const file = new Blob([content], { type: "text/markdown" });
+    if (file.size > ATTACH_MAX_BYTES) return note.set(L("Text files must be 10 MB or less", "文本文件不能超过 10 MB"));
     note.set(null);
-    const name = `pasted-${++seq}.md`;
+    ++seq;
     // the name rides on the preview URL so the sent message shows it as a document right away
     list.update((a) => [...a, { id: `a${seq}`, name, type: "text/markdown", size: file.size, file, preview: `${URL.createObjectURL(file)}#${name}` }]);
   }

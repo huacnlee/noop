@@ -265,6 +265,15 @@ export function imageType(type: string | undefined, name: string): string | null
   return IMAGE_EXT[(name.match(/\.(\w+)$/)?.[1] ?? "").toLowerCase()] ?? null;
 }
 
+/** A text file (Markdown, plain text) sent as a Markdown document: the name it goes by ("notes.txt" → "notes.md"), or null when it is not one. */
+export function textDocName(type: string | undefined, name: string): string | null {
+  const ext = (name.match(/\.(\w+)$/)?.[1] ?? "").toLowerCase();
+  const byExt = ["md", "markdown", "txt", "text"].includes(ext);
+  if (!byExt && !(type && /^text\/(markdown|x-markdown|plain)$/i.test(type.split(";")[0].trim()))) return null;
+  const stem = (byExt ? name.slice(0, -ext.length - 1) : name.replace(/\.\w+$/, "")) || "pasted";
+  return `${stem}.md`;
+}
+
 /** A paste this long goes with the message as a Markdown file, not into the box: it would bury the draft and the timeline. */
 export const PASTE_FILE_CHARS = 4000;
 export const PASTE_FILE_LINES = 80;
