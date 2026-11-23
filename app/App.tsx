@@ -3602,6 +3602,16 @@ const CLAUDE_HINT = () => L(
   "登录一次，所有机器共用：在任意一台电脑上运行 `claude setup-token`，把得到的令牌粘贴到这里。各机器优先使用订阅账号，额度用尽时自动改用 API Key，额度恢复后切回。未填写的项沿用各机器自己的登录和 ~/.claude/settings.json。",
 );
 
+/** The end of a stored key's row: masked dots and a chevron, the whole row opening its editor. */
+function SetSecretMark() {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.faint }}>••••••</Text>
+      <Icon name="chevron" size={14} tint={colors.faint} />
+    </View>
+  );
+}
+
 /** The Claude credentials: fixed rows that open the shared-key editor on their own name. */
 function ClaudeKeyRows(props: { settings: Settings }) {
   const st = props.settings;
@@ -3612,12 +3622,17 @@ function ClaudeKeyRows(props: { settings: Settings }) {
   return (
     <Each of={CLAUDE_KEYS} key={(k) => k.name}>
       {(k, i) => (
-        <SettingsItem first={i() === 0} testID={`claude-key-${k().name}`} style={{ flexDirection: "row", alignItems: "center" }}>
-          <View role="button" accessibilityLabel={k().label()} onPress={() => open(k().name)} style={{ flex: 1, minWidth: 0, gap: 3 }}>
+        <SettingsItem first={i() === 0} testID={`claude-key-${k().name}`} onPress={() => open(k().name)} style={{ flexDirection: "row", alignItems: "center" }}>
+          <View accessibilityLabel={k().label()} style={{ flex: 1, minWidth: 0, gap: 3 }}>
             <Text style={{ fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().label()}</Text>
             <Text style={{ fontSize: 12.5, color: colors.faint, numberOfLines: 1 }}>{set(k().name) ? L(`Set ${new Date(set(k().name)!.updated).toLocaleDateString()}`, `设置于 ${new Date(set(k().name)!.updated).toLocaleDateString()}`) : k().hint()}</Text>
           </View>
-          <Text style={{ fontFamily: MONO, fontSize: 13, color: set(k().name) ? colors.faint : colors.info }}>{set(k().name) ? "••••••" : L("Set", "设置")}</Text>
+          <If
+            when={set(k().name)}
+            else={<Button label={L("Set", "设置")} size="sm" variant="secondary" onPress={() => open(k().name)} testID={`claude-key-set-${k().name}`} />}
+          >
+            <SetSecretMark />
+          </If>
         </SettingsItem>
       )}
     </Each>
@@ -3805,12 +3820,12 @@ function SecretRows(props: { settings: Settings }) {
     <>
       <Each of={list()} key={(k) => k.name}>
         {(k, i) => (
-          <SettingsItem first={i() === 0} testID={`secret-row-${k().name}`} style={{ flexDirection: "row", alignItems: "center" }}>
-            <View role="button" accessibilityLabel={L(`Replace key ${k().name}`, `替换密钥 ${k().name}`)} onPress={() => open(k().name)} style={{ flex: 1, minWidth: 0, gap: 3 }}>
+          <SettingsItem first={i() === 0} testID={`secret-row-${k().name}`} onPress={() => open(k().name)} style={{ flexDirection: "row", alignItems: "center" }}>
+            <View accessibilityLabel={L(`Replace key ${k().name}`, `替换密钥 ${k().name}`)} style={{ flex: 1, minWidth: 0, gap: 3 }}>
               <Text style={{ fontFamily: MONO, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{k().name}</Text>
               <Text style={{ fontSize: 12.5, color: colors.faint }}>{L(`Set ${new Date(k().updated).toLocaleDateString()}`, `设置于 ${new Date(k().updated).toLocaleDateString()}`)}</Text>
             </View>
-            <Text style={{ fontFamily: MONO, fontSize: 13, color: colors.faint }}>••••••</Text>
+            <SetSecretMark />
           </SettingsItem>
         )}
       </Each>
@@ -3838,22 +3853,24 @@ function SecretEditor(props: { settings: Settings }) {
   const edit = (f: (v: string) => void) => (v: string) => { f(v); d.note.set(""); };
   // a Claude credential is edited under its friendly name, with the variable it sets underneath
   const known = () => CLAUDE_KEYS.find((k) => k.name === d.editing());
+  // a Claude credential row opens this editor before anything is stored under its name
+  const stored = () => (st.secrets() ?? []).some((k) => k.name === d.editing());
   return (
     <FormDialog
       testID="secret-editor"
       open={d.editing() !== undefined}
       onClose={close}
-      title={isNew() ? L("Add key", "添加密钥") : known() ? L(`Replace ${known()!.label()}`, `替换 ${known()!.label()}`) : L("Replace key", "替换密钥")}
+      title={isNew() ? L("Add key", "添加密钥") : known() ? (stored() ? L(`Replace ${known()!.label()}`, `替换 ${known()!.label()}`) : L(`Set ${known()!.label()}`, `设置 ${known()!.label()}`)) : L("Replace key", "替换密钥")}
       subtitle={isNew() ? L("Every machine can use it; it is never shown again after saving.", "所有机器都能使用，保存后不再显示。") : d.editing()}
       mono={!isNew()}
       footer={
         <>
-          <If when={!isNew()}>
+          <If when={!isNew() && stored()}>
             <Button label={L("Delete", "删除")} variant="ghost" tone="danger" onPress={() => void remove()} testID="secret-delete" />
           </If>
           <View style={{ flex: 1 }} />
           <Button label={L("Cancel", "取消")} variant="ghost" onPress={close} testID="secret-cancel" />
-          <Button label={isNew() ? L("Add", "添加") : L("Replace", "替换")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="secret-save" />
+          <Button label={isNew() ? L("Add", "添加") : stored() ? L("Replace", "替换") : L("Save", "保存")} variant="primary" disabled={!ok()} onPress={() => void submit()} testID="secret-save" />
         </>
       }
     >
@@ -3861,14 +3878,14 @@ function SecretEditor(props: { settings: Settings }) {
         <Field label={L("Name", "名称")} value={d.name()} onChange={edit(d.name.set)} placeholder="GITHUB_TOKEN" testID="secret-name" autoFocus hint={L("Write it as ${NAME} in an MCP server.", "在 MCP 服务里写成 ${NAME}。")} />
       </If>
       <Field
-        label={isNew() ? L("Value", "值") : L("New value", "新的值")}
+        label={isNew() || !stored() ? L("Value", "值") : L("New value", "新的值")}
         value={d.value()}
         onChange={edit(d.value.set)}
         masked
         placeholder={L("Paste it here", "粘贴到这里")}
         testID="secret-value"
         autoFocus={!isNew()}
-        hint={isNew() ? undefined : L("The current value stays until you replace it.", "替换之前，仍使用当前的值。")}
+        hint={isNew() || !stored() ? undefined : L("The current value stays until you replace it.", "替换之前，仍使用当前的值。")}
         onSubmit={() => ok() && void submit()}
       />
       <If when={d.note()}>

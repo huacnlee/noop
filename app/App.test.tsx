@@ -2248,11 +2248,24 @@ describe("commands", () => {
     expect(sent[0]).toEqual({ name: "GITHUB_TOKEN", value: "ghp_live_value" });
     await app.waitFor("id:secret-row-GITHUB_TOKEN");
     expect(app.shows("text:ghp_live_value")).toBe(false);
-    await app.press("label:Replace key GITHUB_TOKEN");
+    await app.press("id:secret-row-GITHUB_TOKEN"); // the whole row opens the editor
     expect(app.value("id:secret-value")).toBe("");
     await app.press("id:secret-delete");
     await app.waitUntil(() => sent.length === 2);
     expect(sent[1]).toEqual({ name: "GITHUB_TOKEN", value: null });
+    // an unset Claude credential: its Set button opens the editor under the variable's name, with nothing to delete yet
+    await app.press("id:claude-key-set-ANTHROPIC_API_KEY");
+    await app.waitFor("id:secret-editor");
+    await app.waitFor("text:Set API Key");
+    expect(app.count("id:secret-delete")).toBe(0);
+    await app.type("id:secret-value", "sk-ant-live");
+    await app.press("id:secret-save");
+    await app.waitUntil(() => sent.length === 3);
+    expect(sent[2]).toEqual({ name: "ANTHROPIC_API_KEY", value: "sk-ant-live" });
+    await app.waitUntil(() => app.count("id:claude-key-set-ANTHROPIC_API_KEY") === 0);
+    // once set, pressing anywhere on its row replaces it
+    await app.press("id:claude-key-ANTHROPIC_API_KEY");
+    await app.waitFor("text:Replace API Key");
   });
 });
 
