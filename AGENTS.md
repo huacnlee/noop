@@ -49,3 +49,48 @@ extending signing authorization or configuring this secret. The Store manifest
 is signed by the existing release key; NSH fetches its detached signature at
 `latest.json.sig` beside `store-latest.json`. Publish the signed Store manifest at both store-latest.json and latest.json for legacy Store installations. Direct releases use the signed direct-latest.json and its signature via the direct channel endpoint. CI's Store IPA is unsigned; sign and
 validate the actual distribution IPA before requesting upload approval.
+
+### Publishing a release to the App Store
+
+Verified with 1.0.9 (build 115) on 2026-11-24. Nothing secret lives in this repository; everything is on the owner's
+Mac under `~/.appstoreconnect/` (mode 700/600). `source ~/.appstoreconnect/noop.env` sets the App Store Connect API
+key (`NSH_APP_STORE_*`, a team key: it needs the issuer ID, which that file holds), the signing identity
+(`NOOP_STORE_SIGN_IDENTITY`) and the App Store profile (`NOOP_STORE_PROFILE`). Never commit these values.
+
+1. Release from CI, not from a local NSH. The release workflow pins `NSH_REF`; the locally installed nightly CLI can be
+   ahead of it (on 2026-11-24 it had already moved `Speech` out of `nsh`, so a local `nsh package` failed). Tag
+   `origin/main` as `vX.Y.Z` and push the tag; that release run's number is the build number of every client, higher
+   than any build uploaded before. Download `noop-ios-store-unsigned.ipa` from the run (`gh run download`).
+2. Sign by hand. Use `$NOOP_STORE_SIGN_IDENTITY` (an `Apple Distribution: lei zhong (6K2XXVCSDD)` certificate in the
+   login keychain, key and certificate also in `~/.appstoreconnect/distribution/`). Ignore the identical-looking
+   identity in `noop-release.keychain-db`: that keychain's password is lost, so codesign fails with
+   `errSecInternalComponent`. Xcode's own account is not in the "lei zhong" developer team, so do not rely on Xcode
+   automatic signing. Unzip the IPA, copy `$NOOP_STORE_PROFILE` to `Payload/Noop.app/embedded.mobileprovision`, sign
+   `Noop.app` with entitlements taken from the profile (`application-identifier` `6K2XXVCSDD.dev.huacnlee.noop`,
+   `com.apple.developer.team-identifier`, `beta-reports-active` true, `get-task-allow` false, `keychain-access-groups`
+   `6K2XXVCSDD.dev.huacnlee.noop`) using `codesign -f -s "$NOOP_STORE_SIGN_IDENTITY" --entitlements … --generate-entitlement-der`,
+   and zip `Payload` again. When the profile expires (2027-11-24) or a capability changes, create a new
+   `IOS_APP_STORE` profile for bundle ID `dev.huacnlee.noop` with that certificate through the App Store Connect API.
+3. Run `scripts/check-ios-sdk.sh` on `Payload/Noop.app/Noop` (SDK 27 or newer) and `codesign --verify --strict` on the
+   signed app.
+4. Ask the owner, then upload with `nsh publish ios <ipa>`; the env file supplies the app ID, issuer ID, key ID and key.
+   Check first with `nsh publish doctor ios` (read-only) when the CLI has it. The upload CLI is the local one, not
+   the pinned release NSH, so mind which features it has:
+   - longbridge/nsh#3101 (on nsh `main` from 2026-11-24, not yet in the nightly of that day) makes `nsh publish ios`
+     wait for processing, answer export compliance, add the build to TestFlight groups, create or reuse the App Store
+     version for the IPA's version, attach the build and write the store listing; it submits for review only with
+     `--submit`. Use `--testflight-only` to stop after TestFlight, `--no-wait` to stop once the upload is accepted.
+     It reads `store.ios` from `nsh.json` (`appId`, `usesNonExemptEncryption`, `betaGroups`, `release`) and the
+     listing from `store.locales` or `store/<locale>/`. Noop's `nsh.json` has no `store` block yet, so the env file's
+     `NSH_APP_STORE_APP_ID` names the app; add `store.ios` (and `"ITSAppUsesNonExemptEncryption"` in
+     `ios.infoPlist`) only with the owner's answers, since they become the App Store listing.
+   - Older CLIs (0.6.0, nightly 2026-11-23) only upload. Then `nsh publish status ios` / `doctor ios` do not exist,
+     and the build waits in App Store Connect for TestFlight groups and the version to be set by hand.
+   - Every CLI up to nsh `main` of 2026-11-24 commits the upload with a SHA_256 `sourceFileChecksums`, which App Store
+     Connect rejected with HTTP 409 for 1.0.9: the parts are uploaded but the command fails. Do not upload again:
+     complete that same upload by PATCHing its `buildUploadFiles/<id>` with `uploaded: true` and an `MD5`
+     `sourceFileChecksums.file` (the API key signs the request), then wait for `buildUploads/<id>` to reach
+     `COMPLETE` and the build to be `VALID`. With a CLI that waits, run `nsh publish status ios` afterwards and finish
+     TestFlight and the version in App Store Connect.
+5. Follow it up with `nsh publish status ios` (exit 0 live, 10 processing or in review, 11 draft, 12 action needed)
+   where available, or in App Store Connect. Privacy details, age rating and pricing stay in App Store Connect.

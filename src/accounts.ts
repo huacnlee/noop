@@ -173,8 +173,18 @@ const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ 
 
 export type Failure = "quota" | "auth" | null;
 
+/** Anthropic's edge refusing this machine's egress IP: a VPN, proxy or hosting network, or an unsupported
+ *  region. It is not an account problem — "signing in again won't change this" — so it must never park the
+ *  account behind a login link, and the medic cannot repair it either: only the owner's network can. */
+const NETWORK = /blocked before it reached [^.\n]*API|network this request came from isn't allowed|supported-countries/i;
+
+export function networkBlocked(output: string): boolean {
+  return NETWORK.test(output.slice(-4000));
+}
+
 export function classify(output: string): Failure {
   const tail = output.slice(-4000);
+  if (NETWORK.test(tail)) return null; // the same network carries every account: no login, cooldown or failover helps
   if (AUTH.test(tail)) return "auth";
   if (QUOTA.test(tail)) return "quota";
   return null;
@@ -243,6 +253,20 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
   save(s);
   if (kind === "auth" && !gateway) await startLogin(a, cfg);
   await alertIfAllExhausted(cfg);
+}
+
+/** The model API refused this machine's network. Retrying is worth it (a proxy picks a different exit next
+ *  time) but nothing on this machine can fix it, so tell the owner at most once every 6 hours instead of
+ *  waking the medic on every run. */
+export async function reportNetworkBlock(cfg: Cfg, host: string) {
+  const s = load();
+  const last = s.alerted?.network ? Date.parse(s.alerted.network) : 0;
+  if (Date.now() - last < 6 * 3600_000) return;
+  (s.alerted ??= {}).network = new Date().toISOString();
+  save(s);
+  journal(host, `🌐 the model API refused this machine's network (VPN / proxy / unsupported region); runs keep retrying`);
+  await notify(L(`${host} cannot reach the model API: it refuses this machine's network (a VPN, proxy, or an unsupported region). Signing in again does not help — check the VPN or proxy on that machine and pick an exit in a supported country.`,
+    `${host} 连不上模型 API：对方拒绝了这台机器的网络（VPN、代理或不支持的地区）。重新登录没用——请检查那台机器上的 VPN/代理，换一个受支持地区的节点。`), cfg, { kind: "notice" });
 }
 
 async function alertIfAllExhausted(cfg: Cfg) {

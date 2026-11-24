@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { classify, quotaCooldownUntil } from "../src/accounts";
+import { classify, networkBlocked, quotaCooldownUntil } from "../src/accounts";
+import { failureKind } from "../src/cli";
 
 test("a gateway 5xx that says 'try again in a moment' is not a quota wall", () => {
   // What Claude Code prints when its API endpoint answers 502: no usage limit anywhere, only a vague retry hint.
@@ -54,4 +55,24 @@ test("concurrent quota failures retain one cooldown and notification key", () =>
   expect(quotaCooldownUntil(until, "usage limit")).toBe(until);
   expect(quotaCooldownUntil(until, "try again in 2h")).toBe(until);
   expect(Date.parse(quotaCooldownUntil("2000-01-01", "usage limit"))).toBeGreaterThan(Date.now());
+});
+
+test("a network Anthropic refuses is neither a login nor a quota problem", () => {
+  // Claude Code on a machine behind a VPN/proxy: the run dies with no result block, so without this the medic was
+  // woken for every task (and answered with the same 403), while "signing in again won't change this" told the
+  // owner that a login link is useless.
+  const out = "API Error: Request blocked before it reached Anthropic's API (HTTP 403) · the network this request"
+    + " came from isn't allowed: usually an unsupported region, or a VPN, proxy or hosting network · signing in again"
+    + " won't change this · check your VPN or network and retry · supported regions: https://anthropic.com/supported-countries";
+  expect(networkBlocked(out)).toBe(true);
+  expect(classify(out)).toBeNull();
+  // ordinary failures, and the quota/auth walls, stay out of it
+  expect(networkBlocked("tests failed: 3 of 40")).toBe(false);
+  expect(networkBlocked("API Error: 401 unauthorized")).toBe(false);
+  expect(classify("API Error: 401 unauthorized")).toBe("auth");
+
+  // the run died with no result block, so before this it went to the medic — 31 times in five days on one Mac
+  expect(failureKind("agent returned no result block", out)).toBe("network");
+  expect(failureKind("agent returned no result block", "Error: bun: command not found")).toBe("tooling");
+  expect(failureKind("the branch does not build", "tsc: 4 errors")).toBe("task");
 });

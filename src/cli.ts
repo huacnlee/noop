@@ -32,7 +32,7 @@ import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, retireUnrunnableProposed, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
 import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
-import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
+import { accountEnv, accountsStatus, classify, failoverAccount, networkBlocked, pendingLoginIds, pickAccount, reportFailure, reportNetworkBlock, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
 
@@ -562,12 +562,22 @@ async function ownerUpdate(c: Cfg, host: string) {
   }
 }
 
+/** What a failed run blames. No keyword matching for the task itself: when the agent could not even report a
+ *  result, the medic (AI) decides whether the tooling broke. A network the model API refuses is the exception —
+ *  no medic run can repair the owner's VPN, and every medic run sent to look at it dies of the same 403. */
+export function failureKind(summary: string, out: string): "network" | "tooling" | "task" {
+  if (networkBlocked(out)) return "network";
+  return /agent returned no result block/.test(summary) ? "tooling" : "task";
+}
+
 /** A good report doesn't forward raw errors. Retry, call the medic for tooling problems, and only after that
  *  tell the owner — in one plain sentence, and only for work the owner actually cares about. */
 async function handleFailure(meta: Record<string, string>, body: string, summary: string, out: string, cfg: Cfg, host: string) {
   const attempt = Number(meta.attempt ?? 1);
-  // no keyword matching: when the agent could not even report a result, the medic (AI) decides whether the tooling broke
-  const tooling = /agent returned no result block/.test(summary);
+  const kind = failureKind(summary, out);
+  const blocked = kind === "network";
+  const tooling = kind === "tooling";
+  if (blocked) void reportNetworkBlock(cfg, host);
   if (tooling) void medic(`Agent run for ${meta.id} on ${host} ended without a result. Decide whether the tooling (CLI, auth, environment) is at fault and fix it; ignore it if the task itself failed:\n${out.slice(-2500)}`,
     cfg, { auto: true, kind: `tool-${meta.cli_used ?? "agent"}` });
   if (attempt < (cfg.fleet?.max_attempts ?? 2)) {
@@ -577,7 +587,7 @@ async function handleFailure(meta: Record<string, string>, body: string, summary
       if (existsSync(f)) unlinkSync(f);
       writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, status: undefined, attempt: String(attempt + 1) },
         `${body}\n\n> Attempt ${attempt} failed: ${summary.slice(0, 300)}. Try a different approach.\n`);
-      journal(host, `↻ ${meta.id} retry ${attempt + 1} (${tooling ? "tooling issue → medic" : "task failure"})`);
+      journal(host, `↻ ${meta.id} retry ${attempt + 1} (${blocked ? "network refused by the model API" : tooling ? "tooling issue → medic" : "task failure"})`);
       await _commitPush(`[${host}] retry ${meta.id}`);
     });
     return;
