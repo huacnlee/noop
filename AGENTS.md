@@ -73,8 +73,24 @@ key (`NSH_APP_STORE_*`, a team key: it needs the issuer ID, which that file hold
    `IOS_APP_STORE` profile for bundle ID `dev.huacnlee.noop` with that certificate through the App Store Connect API.
 3. Run `scripts/check-ios-sdk.sh` on `Payload/Noop.app/Noop` (SDK 27 or newer) and `codesign --verify --strict` on the
    signed app.
-4. Ask the owner, then upload with `nsh publish ios <ipa>` (the env file supplies its arguments). With nsh 0.6.0 the
-   parts upload but the final commit fails with HTTP 409 on `sourceFileChecksums` (it sends SHA_256). Do not upload
-   again: complete the same upload by PATCHing its `buildUploadFiles/<id>` with `uploaded: true` and an `MD5`
-   `sourceFileChecksums.file`, then wait for the `buildUploads/<id>` state to reach `COMPLETE` and the build to be
-   `VALID`.
+4. Ask the owner, then upload with `nsh publish ios <ipa>`; the env file supplies the app ID, issuer ID, key ID and key.
+   Check first with `nsh publish doctor ios` (read-only) when the CLI has it. The upload CLI is the local one, not
+   the pinned release NSH, so mind which features it has:
+   - longbridge/nsh#3101 (on nsh `main` from 2026-11-24, not yet in the nightly of that day) makes `nsh publish ios`
+     wait for processing, answer export compliance, add the build to TestFlight groups, create or reuse the App Store
+     version for the IPA's version, attach the build and write the store listing; it submits for review only with
+     `--submit`. Use `--testflight-only` to stop after TestFlight, `--no-wait` to stop once the upload is accepted.
+     It reads `store.ios` from `nsh.json` (`appId`, `usesNonExemptEncryption`, `betaGroups`, `release`) and the
+     listing from `store.locales` or `store/<locale>/`. Noop's `nsh.json` has no `store` block yet, so the env file's
+     `NSH_APP_STORE_APP_ID` names the app; add `store.ios` (and `"ITSAppUsesNonExemptEncryption"` in
+     `ios.infoPlist`) only with the owner's answers, since they become the App Store listing.
+   - Older CLIs (0.6.0, nightly 2026-11-23) only upload. Then `nsh publish status ios` / `doctor ios` do not exist,
+     and the build waits in App Store Connect for TestFlight groups and the version to be set by hand.
+   - Every CLI up to nsh `main` of 2026-11-24 commits the upload with a SHA_256 `sourceFileChecksums`, which App Store
+     Connect rejected with HTTP 409 for 1.0.9: the parts are uploaded but the command fails. Do not upload again:
+     complete that same upload by PATCHing its `buildUploadFiles/<id>` with `uploaded: true` and an `MD5`
+     `sourceFileChecksums.file` (the API key signs the request), then wait for `buildUploads/<id>` to reach
+     `COMPLETE` and the build to be `VALID`. With a CLI that waits, run `nsh publish status ios` afterwards and finish
+     TestFlight and the version in App Store Connect.
+5. Follow it up with `nsh publish status ios` (exit 0 live, 10 processing or in review, 11 draft, 12 action needed)
+   where available, or in App Store Connect. Privacy details, age rating and pricing stay in App Store Connect.
