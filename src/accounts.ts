@@ -169,7 +169,9 @@ export function accountEnv(a: Account): Record<string, string> {
 // ("a server-side issue, usually temporary"): counting it as quota put the account on a one-hour cooldown
 // and moved all its work to the other CLI over a blip.
 const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|no credits remaining|insufficient credits|purchase more credits|out of credits|\b402\b|add credits to continue|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)(?! (?:a|a few|some) (?:moments?|bit|while|seconds?|minutes?)\b)/i;
-const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth (token|session) (has )?expired|login required|unauthorized|codex login/i;
+// "login reached its time limit" is Claude Code's wording for a subscription login that expired and cannot be renewed.
+// Unrecognised, it is not an auth failure: the account is never parked and chat never fails over to the next account.
+const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth (token|session) (has )?expired|login reached its time limit|login required|unauthorized|codex login/i;
 
 export type Failure = "quota" | "auth" | null;
 

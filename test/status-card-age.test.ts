@@ -1,4 +1,4 @@
-// `noop status` is the owner's first screen; with ten unread cards the useful number is how long each has waited.
+// `noop tasks` lists the open decision cards; with ten unread cards the useful number is how long each has waited.
 import { expect, test } from "bun:test";
 import { cardAge } from "../src/cli";
 

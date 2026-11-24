@@ -73,24 +73,41 @@ key (`NSH_APP_STORE_*`, a team key: it needs the issuer ID, which that file hold
    `IOS_APP_STORE` profile for bundle ID `dev.huacnlee.noop` with that certificate through the App Store Connect API.
 3. Run `scripts/check-ios-sdk.sh` on `Payload/Noop.app/Noop` (SDK 27 or newer) and `codesign --verify --strict` on the
    signed app.
-4. Ask the owner, then upload with `nsh publish ios <ipa>`; the env file supplies the app ID, issuer ID, key ID and key.
-   Check first with `nsh publish doctor ios` (read-only) when the CLI has it. The upload CLI is the local one, not
-   the pinned release NSH, so mind which features it has:
-   - longbridge/nsh#3101 (on nsh `main` from 2026-11-24, not yet in the nightly of that day) makes `nsh publish ios`
-     wait for processing, answer export compliance, add the build to TestFlight groups, create or reuse the App Store
-     version for the IPA's version, attach the build and write the store listing; it submits for review only with
-     `--submit`. Use `--testflight-only` to stop after TestFlight, `--no-wait` to stop once the upload is accepted.
-     It reads `store.ios` from `nsh.json` (`appId`, `usesNonExemptEncryption`, `betaGroups`, `release`) and the
-     listing from `store.locales` or `store/<locale>/`. Noop's `nsh.json` has no `store` block yet, so the env file's
-     `NSH_APP_STORE_APP_ID` names the app; add `store.ios` (and `"ITSAppUsesNonExemptEncryption"` in
-     `ios.infoPlist`) only with the owner's answers, since they become the App Store listing.
-   - Older CLIs (0.6.0, nightly 2026-11-23) only upload. Then `nsh publish status ios` / `doctor ios` do not exist,
-     and the build waits in App Store Connect for TestFlight groups and the version to be set by hand.
-   - Every CLI up to nsh `main` of 2026-11-24 commits the upload with a SHA_256 `sourceFileChecksums`, which App Store
-     Connect rejected with HTTP 409 for 1.0.9: the parts are uploaded but the command fails. Do not upload again:
-     complete that same upload by PATCHing its `buildUploadFiles/<id>` with `uploaded: true` and an `MD5`
-     `sourceFileChecksums.file` (the API key signs the request), then wait for `buildUploads/<id>` to reach
-     `COMPLETE` and the build to be `VALID`. With a CLI that waits, run `nsh publish status ios` afterwards and finish
-     TestFlight and the version in App Store Connect.
+4. Ask the owner, then publish from a Store-channel copy of `nsh.json` (the repository's names `dev.noop.app`, and
+   `doctor` and `publish` compare it with the App Store app): copy `nsh.json`, `app/version.ts` and
+   `scripts/prepare-client-release.py` to a scratch directory, run the script there with `--channel store`, and pass
+   that directory as `--entry`. `nsh publish doctor ios --entry <dir>` (read-only) must pass, then
+   `nsh publish ios --entry <dir> <ipa>` (copy `store/` into the directory too). `nsh.json` `store.ios` holds the app
+   ID, the export compliance answer (`usesNonExemptEncryption: false`: HTTPS/TLS only) and `release: auto` (released
+   on approval, as 1.0.2 was). `store/en-US/` mirrors the App Store listing (subtitle, description, keywords,
+   promotional text, URLs; the name `Noop Agent` stays App Store Connect's), and the publish writes it back: edit it
+   there, not in App Store Connect. Before each release replace `store/en-US/release_notes.txt` with that version's
+   user-visible changes (App Store "What's New"; App Store Connect rejects it on a first version only). With a CLI that has longbridge/nsh#3101 the command uploads,
+   waits for processing, attaches the build to the App Store version of the IPA's version (release `MANUAL`) and
+   stops at "ready to submit"; `--submit` sends it to App Review, `--testflight-only` stops before the App Store
+   version. Verified with 1.0.9 (115.2) on 2026-11-24.
+   - The commit of the upload fails with HTTP 409 on a SHA_256 `sourceFileChecksums` in every CLI without
+     longbridge/nsh#3113 (MD5). With such a CLI the parts are uploaded but the command fails: do not upload again;
+     PATCH that upload's `buildUploadFiles/<id>` with `uploaded: true` and an `MD5` `sourceFileChecksums.file`, wait
+     for `buildUploads/<id>` to be `COMPLETE`, and set TestFlight and the version in App Store Connect.
+   - Older CLIs (0.6.0, nightly 2026-11-23) only upload, and have no `nsh publish status` / `doctor`.
 5. Follow it up with `nsh publish status ios` (exit 0 live, 10 processing or in review, 11 draft, 12 action needed)
    where available, or in App Store Connect. Privacy details, age rating and pricing stay in App Store Connect.
+
+### Other stores
+
+- Linux (Flathub): `nsh publish linux <noop-X.Y.Z-linux-x86_64.tar.gz>`, with `--entry` a copy prepared by
+  `prepare-client-release.py --channel direct` (the repository's `nsh.json` says `1.0.1`, and the version fills
+  `archiveUrl`), writes
+  `.nsh/out/flathub/dev.noop.app/dev.noop.app.yml` for the owner to commit to `flathub/dev.noop.app` in a pull
+  request (the first one is a new-app submission to `flathub/flathub`). It takes the summary and description from
+  `store/en-US/` and `nsh.json` `store.linux`; `nsh publish doctor linux` checks them.
+  The manifest installs `dev.noop.app.metainfo.xml` from the release archive, which only an archive packaged by an
+  NSH with longbridge/nsh#3101 contains (1.0.9's does not): submit to Flathub from the first release whose
+  `NSH_REF` includes it. CLIs without
+  longbridge/nsh#3114 write `only-arches` for the machine running them, not the archive: on an Apple silicon Mac
+  fix it to `x86_64` by hand.
+- Windows (Microsoft Store): `nsh publish windows <msix>` needs a Partner Center product (`store.windows.productId`),
+  `windows.identityName` and `windows.publisher` from its Product identity page, an `.msix` package, and an Azure AD
+  app (`NSH_MS_TENANT_ID`, `NSH_MS_CLIENT_ID`, `NSH_MS_CLIENT_SECRET`). None exist yet.
+- macOS: NSH has no Mac App Store upload; macOS ships as the signed, notarized direct download.

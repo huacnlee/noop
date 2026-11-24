@@ -2,7 +2,7 @@ import "./test-isolation";
 // noop core — shared files as the world (stigmergy; synced via the owner's Worker, src/sync.ts), task queue, agent runner, journal, memory.
 import { OFFLINE_AFTER_MINUTES } from "../cloud/src/budget";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, networkInterfaces } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import * as sync from "./sync";
 import { recoverMemory, snapshotMemory } from "./integrity";
@@ -279,6 +279,7 @@ export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null
 // ------------------------------------------------------------------ fleet presence (heartbeats)
 export type HostBeat = { host: string; caps: string[]; seen: string; busy: number; version: string; stats?: any;
   /** The noop code this host runs: its commit and that commit's page. */ rev?: string; rev_url?: string;
+  /** Its private IPv4 address on the local network; absent when none can be found. */ lan?: string;
   /** How this host is doing with the owner's latest "update every machine". */ update?: UpdateState;
   /** Per running task: when its agent last showed a sign of life and what it was doing. */ activity?: Record<string, Activity> };
 
@@ -328,11 +329,25 @@ export function runningRev(): { rev?: string; rev_url?: string } {
 /** The owner's "update every machine" (fleet/update.json, synced): each host updates once per request. */
 export const UPDATE_REQUEST = () => P("fleet", "update.json");
 
+type Iface = { address: string; family: string | number; internal: boolean };
+/** Virtual adapters whose private addresses are not the machine's LAN address (VPN, proxy TUN, containers, VMs). */
+const VIRTUAL_IFACE = /^(utun|tun|tap|wg|tailscale|zt|docker|br-|veth|virbr|vmnet|vboxnet|bridge|llw|awdl|anpi|ap\d|lo|vEthernet)/i;
+const isPrivateV4 = (a: string) => /^10\./.test(a) || /^192\.168\./.test(a) || /^172\.(1[6-9]|2\d|3[01])\./.test(a);
+/** The machine's private IPv4 on its local network: ignores loopback, link-local, VPN/proxy tunnels (198.18.x, 100.64.x)
+ *  and container/VM bridges; prefers wired/Wi-Fi adapters (en*, eth*, wl*). Undefined when nothing qualifies. */
+export function lanAddress(ifaces: Record<string, Iface[] | undefined> = networkInterfaces()): string | undefined {
+  const found = Object.entries(ifaces).flatMap(([name, list]) =>
+    VIRTUAL_IFACE.test(name) ? [] : (list ?? []).filter((i) => (i.family === "IPv4" || i.family === 4) && !i.internal && isPrivateV4(i.address))
+      .map((i) => ({ name, address: i.address })));
+  const physical = (n: string) => /^(en|eth|wl|Ethernet|Wi-?Fi)/i.test(n) ? 0 : 1;
+  return found.sort((a, b) => physical(a.name) - physical(b.name) || a.name.localeCompare(b.name, "en", { numeric: true }))[0]?.address;
+}
+
 export function heartbeat(cfg: Cfg, busy: number, stats?: unknown) {
   const host = hostName(cfg);
   const f = P("fleet", "hosts", `${host}.json`);
   mkdirSync(dirname(f), { recursive: true });
-  writeFileSync(f, JSON.stringify({ host, caps: hostCaps(cfg), seen: now(), busy, version: "1", stats, ...runningRev(), update: updateState(), activity: agentActivity.size ? Object.fromEntries(agentActivity) : undefined } satisfies HostBeat, null, 2));
+  writeFileSync(f, JSON.stringify({ host, caps: hostCaps(cfg), seen: now(), busy, version: "1", stats, ...runningRev(), lan: lanAddress(), update: updateState(), activity: agentActivity.size ? Object.fromEntries(agentActivity) : undefined } satisfies HostBeat, null, 2));
 }
 
 /** Caps of every machine that has ever written a heartbeat. Offline hosts stay listed, so a routine pinned to a

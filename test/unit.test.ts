@@ -318,6 +318,20 @@ test("heartbeat carries the running code version, linked to its commit", async (
   if (r.rev_url) expect(r.rev_url).toEndWith(`/commit/${r.rev}`);
 });
 
+test("heartbeat reports the LAN address, skipping tunnels, containers and VPNs", async () => {
+  const { lanAddress } = await import("../src/core");
+  const v4 = (address: string, internal = false) => ({ address, family: "IPv4", internal });
+  // the owner's Mac mini: a proxy TUN (198.18.x) next to the wired port
+  expect(lanAddress({ lo0: [v4("127.0.0.1", true)], en0: [{ address: "fe80::1", family: "IPv6", internal: false }, v4("10.20.94.156")], utun4: [v4("198.18.0.1")] })).toBe("10.20.94.156");
+  // a Linux box with Docker and Tailscale: the Wi-Fi address wins
+  expect(lanAddress({ docker0: [v4("172.17.0.1")], "br-1a2b": [v4("172.18.0.1")], tailscale0: [v4("100.101.1.2")], wlan0: [v4("192.168.1.23")] })).toBe("192.168.1.23");
+  // Windows names its adapters; the WSL switch is virtual
+  expect(lanAddress({ "vEthernet (WSL)": [v4("172.24.0.1")], Ethernet: [v4("172.20.3.4")] })).toBe("172.20.3.4");
+  // nothing private on a physical adapter: report nothing rather than a wrong address
+  expect(lanAddress({ en0: [v4("169.254.3.4"), v4("203.0.113.9")], utun2: [v4("10.8.0.2")] })).toBeUndefined();
+  expect(lanAddress({})).toBeUndefined();
+});
+
 test("recentChat: the channel before an owner message, without the message itself", async () => {
   const { appendEvent, recentChat } = await import("../src/server");
   appendEvent({ from: "Kai", kind: "notice", text: "已补写 gpui-kit v0.9.0 的更新日志", ref: "T-0115" });
@@ -696,7 +710,7 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
 test("gate_override relaxes only the approvable gates", () => {
   const cfg = { gates: { extra: ["Bash(kubectl delete:*)"] } } as unknown as Cfg;
   const full = cliCommand("claude", cfg);
-  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)"])
+  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)", "Bash(pkill:*)", "Bash(killall:*)"])
     expect(full).toContain(g);
   const relaxed = cliCommand("claude", cfg, true);
   expect(relaxed).not.toContain("Bash(gh pr merge:*)");

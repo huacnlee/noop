@@ -48,7 +48,7 @@ const sockets = new Set<Sock>();
 const STATUS_PUSH_MS = 5_000;
 let statusPushed = "";
 let statusTimer: ReturnType<typeof setInterval> | null = null;
-function pushStatus() {
+function pushStatus(force = false) {
   const watching = [...sockets].filter((ws) => ws.data?.status);
   if (!watching.length) {
     if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
@@ -56,7 +56,10 @@ function pushStatus() {
     return;
   }
   const s = JSON.stringify({ $status: status() });
-  if (s === statusPushed) return;
+  // A client that just connected has never seen statusPushed (the last change any client saw), so its first frame
+  // must be unconditional: otherwise a second phone or a test that opens right after another watcher waits forever
+  // for a change that is not coming.
+  if (!force && s === statusPushed) return;
   statusPushed = s;
   for (const ws of watching) try { ws.send(s); } catch { /* the socket is going away */ }
 }
@@ -596,7 +599,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       open(ws) {
         sockets.add(ws);
         if (!ws.data?.status) return;
-        pushStatus(); // the dashboard as of now, then on every change while this client watches
+        pushStatus(true); // the dashboard as of now (even unchanged), then on every change while this client watches
         statusTimer ??= setInterval(pushStatus, STATUS_PUSH_MS);
       },
       close(ws) { sockets.delete(ws); pushStatus(); }, // the last watcher leaving also stops the timer

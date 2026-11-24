@@ -53,6 +53,24 @@ test("a v=2 client is pushed the dashboard; a plain client only gets the feed", 
   }
 });
 
+test("a watcher that joins while another is watching still gets the dashboard", async () => {
+  const server = start();
+  const base = `ws://127.0.0.1:${server.port}/api/stream?v=2&token=test`;
+  const first = await connect(base);
+  try {
+    await first.wait((f) => !!f.$status);
+    const late = await connect(base); // nothing changed on the hub: this frame must not wait for a change
+    try {
+      expect((await late.wait((f) => !!f.$status)).$status).toBeDefined();
+    } finally {
+      late.ws.close();
+    }
+  } finally {
+    first.ws.close();
+    server.stop(true);
+  }
+}, 15_000);
+
 test("a card opening reaches a watching client without a reconnect", async () => {
   const server = start();
   const watching = await connect(`ws://127.0.0.1:${server.port}/api/stream?v=2&token=test`);

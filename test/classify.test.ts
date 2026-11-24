@@ -46,6 +46,17 @@ test("Claude's expired OAuth session enters the auth failover path", () => {
   expect(classify("OAuth session created; tests failed: 3 of 40")).toBeNull();
 });
 
+test("Claude's login that reached its time limit enters the auth failover path", () => {
+  // What `claude -p` prints once the subscription login has ended for good. Unclassified, the chat brain never fell
+  // over to the next account (FallbackModel only falls over on a classified failure), so a working API account
+  // behind it was never tried and every message ended as "the chat assistant is unavailable".
+  const message = "Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again, or use `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN for unattended jobs";
+  expect(classify(message)).toBe("auth");
+  expect(classify(`Error: ${message}`)).toBe("auth");
+  expect(classify(JSON.stringify({ type: "result", is_error: true, result: message }))).toBe("auth");
+  expect(classify("load test reached its time limit; 3 of 40 tests failed")).toBeNull();
+});
+
 test("the production gateway 503 is not exhausted API credit", () => {
   expect(classify("API Error: 503 No available accounts: no available accounts. This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway.")).toBeNull();
 });
