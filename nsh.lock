@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "packages": [
+    {
+      "name": "nsh-extra",
+      "version": "0.6.0",
+      "source": "git+https://github.com/longbridge/nsh?rev=2964346c285f57004f2531fb768cc9840b8d7ff5",
+      "commit": "2964346c285f57004f2531fb768cc9840b8d7ff5",
+      "dir": "github.com/longbridge/nsh/2964346c285f/crates/nsh-extra",
+      "module": "nsh-extra"
+    }
+  ]
+}
