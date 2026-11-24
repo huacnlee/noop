@@ -63,7 +63,20 @@
   "store": {
     "ios": {
       "appId": "6835723652",
-      "usesNonExemptEncryption": false
+      "usesNonExemptEncryption": false,
+      "release": "auto"
+    },
+    "linux": {
+      "license": "MIT",
+      "developer": "Jason Lee",
+      "homepage": "https://huacnlee.github.io/noop/",
+      "categories": [
+        "Development"
+      ],
+      "screenshots": [
+        "https://raw.githubusercontent.com/huacnlee/noop/main/website/public/screenshot.png"
+      ],
+      "archiveUrl": "https://github.com/huacnlee/noop/releases/download/v{version}/noop-{version}-linux-x86_64.tar.gz"
     }
   }
 }

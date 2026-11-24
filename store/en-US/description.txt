@@ -1,0 +1,17 @@
+Noop is the app for your own AI team.
+
+Noop runs a small team of Claude Code and Codex agents on your own computers. They do your daily work, decide what they can based on how you've decided before, and only ask you when something really needs you, with a short list of options you answer in one tap.
+
+This app is how you talk to your team from anywhere:
+
+• Tell the team what to do in one sentence. It breaks the work down, runs it in parallel across your machines and comes back with results.
+• Answer decisions in one tap. When the team needs you, you get a card with clear options and a recommendation.
+• Approve proposals. The team suggests routines and follow-ups; you choose which ones start.
+• Follow every task. Open a task to see what was said about it, its report and its history, and add instructions in place.
+• Channels for long-running goals, such as keeping a website healthy.
+• Memory and rules: read and edit what the team has learned about how you work.
+• Machines at a glance: see which computers are online and what they are running.
+
+Yours, not ours. Noop has no shared service. Your team runs on your own machines and your own free Cloudflare account, and this app connects only to the Noop server you set up. To set one up, follow the install guide at huacnlee.github.io/noop.
+
+No server yet? Tap "Try the demo" on the sign-in screen to explore the app with a simulated team. The demo runs entirely on your device.

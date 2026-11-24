@@ -77,8 +77,12 @@ key (`NSH_APP_STORE_*`, a team key: it needs the issuer ID, which that file hold
    `doctor` and `publish` compare it with the App Store app): copy `nsh.json`, `app/version.ts` and
    `scripts/prepare-client-release.py` to a scratch directory, run the script there with `--channel store`, and pass
    that directory as `--entry`. `nsh publish doctor ios --entry <dir>` (read-only) must pass, then
-   `nsh publish ios --entry <dir> <ipa>`. `nsh.json` `store.ios` holds the app ID and the export compliance answer
-   (`usesNonExemptEncryption: false`: HTTPS/TLS only). With a CLI that has longbridge/nsh#3101 the command uploads,
+   `nsh publish ios --entry <dir> <ipa>` (copy `store/` into the directory too). `nsh.json` `store.ios` holds the app
+   ID, the export compliance answer (`usesNonExemptEncryption: false`: HTTPS/TLS only) and `release: auto` (released
+   on approval, as 1.0.2 was). `store/en-US/` mirrors the App Store listing (subtitle, description, keywords,
+   promotional text, URLs; the name `Noop Agent` stays App Store Connect's), and the publish writes it back: edit it
+   there, not in App Store Connect. Before each release replace `store/en-US/release_notes.txt` with that version's
+   user-visible changes (App Store "What's New"; App Store Connect rejects it on a first version only). With a CLI that has longbridge/nsh#3101 the command uploads,
    waits for processing, attaches the build to the App Store version of the IPA's version (release `MANUAL`) and
    stops at "ready to submit"; `--submit` sends it to App Review, `--testflight-only` stops before the App Store
    version. Verified with 1.0.9 (115.2) on 2026-11-24.
@@ -92,10 +96,15 @@ key (`NSH_APP_STORE_*`, a team key: it needs the issuer ID, which that file hold
 
 ### Other stores
 
-- Linux (Flathub): `nsh publish linux --entry <dir> <noop-X.Y.Z-linux-x86_64.tar.gz>` writes
+- Linux (Flathub): `nsh publish linux <noop-X.Y.Z-linux-x86_64.tar.gz>`, with `--entry` a copy prepared by
+  `prepare-client-release.py --channel direct` (the repository's `nsh.json` says `1.0.1`, and the version fills
+  `archiveUrl`), writes
   `.nsh/out/flathub/dev.noop.app/dev.noop.app.yml` for the owner to commit to `flathub/dev.noop.app` in a pull
-  request; it needs `store.locales` (subtitle, description) and `store.linux` (license, developer, homepage,
-  screenshots, `archiveUrl`) in `nsh.json`, and `nsh publish doctor linux` checks them. CLIs without
+  request (the first one is a new-app submission to `flathub/flathub`). It takes the summary and description from
+  `store/en-US/` and `nsh.json` `store.linux`; `nsh publish doctor linux` checks them.
+  The manifest installs `dev.noop.app.metainfo.xml` from the release archive, which only an archive packaged by an
+  NSH with longbridge/nsh#3101 contains (1.0.9's does not): submit to Flathub from the first release whose
+  `NSH_REF` includes it. CLIs without
   longbridge/nsh#3114 write `only-arches` for the machine running them, not the archive: on an Apple silicon Mac
   fix it to `x86_64` by hand.
 - Windows (Microsoft Store): `nsh publish windows <msix>` needs a Partner Center product (`store.windows.productId`),
