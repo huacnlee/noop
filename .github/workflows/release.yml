@@ -51,6 +51,8 @@ jobs:
           - { target: linux, os: ubuntu-24.04, asset: noop-linux-x86_64.tar.gz, installer: install-client.sh }
           - { target: windows, os: windows-latest, asset: noop-windows-x86_64.zip, installer: install-client.ps1 }
           - { target: macos, os: macos-15, asset: noop-macos-arm64.zip, installer: install-client.sh }
+          # The Mac App Store build (dev.huacnlee.noop, Store channel): signed for the Store and uploaded by hand.
+          - { target: macos, os: macos-15, asset: noop-macos-store-unsigned.zip, channel: store }
           - { target: ios, os: xcode-27, asset: noop-ios-unsigned.ipa }
           - { target: ios, os: xcode-27, asset: noop-ios-store-unsigned.ipa, channel: store }
           - { target: android, os: ubuntu-24.04, asset: noop-android.apk }
@@ -105,7 +107,10 @@ jobs:
           case "$TARGET" in
             linux) mv "$out/Noop.tar.gz" "assets/$ASSET"; mv "$out"/Noop-*.tar.gz assets/ ;;
             windows) mv "$out/Noop.zip" "assets/$ASSET"; mv "$out"/Noop-*.zip assets/ ;;
-            macos) ditto -c -k --keepParent "$out/Noop.app" "assets/$ASSET"; mv "$out"/Noop-*.tar.gz assets/ ;;
+            macos)
+              ditto -c -k --keepParent "$out/Noop.app" "assets/$ASSET"
+              # The Store build ships only to the Mac App Store, not as the versioned direct archive.
+              [ "$CHANNEL" = store ] || mv "$out"/Noop-*.tar.gz assets/ ;;
             ios)
               executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$out/Noop.app/Info.plist")
               bash scripts/check-ios-sdk.sh "$out/Noop.app/$executable"
@@ -159,7 +164,7 @@ jobs:
       # Reuse this ARM runner for Intel after packaging and testing the native app.
       # The installer currently supports only Apple silicon; Intel users download the archive.
       - name: Set up Intel nsh
-        if: matrix.target == 'macos'
+        if: matrix.target == 'macos' && matrix.channel != 'store'
         uses: ./.github/actions/setup-nsh
         with:
           ref: ${{ env.NSH_REF }}
@@ -167,7 +172,7 @@ jobs:
           rust-target: x86_64-apple-darwin
 
       - name: Package and verify Intel macOS
-        if: matrix.target == 'macos'
+        if: matrix.target == 'macos' && matrix.channel != 'store'
         run: |
           args=(--build "$GITHUB_RUN_NUMBER")
           [ "$GITHUB_REF_TYPE" != tag ] || args+=(--app-version "${GITHUB_REF_NAME#v}")
@@ -186,7 +191,7 @@ jobs:
           codesign --verify --deep --strict --verbose=4 "$app" || { echo "::error::codesign verification failed"; exit 1; }
 
       - name: Upload Intel macOS package
-        if: matrix.target == 'macos'
+        if: matrix.target == 'macos' && matrix.channel != 'store'
         uses: actions/upload-artifact@v4
         with:
           name: noop-macos-x86_64.zip
