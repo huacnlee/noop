@@ -2127,6 +2127,12 @@ function MachineDetail(props: { hub: Hub; host: string; wide: boolean; onTask: (
             <If when={h()!.rev}>
               <RevLink host={h()!} />
             </If>
+            <If when={h()!.lan}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Text style={{ fontSize: 14, color: colors.muted }}>{L("LAN IP", "局域网 IP")}</Text>
+                <Text testID={`lan-${h()!.host}`} style={{ userSelect: "text", fontFamily: MONO, fontSize: 13, color: colors.text }}>{h()!.lan}</Text>
+              </View>
+            </If>
           </View>
           {section(L("Resources", "资源"))}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>

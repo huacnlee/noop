@@ -28,7 +28,7 @@ const status = {
   hosts: [{
     host: "linux-box", caps: ["os:linux", "arch:x64", "cli:claude"], seen: ts(59), busy: 1,
     stats: { loadRatio: 0.42, cores: 8, memFreePct: 40, diskFreeGB: 120, diskFreePct: 60 },
-    os: "linux", arch: "x64", clis: ["claude"], accounts: [{ cli: "claude", name: "default", state: "ok" }],
+    os: "linux", arch: "x64", lan: "192.168.1.20", clis: ["claude"], accounts: [{ cli: "claude", name: "default", state: "ok" }],
     running: [{ id: "T-0007", title: "截图检查 gallery", agent: "dev", started: ts(50) }],
     recent: [{ id: "T-0005", title: "修复登录页", state: "done", finished: ts(30) }],
     rev: "c1cc0851234567890abcdef1234567890abcdef0", rev_url: "https://github.com/acme/noop/commit/c1cc0851234567890abcdef1234567890abcdef0",
@@ -954,6 +954,8 @@ describe("channel", () => {
     await app.press("label:Load 42% · Disk 120 GB free · 1 running");
     await app.waitFor("id:rev-linux-box");
     expect(app.shows("c1cc085")).toBe(true);
+    await app.waitFor("id:lan-linux-box");
+    expect(app.shows("192.168.1.20")).toBe(true);
     await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-version");

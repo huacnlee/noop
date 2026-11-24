@@ -136,7 +136,7 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
     const active = tasks.filter((t) => t.state === "active");
     const host = (name: string, os: string, arch: string, clis: string[], primary: boolean) => ({
       host: name, caps: [`os:${os}`, `arch:${arch}`, ...clis.map((c) => `cli:${c}`), ...(primary ? ["primary"] : [])], seen: iso(0),
-      busy: active.filter((t) => t.host === name).length, os, arch, clis,
+      busy: active.filter((t) => t.host === name).length, os, arch, clis, lan: primary ? "192.168.1.10" : "192.168.1.23",
       stats: { loadRatio: primary ? 0.31 : 0.58, cores: primary ? 12 : 16, memFreePct: 46, diskFreeGB: primary ? 412 : 180, diskFreePct: 58 },
       accounts: clis.map((cli) => ({ cli, name: "default", state: "ok" as const })),
       running: active.filter((t) => t.host === name).map((t) => ({ id: t.id, title: t.title, agent: t.agent, started: t.started, activity: t.activity })),

@@ -29,6 +29,8 @@ export type HostInfo = {
   stats?: { loadRatio?: number; load1?: number; cores?: number; memFreePct?: number; diskFreeGB?: number; diskFreePct?: number; [k: string]: unknown };
   os?: string;
   arch?: string;
+  /** Its private IPv4 address on the local network, when the machine found one. */
+  lan?: string;
   clis?: string[];
   accounts?: { cli: string; name: string; state: "ok" | "cooldown" | "login"; until?: string; model?: string }[];
   running?: { id: string; title: string; agent: string; started?: string; activity?: Activity }[];
