@@ -710,7 +710,7 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
 test("gate_override relaxes only the approvable gates", () => {
   const cfg = { gates: { extra: ["Bash(kubectl delete:*)"] } } as unknown as Cfg;
   const full = cliCommand("claude", cfg);
-  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)"])
+  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)", "Bash(pkill:*)", "Bash(killall:*)"])
     expect(full).toContain(g);
   const relaxed = cliCommand("claude", cfg, true);
   expect(relaxed).not.toContain("Bash(gh pr merge:*)");

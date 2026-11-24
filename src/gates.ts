@@ -28,6 +28,11 @@ export const ALWAYS_GATES = [
   "Bash(gh secret:*)",
   "Bash(rm -rf /:*)",
   "Bash(rm -rf ~:*)",
+  // Kill by pattern hits other tasks' processes on a shared machine. On macOS, pkill stops reading options at the
+  // pattern, so `pkill -f "cargo build" -U jason` also matches "jason" and killed every running agent (T-J0030).
+  // Agents kill their own processes by PID instead.
+  "Bash(pkill:*)",
+  "Bash(killall:*)",
 ];
 
 export const DEFAULT_GATES = [...APPROVABLE_GATES, ...ALWAYS_GATES];
