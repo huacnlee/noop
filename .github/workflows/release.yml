@@ -33,9 +33,7 @@ env:
   # `nightly` builds against the commit of the current NSH nightly release and reuses its prebuilt CLI and runtimes,
   # so a release does not compile NSH. Pin a commit only when Noop needs NSH changes the nightly does not have yet.
   # Every job resolves it the same way, so all client runtimes and the OTA package share one commit.
-  # Pinned to longbridge/nsh#2942 (nsh.json names the app's entry, so nsh runs from the repository root), which the
-  # nightly does not have yet. The next commits move `Speech` into nsh-extra (#2947), so go back to `nightly` with that.
-  NSH_REF: 02728012880c2ec69c52c55bd569a18956b0300f
+  NSH_REF: nightly
 
 defaults:
   run:
