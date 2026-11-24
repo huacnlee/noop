@@ -1524,8 +1524,11 @@ describe("team settings", () => {
     await app.press("id:settings-tab-parallel");
     await app.waitFor("text:Machine priority");
     await app.press("id:priority-mini-inc");
+    await app.press("id:priority-mini-inc");
+    expect(puts).toEqual([]); // clicks stay a draft
+    await app.press("id:priority-save");
     await app.waitUntil(() => puts.length === 1);
-    expect(puts).toEqual([{ fleet: { host_priority: { mini: 1 } } }]);
+    expect(puts).toEqual([{ fleet: { host_priority: { mini: 2 } } }]);
   });
 
   test("picks how long images are kept", async () => {

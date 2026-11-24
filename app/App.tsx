@@ -2789,6 +2789,34 @@ function PriorityInput(props: { host: string; value: number; onChange: (value: n
     />
   );
 }
+/** Machine priority rows: changes stay a local draft until Save sends them in one write (clicks never write). */
+function HostPriorityRows(props: { hosts: { host: string; priority: number }[]; save: (patch: Record<string, unknown>) => Promise<void>; row: (host: string, index: number, input: JSX.Element) => JSX.Element }) {
+  const draft = signal<Record<string, number>>({});
+  const busy = signal(false);
+  const value = (h: { host: string; priority: number }) => draft()[h.host] ?? h.priority;
+  const changed = () => Object.entries(draft()).filter(([host, v]) => props.hosts.find((h) => h.host === host)?.priority !== v);
+  const commit = async () => {
+    const table = Object.fromEntries(changed());
+    if (!Object.keys(table).length || busy()) return;
+    busy.set(true);
+    try { await props.save({ fleet: { host_priority: table } }); draft.set({}); } finally { busy.set(false); }
+  };
+  return (
+    <>
+      <Each of={props.hosts}>
+        {(h, i) => props.row(h().host, i(), (
+          <PriorityInput host={h().host} value={value(h())} onChange={(v) => draft.update((d) => ({ ...d, [h().host]: v }))} />
+        ))}
+      </Each>
+      <If when={changed().length > 0}>
+        <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8, paddingHorizontal: 16, paddingVertical: 12 }}>
+          <Button testID="priority-reset" label={L("Discard", "放弃")} variant="ghost" disabled={busy()} onPress={() => draft.set({})} />
+          <Button testID="priority-save" label={L("Save", "保存")} variant="primary" disabled={busy()} onPress={commit} />
+        </View>
+      </If>
+    </>
+  );
+}
 const PRIORITY_HINT = () => L(
   "Higher takes tasks first. While a higher machine is online, can run the task and isn't overloaded, others wait up to 10 minutes. 0 by default; a task's required or named machine still wins.",
   "数字大的机器先接任务：它在线、能跑这个任务且不忙时，其他机器最多等 10 分钟。默认 0；任务指定的机器或硬性要求仍然优先。",
@@ -3331,14 +3359,12 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               </Group>
               <If when={(e().hosts ?? []).length > 0}>
               <Group title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
-                <Each of={e().hosts ?? []}>
-                  {(h) => (
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
-                      <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{h().host}</Text>
-                      <PriorityInput host={h().host} value={h().priority} onChange={(value) => save(patches.hostPriority(h().host, value))} />
-                    </View>
-                  )}
-                </Each>
+                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, _i, input) => (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
+                    <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{host}</Text>
+                    {input}
+                  </View>
+                )} />
               </Group>
               </If>
               </If>
@@ -4158,11 +4184,7 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
             </Section>
             <If when={(e().hosts ?? []).length > 0}>
               <Section title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
-                <Each of={e().hosts ?? []}>
-                  {(h, i) => (
-                    <SetRow first={i() === 0} label={h().host} trailing={<PriorityInput host={h().host} value={h().priority} onChange={(value) => save(patches.hostPriority(h().host, value))} />} />
-                  )}
-                </Each>
+                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, i, input) => <SetRow first={i === 0} label={host} trailing={input} />} />
               </Section>
             </If>
           </View>
