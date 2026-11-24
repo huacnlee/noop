@@ -214,10 +214,11 @@ export function writeMacAgent(home: string, data: string, bun: string, cli: stri
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${xml(label)}</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>${xml(bun)}</string><string>${xml(cli)}</string><string>daemon</string></array>
+  <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>${xml(bun)}</string><string>${xml(cli)}</string><string>start</string><string>--foreground</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string><key>HUB_DATA</key><string>${xml(data)}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ExitTimeOut</key><integer>5400</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>${xml(join(data, "logs", "daemon.log"))}</string>
   <key>StandardErrorPath</key><string>${xml(join(data, "logs", "daemon.log"))}</string>
@@ -240,7 +241,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${bun} ${cli} daemon
+ExecStart=${bun} ${cli} start --foreground
 Restart=always
 RestartSec=10
 # stopping lets running agents finish (the daemon drains), so a restart never throws work away.
@@ -270,9 +271,92 @@ WantedBy=default.target
     await $`launchctl bootstrap gui/${process.getuid!()} ${plist}`;
     console.log(`✔ launchd agent installed: ${plist} (starts at login; caffeinate -i prevents idle sleep). Keep a primary Mac logged in and awake: sleep, logout or closing the lid pauses coordination until it returns.`);
   } else if (process.platform === "win32") {
-    const cmd = `"${bun}" "${cli}" daemon`;
+    const cmd = `"${bun}" "${cli}" start --foreground`;
     await $`schtasks /Create /F /SC ONLOGON /RL LIMITED /TN ${SERVICE} /TR ${cmd}`.nothrow();
     await $`schtasks /Run /TN ${SERVICE}`.nothrow();
     console.log(`✔ Scheduled Task '${SERVICE}' installed (runs at logon, restarts with the daemon's own loop). Disable sleep: powercfg /change standby-timeout-ac 0`);
   }
+}
+
+// ------------------------------------------------------------------ service control (noop start / stop / status)
+export type ServiceManager = "launchd" | "systemd" | "schtasks";
+/** What the OS service manager says about Noop on this machine. */
+export type ServiceState = { manager: ServiceManager | null; installed: boolean; running: boolean; pid?: number; since?: string; lastExit?: string; logs?: string };
+
+/** `launchctl print gui/<uid>/<label>`: only the job's own (one-tab) lines; nested endpoints print their own `state`. */
+export function parseLaunchctl(out: string): Pick<ServiceState, "running" | "pid" | "lastExit"> {
+  const pid = Number(out.match(/^\tpid = (\d+)/m)?.[1]) || undefined;
+  const lastExit = out.match(/^\tlast exit code = (.+)$/m)?.[1]?.trim();
+  return { running: /^\tstate = running$/m.test(out), pid, lastExit };
+}
+
+/** `systemctl --user show <unit> -p LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestamp`. */
+export function parseSystemctl(out: string): Pick<ServiceState, "installed" | "running" | "pid" | "since"> {
+  const v = Object.fromEntries(out.split("\n").map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1).trim()]));
+  return { installed: v.LoadState === "loaded", running: v.ActiveState === "active" || v.ActiveState === "deactivating",
+    pid: Number(v.MainPID) || undefined, since: v.ActiveState === "active" && v.ActiveEnterTimestamp ? v.ActiveEnterTimestamp : undefined };
+}
+
+/** `schtasks /Query /TN <name> /FO LIST /V`: the Status line says Running / Ready / Disabled. */
+export function parseSchtasks(out: string): Pick<ServiceState, "running" | "lastExit"> {
+  return { running: /^Status:\s+Running/im.test(out), lastExit: out.match(/^Last Result:\s+(.+)$/im)?.[1]?.trim() };
+}
+
+const macPlist = () => join(homedir(), `Library/LaunchAgents/${LABEL}.plist`);
+const macTarget = () => `gui/${process.getuid!()}/${LABEL}`;
+
+export async function serviceState(): Promise<ServiceState> {
+  if (process.platform === "darwin") {
+    const installed = existsSync(macPlist()), logs = join(DATA, "logs", "daemon.log");
+    if (!installed) return { manager: "launchd", installed, running: false, logs };
+    const r = await $`launchctl print ${macTarget()}`.quiet().nothrow();
+    return { manager: "launchd", installed, logs, ...(r.exitCode === 0 ? parseLaunchctl(r.stdout.toString()) : { running: false }) };
+  }
+  if (process.platform === "linux") {
+    if (!Bun.which("systemctl")) return { manager: null, installed: false, running: false };
+    const r = await $`systemctl --user show ${SERVICE}.service -p LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestamp`.quiet().nothrow();
+    return { manager: "systemd", logs: `journalctl --user -u ${SERVICE} -f`, ...parseSystemctl(r.stdout.toString()) };
+  }
+  if (process.platform === "win32") {
+    const r = await $`schtasks /Query /TN ${SERVICE} /FO LIST /V`.quiet().nothrow();
+    return { manager: "schtasks", installed: r.exitCode === 0, ...(r.exitCode === 0 ? parseSchtasks(r.stdout.toString()) : { running: false }) };
+  }
+  return { manager: null, installed: false, running: false };
+}
+
+/** `noop start`: install the service the first time, otherwise (re)start it. Returns false when it could not. */
+export async function startService(): Promise<boolean> {
+  const st = await serviceState();
+  if (!st.manager) { console.log("No service manager here (systemd / launchd / Task Scheduler). Run it in this terminal instead: noop start --foreground"); return false; }
+  if (!st.installed) { await install(); return (await serviceState()).running || process.platform === "win32"; }
+  if (st.running) { console.log(`✓ noop is already running${st.pid ? ` (pid ${st.pid})` : ""}. To pick up new code: noop restart`); return true; }
+  if (st.manager === "launchd") {
+    const loaded = (await $`launchctl print ${macTarget()}`.quiet().nothrow()).exitCode === 0;
+    const r = loaded ? await $`launchctl kickstart ${macTarget()}`.quiet().nothrow() : await $`launchctl bootstrap gui/${process.getuid!()} ${macPlist()}`.quiet().nothrow();
+    if (r.exitCode !== 0) { console.log(`✗ launchctl failed: ${r.stderr.toString().trim()}`); return false; }
+  } else if (st.manager === "systemd") {
+    const r = await $`systemctl --user start ${SERVICE}.service`.quiet().nothrow();
+    if (r.exitCode !== 0) { console.log(`✗ systemctl failed: ${r.stderr.toString().trim()}`); return false; }
+  } else {
+    const r = await $`schtasks /Run /TN ${SERVICE}`.quiet().nothrow();
+    if (r.exitCode !== 0) { console.log(`✗ schtasks failed: ${r.stderr.toString().trim()}`); return false; }
+  }
+  const now = await serviceState();
+  console.log(now.running || st.manager === "schtasks" ? `✓ noop started${now.pid ? ` (pid ${now.pid})` : ""}` : `✗ noop did not stay up; see ${st.logs ?? "the service logs"}`);
+  return now.running || st.manager === "schtasks";
+}
+
+/** `noop stop`: stop the service until the next `noop start` (or login/boot). Running tasks finish first. */
+export async function stopService(): Promise<boolean> {
+  const st = await serviceState();
+  if (!st.installed) { console.log("noop is not installed as a service; nothing to stop"); return true; }
+  if (!st.running) { console.log("✓ noop is not running"); return true; }
+  console.log("stopping noop: running tasks finish first, this can take a while…");
+  // launchd and systemd send SIGTERM, which the daemon answers by draining (ExitTimeOut / TimeoutStopSec allow 90 min)
+  const r = st.manager === "launchd" ? await $`launchctl bootout ${macTarget()}`.quiet().nothrow()
+    : st.manager === "systemd" ? await $`systemctl --user stop ${SERVICE}.service`.quiet().nothrow()
+    : await $`schtasks /End /TN ${SERVICE}`.quiet().nothrow();
+  if (r.exitCode !== 0) { console.log(`✗ could not stop noop: ${r.stderr.toString().trim()}`); return false; }
+  console.log("✓ noop stopped. Start it again with: noop start");
+  return true;
 }

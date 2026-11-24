@@ -5,7 +5,7 @@ import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {
-  type Cfg, P, ROOT, _commitPush, _pull, agentName, asText, chooseCli, claim, commitPush, guardMemory, heartbeat, hostCaps, hostName, journal,
+  type Cfg, type HostBeat, P, ROOT, _commitPush, _pull, agentName, asText, chooseCli, claim, commitPush, guardMemory, heartbeat, hostCaps, hostName, journal,
   list, loadConfig, locked, newTask, now, onlineHosts, pickTask, pull, readDoc, remember, writeDoc,
 } from "./core";
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
@@ -16,7 +16,7 @@ import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, MAX_WAKES, sam
 import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
-import { init, install, selfUpdate } from "./setup";
+import { init, install, selfUpdate, serviceState, startService, stopService } from "./setup";
 import { computeMetrics } from "./metrics";
 import { writeUsageReport } from "./usage-report";
 import { checkUnrunnable, supervise } from "./supervisor";
@@ -891,6 +891,19 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
   });
 }
 
+/** `noop start --foreground`, and what the service manager runs. A person starting a second copy by hand next to the
+ *  running service would make two daemons claim the same host's work, so that is refused (the service itself has no TTY). */
+async function foreground(cfg: Cfg) {
+  if (process.stdin.isTTY) {
+    const svc = await serviceState();
+    if (svc.running && svc.pid !== process.pid && svc.pid !== process.ppid) {
+      process.exitCode = 1;
+      return void console.log(`✗ noop is already running as a service${svc.pid ? ` (pid ${svc.pid})` : ""}. Stop it first (noop stop), or watch it with noop status.`);
+    }
+  }
+  return daemon(cfg);
+}
+
 async function daemon(cfg: Cfg) {
   const host = hostName(cfg);
   const every = (cfg.host?.tick_seconds ?? 60) * 1000;
@@ -1085,6 +1098,20 @@ async function daemon(cfg: Cfg) {
   }
 }
 
+/** Terminal colors for `noop status`/`noop tasks`: off when piped or with NO_COLOR (https://no-color.org). */
+const colorOn = () => !!process.stdout.isTTY && !process.env.NO_COLOR;
+const paint = (code: string) => (s: string | number) => (colorOn() ? `\x1b[${code}m${s}\x1b[0m` : String(s));
+export const C = { bold: paint("1"), dim: paint("2"), red: paint("31"), green: paint("32"), yellow: paint("33"), cyan: paint("36") };
+
+/** "12s ago", "5m ago", "3h ago", "2d ago" */
+export function ago(iso: string | undefined, nowMs = Date.now()): string {
+  const t = Date.parse(iso ?? "");
+  if (Number.isNaN(t)) return "never";
+  const s = Math.max(0, Math.round((nowMs - t) / 1000));
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`;
+}
+
+/** `noop status`: is Noop itself healthy on this machine (service, sync, server, resources). Work lives in `noop tasks`. */
 async function status(cfg: Cfg, brief = false) {
   if (brief) { // what a person wants to see right after installing
     const url = readHubToml().cloud?.url ?? cfg.cloud?.url;
@@ -1094,35 +1121,79 @@ async function status(cfg: Cfg, brief = false) {
     if (url) console.log(`\n  Open ${url}\n  and sign in with the code sent to your email.`);
     return;
   }
+  const host = hostName(cfg);
+  const row = (label: string, value: string) => console.log(`  ${C.dim(label.padEnd(11))}${value}`);
+  const ok = (s: string) => `${C.green("●")} ${C.green(s)}`, bad = (s: string) => `${C.red("●")} ${C.red(s)}`, warn = (s: string) => `${C.yellow("●")} ${C.yellow(s)}`;
+  console.log(`${C.bold("noop")} · ${C.bold(host)} ${C.dim(isPrimary(cfg, host) ? "(primary)" : "(worker)")}\n`);
+
+  // the service: is the daemon up under the OS service manager?
+  const svc = await serviceState();
+  const how = [svc.manager, svc.pid && `pid ${svc.pid}`, svc.since && `since ${svc.since}`].filter(Boolean).join(" · ");
+  if (!svc.manager) row("service", warn("no service manager") + C.dim("  run in a terminal: noop start --foreground"));
+  else if (!svc.installed) row("service", bad("not installed") + C.dim("  run: noop start"));
+  else if (svc.running) row("service", `${ok("running")}  ${C.dim(how)}`);
+  else row("service", `${bad("stopped")}  ${C.dim([svc.manager, svc.lastExit && svc.lastExit !== "0" && `last exit ${svc.lastExit}`].filter(Boolean).join(" · "))}${C.dim("  run: noop start")}`);
+  if (svc.logs) row("logs", C.dim(svc.logs));
+  if (svc.installed && !svc.running) process.exitCode = 1;
+
+  // the daemon's own pulse: its heartbeat, written every tick
+  let beat: HostBeat | undefined;
+  try { beat = JSON.parse(readFileSync(P("fleet", "hosts", `${host}.json`), "utf8")); } catch {}
+  const stale = !beat || Date.now() - Date.parse(beat.seen) > 5 * 60_000;
+  row("heartbeat", beat ? `${(stale ? C.yellow : C.green)(ago(beat.seen))}${beat.busy ? `  ${C.dim("·")} ${C.cyan(`${beat.busy} task${beat.busy === 1 ? "" : "s"} running`)}` : C.dim("  · idle")}` : C.yellow("none yet"));
+  const rev = runningRev().rev;
+  row("version", rev ? `${rev.slice(0, 7)}${beat?.rev && beat.rev !== rev ? C.yellow(`  (the running service reports ${beat.rev.slice(0, 7)})`) : ""}` : C.dim("unknown"));
+  const u = updateState();
+  if (u?.state && u.state !== "done") row("update", C.yellow(String(u.state)));
+
   // the server this machine actually syncs with is noop.toml's; the shared config only proposes one (adopted next tick)
   const hub = String(readHubToml().cloud?.url ?? "").replace(/\/$/, ""), shared = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
-  console.log(`server: ${hub || "local (not connected to a hub)"}${shared && hub && shared !== hub ? `   (shared config says ${shared}: switching on the next tick)` : ""}`);
-  if (hub) { // today's Cloudflare usage against the free plan (cloud/src/budget.ts)
-    const u = await fetch(`${hub}/api/usage`, { headers: { Authorization: `Bearer ${cfg.server?.token}` }, signal: AbortSignal.timeout(5000) })
-      .then((r) => (r.ok ? r.json() : null)).catch(() => null) as any;
-    const pct = (k: string) => `${Math.round((100 * u[k]) / u.free[k])}%`;
-    if (u?.free) console.log(`cloudflare today (UTC): ${u.requests} requests ${pct("requests")} · ${u.rowsRead} rows read ${pct("rowsRead")} · ${u.rowsWritten} rows written ${pct("rowsWritten")} of the free plan · db ${(u.dbBytes / 1e6).toFixed(0)} MB · ${u.level}`);
+  if (!hub) row("server", warn("local only") + C.dim("  not connected to a hub: noop init <url>"));
+  else {
+    // one request per `noop status`, run by a person: today's Cloudflare usage against the free plan (cloud/src/budget.ts)
+    const r = await fetch(`${hub}/api/usage`, { headers: { Authorization: `Bearer ${cfg.server?.token}` }, signal: AbortSignal.timeout(5000) }).catch((e) => e as Error);
+    const u = r instanceof Error || !r.ok ? null : await r.json().catch(() => null) as any;
+    row("server", `${r instanceof Error ? bad("unreachable") : r.ok ? ok("connected") : warn(`HTTP ${r.status}`)}  ${hub}`);
+    if (shared && shared !== hub) row("", C.yellow(`shared config says ${shared}: switching on the next tick`));
+    if (u?.free) {
+      const pct = (k: string) => { const n = Math.round((100 * u[k]) / u.free[k]); return (n >= 80 ? C.red : n >= 50 ? C.yellow : C.green)(`${n}%`); };
+      row("cloudflare", `${u.requests} requests ${pct("requests")} · ${u.rowsRead} rows read ${pct("rowsRead")} · ${u.rowsWritten} rows written ${pct("rowsWritten")} · db ${(u.dbBytes / 1e6).toFixed(0)} MB · ${u.level === "ok" ? C.green(u.level) : C.yellow(u.level)}`);
+      row("", C.dim("of the free plan, today (UTC)"));
+    }
   }
-  console.log(`autonomy: ${level(cfg)}   shadow judge: ${JSON.stringify(judgeAccuracy())}`);
-  console.log(`host ${hostName(cfg)}  caps: ${hostCaps(cfg).join(", ")}  primary: ${cfg.fleet?.primary}`);
-  console.log("online: " + onlineHosts(cfg).map((h) => `${h.host}(busy ${h.busy}, load ${h.stats?.loadRatio}, disk ${h.stats?.diskFreeGB}GB)`).join(", "));
+
+  // the fleet and this machine's headroom
+  const online = onlineHosts(cfg);
+  row("machines", `${C.bold(online.length)} online${online.length ? C.dim(": ") + online.map((h) => `${h.host === host ? C.cyan(h.host) : h.host}${C.dim(`(busy ${h.busy}, load ${h.stats?.loadRatio}, disk ${h.stats?.diskFreeGB}GB)`)}`).join(", ") : ""}`);
   const s = sample(cfg);
-  console.log("accounts:\n  " + accountsStatus(cfg).join("\n  "));
-  console.log(`this host: load ${s.load1}/${s.cores}  mem free ${s.memFreePct}%  disk free ${s.diskFreeGB}GB  → parallel ${allowedParallel(s, cfg, 0)}`);
+  const mem = (s.memFreePct < 10 ? C.red : s.memFreePct < 25 ? C.yellow : C.green)(`${s.memFreePct}%`);
+  const disk = (s.diskFreeGB < 5 ? C.red : s.diskFreeGB < 20 ? C.yellow : C.green)(`${s.diskFreeGB}GB`);
+  row("this host", `load ${s.load1}/${s.cores} · mem free ${mem} · disk free ${disk} → parallel ${allowedParallel(s, cfg, 0)}`);
+  row("caps", C.dim(hostCaps(cfg).join(", ")));
+  row("autonomy", `${level(cfg)}  ${C.dim(`shadow judge ${JSON.stringify(judgeAccuracy())}`)}`);
+  const accts = accountsStatus(cfg);
+  row("accounts", accts.length ? "" : C.dim("none"));
+  for (const a of accts) console.log(`    ${/✗|fail|exhaust|limit|expired/i.test(a) ? C.yellow(a) : a}`);
+  console.log(C.dim("\n  Tasks and decisions: noop tasks"));
+}
+
+/** `noop tasks`: the work queue, routines waiting for approval and the decisions waiting on the owner. */
+function tasks(cfg: Cfg) {
+  const tint: Record<string, (s: string | number) => string> = { active: C.cyan, failed: C.red, blocked: C.yellow, done: C.green };
   for (const f of ["proposed", "inbox", "active", "blocked", "failed", "done"]) {
     const items = list(P("tasks", f), /^T-.*\.md$/);
-    console.log(`\n${f.padEnd(8)} ${items.length}`);
+    console.log(`${f === "proposed" ? "" : "\n"}${C.bold(f.padEnd(8))} ${(tint[f] ?? ((x) => String(x)))(items.length)}`);
     if (f !== "done") for (const p of items.slice(-12)) {
       const m = readDoc(p).meta;
-      console.log(`  ${m.id} [${m.agent}] ${m.title}${m.claimed_by ? ` @${m.claimed_by}` : ""}${m.requires ? ` (needs ${m.requires})` : ""}`);
+      console.log(`  ${C.dim(m.id)} ${C.dim(`[${m.agent}]`)} ${m.title}${m.claimed_by ? C.cyan(` @${m.claimed_by}`) : ""}${m.requires ? C.dim(` (needs ${m.requires})`) : ""}`);
     }
   }
   const starved = routinesAwaitingApproval(cfg);
   if (starved.length) {
-    console.log("\nroutines waiting for your approval");
-    for (const r of starved) console.log(`  ${r.name}: ${r.copies.join(", ")} waiting since ${r.since.slice(0, 16).replace("T", " ")} — it fires on schedule but cannot start until you answer; set readonly = true or answer the batch`);
+    console.log(`\n${C.bold("routines waiting for your approval")}`);
+    for (const r of starved) console.log(`  ${C.yellow(r.name)}: ${r.copies.join(", ")} waiting since ${r.since.slice(0, 16).replace("T", " ")} — it fires on schedule but cannot start until you answer; set readonly = true or answer the batch`);
   }
-  console.log("\nopen decisions");
+  console.log(`\n${C.bold("open decisions")}`);
   for (const p of list(P("decisions", "open"))) {
     const m = readDoc(p).meta;
     const age = cardAge(m);
@@ -1130,14 +1201,14 @@ async function status(cfg: Cfg, brief = false) {
     // nothing and hid the one word that clears it. Name the item count and the command instead.
     if (m.kind === "proposals") {
       const n = (m.items ?? "").split(",").filter(Boolean).length;
-      console.log(`  ${m.id} proposals: ${n} item${n === 1 ? "" : "s"}${age}  ${m.question}  → noop decide ${m.id} "<1,3|all|none>"`);
+      console.log(`  ${C.yellow(m.id)} proposals: ${n} item${n === 1 ? "" : "s"}${age}  ${m.question}  → noop decide ${m.id} "<1,3|all|none>"`);
       continue;
     }
-    console.log(`  ${m.id} (${m.task}, ${m.agent}) ${m.question}  rec=${m.recommendation}${m.held ? `  [waiting on you${age}]` : age}`);
+    console.log(`  ${C.yellow(m.id)} ${C.dim(`(${m.task}, ${m.agent})`)} ${m.question}  rec=${m.recommendation}${m.held ? C.yellow(`  [waiting on you${age}]`) : age}`);
   }
 }
 
-/** How long a card has waited, as status() shows it: "" under a day, " · 12d" after. Unparseable dates count as fresh. */
+/** How long a card has waited, as `noop tasks` shows it: "" under a day, " · 12d" after. Unparseable dates count as fresh. */
 export function cardAge(meta: Record<string, string>, nowMs = Date.now()): string {
   const d = Date.parse(meta.created ?? meta.notified ?? "");
   if (Number.isNaN(d)) return "";
@@ -1149,17 +1220,21 @@ const HELP = `Noop — your own AI team
 
   noop init [<hub-url>] [--token <machine-token>]   join your hub (owner email login, or a machine token); asks for the URL if not given
   noop init --primary         the first machine, once: deploy your own Cloudflare Worker (holds the fleet data), seed ~/.noop/data
-  noop install                run as a service (systemd / launchd / Task Scheduler)
-  noop update                 self-update framework now (also automatic in daemon)
-  noop fix ["what is wrong"]  AI medic: diagnose & repair this install (auto-runs on install/update/daemon failures)
+  noop install                (re)write the service definition (systemd / launchd / Task Scheduler) and start it
+  noop start                  start noop in the background (installs the service the first time)
+  noop start --foreground     run in this terminal instead (Ctrl-C stops once running tasks finish)
+  noop stop                   stop the background service (running tasks finish first)
+  noop restart [--force]      restart once running tasks finish (picks up new code)
+  noop status                 is noop healthy here: service, heartbeat, server, Cloudflare usage, machines, accounts
+  noop update                 self-update framework now (also automatic while running)
+  noop fix ["what is wrong"]  AI medic: diagnose & repair this install (auto-runs on install/update/runtime failures)
   noop doctor                 check dependencies (agents, gh, headless GUI tools)
   noop visual …               headless display for GUI testing: start/run/shot/record/input/stop
 
-  noop daemon                 run forever (tick every host.tick_seconds)
+  noop tasks                  the work queue, routines waiting for approval and open decisions
   noop tick                   one cycle: pull → routines → replies → judge → run tasks → push
   noop add "title" [-b body] [-a agent] [-r os:linux (hard)] [--prefer os:macos (soft)] [-w heavy] [--host name] [--repo ~/work/x] [-p high] [--cli claude|codex]
   noop decide D-0001 "A"      answer a decision from the terminal
-  noop status                 queue / decision / accounts / resources overview
   noop learn [--full] [--dry]  learn the CEO from local Claude/Codex sessions (digest stays local; principles go to memory)
   noop metrics [days]         per-agent success, judge vs owner decisions (feeds self-evolution)
   noop usage                  weekly usage report (also posted every Monday by the built-in routine)
@@ -1203,7 +1278,13 @@ async function main() {
         : "noop restarts once its running tasks finish (at most once per hour; --force to skip the limit)");
     }
     case "update": return void console.log((await selfUpdate({ force: true })) ? "updated" : "up to date"); // asked by a person: retry even a release this host rejected
-    case "daemon": return daemon(cfg);
+    case "start": {
+      if (!rest.includes("--foreground") && !rest.includes("-f")) { if (!(await startService())) process.exitCode = 1; return; }
+      return foreground(cfg);
+    }
+    case "daemon": return foreground(cfg); // older service definitions still run `noop daemon`
+    case "stop": if (!(await stopService())) process.exitCode = 1; return;
+    case "tasks": return tasks(cfg);
     case "tick": return tick(cfg);
     case "add": {
       const { values, positionals } = parseArgs({
