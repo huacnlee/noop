@@ -17,7 +17,7 @@ import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } 
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
-import { stayAwake } from "./awake";
+import { bridgeRestart, stayAwake } from "./awake";
 import { computeMetrics } from "./metrics";
 import { writeUsageReport } from "./usage-report";
 import { checkUnrunnable, supervise } from "./supervisor";
@@ -521,6 +521,8 @@ async function drainAndExit(why: string, host: string) {
       await _commitPush(`[${host}] ${why}`, { force: true });
     });
   } catch {}
+  // cover the gap until the service manager has started the next daemon and it holds its own block
+  bridgeRestart();
   process.exit(0);
 }
 
