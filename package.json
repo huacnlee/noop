@@ -7,7 +7,7 @@
     "hub": "src/cli.ts"
   },
   "scripts": {
-    "daemon": "bun src/cli.ts daemon",
+    "start": "bun src/cli.ts start --foreground",
     "tick": "bun src/cli.ts tick",
     "status": "bun src/cli.ts status",
     "demo": "bun scripts/demo-server.ts",

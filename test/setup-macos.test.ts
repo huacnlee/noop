@@ -18,7 +18,8 @@ test("fresh macOS service directories and XML-safe paths", () => {
       const result = Bun.spawnSync(["plutil", "-convert", "json", "-o", "-", plist]);
       expect(result.exitCode).toBe(0);
       const service = JSON.parse(result.stdout.toString());
-      expect(service.ProgramArguments).toEqual(["/usr/bin/caffeinate", "-i", bun, cli, "daemon"]);
+      expect(service.ProgramArguments).toEqual(["/usr/bin/caffeinate", "-i", bun, cli, "start", "--foreground"]);
+      expect(service.ExitTimeOut).toBe(5400);
       expect(service.EnvironmentVariables.HUB_DATA).toBe(data);
       expect(service.RunAtLoad).toBe(true);
       expect(service.KeepAlive).toBe(true);
