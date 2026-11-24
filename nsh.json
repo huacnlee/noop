@@ -59,5 +59,11 @@
       ]
     }
   },
-  "icon": "app/icon.png"
+  "icon": "app/icon.png",
+  "store": {
+    "ios": {
+      "appId": "6835723652",
+      "usesNonExemptEncryption": false
+    }
+  }
 }
