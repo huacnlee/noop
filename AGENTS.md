@@ -49,3 +49,32 @@ extending signing authorization or configuring this secret. The Store manifest
 is signed by the existing release key; NSH fetches its detached signature at
 `latest.json.sig` beside `store-latest.json`. Publish the signed Store manifest at both store-latest.json and latest.json for legacy Store installations. Direct releases use the signed direct-latest.json and its signature via the direct channel endpoint. CI's Store IPA is unsigned; sign and
 validate the actual distribution IPA before requesting upload approval.
+
+### Publishing a release to the App Store
+
+Verified with 1.0.9 (build 115) on 2026-11-24. Nothing secret lives in this repository; everything is on the owner's
+Mac under `~/.appstoreconnect/` (mode 700/600). `source ~/.appstoreconnect/noop.env` sets the App Store Connect API
+key (`NSH_APP_STORE_*`, a team key: it needs the issuer ID, which that file holds), the signing identity
+(`NOOP_STORE_SIGN_IDENTITY`) and the App Store profile (`NOOP_STORE_PROFILE`). Never commit these values.
+
+1. Release from CI, not from a local NSH. The release workflow pins `NSH_REF`; the locally installed nightly CLI can be
+   ahead of it (on 2026-11-24 it had already moved `Speech` out of `nsh`, so a local `nsh package` failed). Tag
+   `origin/main` as `vX.Y.Z` and push the tag; that release run's number is the build number of every client, higher
+   than any build uploaded before. Download `noop-ios-store-unsigned.ipa` from the run (`gh run download`).
+2. Sign by hand. Use `$NOOP_STORE_SIGN_IDENTITY` (an `Apple Distribution: lei zhong (6K2XXVCSDD)` certificate in the
+   login keychain, key and certificate also in `~/.appstoreconnect/distribution/`). Ignore the identical-looking
+   identity in `noop-release.keychain-db`: that keychain's password is lost, so codesign fails with
+   `errSecInternalComponent`. Xcode's own account is not in the "lei zhong" developer team, so do not rely on Xcode
+   automatic signing. Unzip the IPA, copy `$NOOP_STORE_PROFILE` to `Payload/Noop.app/embedded.mobileprovision`, sign
+   `Noop.app` with entitlements taken from the profile (`application-identifier` `6K2XXVCSDD.dev.huacnlee.noop`,
+   `com.apple.developer.team-identifier`, `beta-reports-active` true, `get-task-allow` false, `keychain-access-groups`
+   `6K2XXVCSDD.dev.huacnlee.noop`) using `codesign -f -s "$NOOP_STORE_SIGN_IDENTITY" --entitlements … --generate-entitlement-der`,
+   and zip `Payload` again. When the profile expires (2027-11-24) or a capability changes, create a new
+   `IOS_APP_STORE` profile for bundle ID `dev.huacnlee.noop` with that certificate through the App Store Connect API.
+3. Run `scripts/check-ios-sdk.sh` on `Payload/Noop.app/Noop` (SDK 27 or newer) and `codesign --verify --strict` on the
+   signed app.
+4. Ask the owner, then upload with `nsh publish ios <ipa>` (the env file supplies its arguments). With nsh 0.6.0 the
+   parts upload but the final commit fails with HTTP 409 on `sourceFileChecksums` (it sends SHA_256). Do not upload
+   again: complete the same upload by PATCHing its `buildUploadFiles/<id>` with `uploaded: true` and an `MD5`
+   `sourceFileChecksums.file`, then wait for the `buildUploads/<id>` state to reach `COMPLETE` and the build to be
+   `VALID`.
