@@ -251,8 +251,7 @@ TimeoutStopSec=90min
 Environment=PATH=${path}
 Environment=HUB_DATA=${DATA}
 Nice=5
-# keep the box awake while the fleet runs
-ExecStartPre=-/usr/bin/true
+# the daemon itself holds a systemd-inhibit sleep lock while it runs (src/awake.ts)
 
 [Install]
 WantedBy=default.target
@@ -268,7 +267,7 @@ WantedBy=default.target
     const plist = writeMacAgent(homedir(), DATA, bun, cli, path, LABEL);
     await $`launchctl bootout gui/${process.getuid!()} ${plist}`.quiet().nothrow();
     await $`launchctl bootstrap gui/${process.getuid!()} ${plist}`;
-    console.log(`✔ launchd agent installed: ${plist} (starts at login; caffeinate -i prevents idle sleep). Keep a primary Mac logged in and awake: sleep, logout or closing the lid pauses coordination until it returns.`);
+    console.log(`✔ launchd agent installed: ${plist} (starts at login; the daemon blocks idle and system sleep while it runs). Keep a primary Mac logged in and awake: sleep, logout or closing the lid pauses coordination until it returns.`);
   } else if (process.platform === "win32") {
     const cmd = `"${bun}" "${cli}" daemon`;
     await $`schtasks /Create /F /SC ONLOGON /RL LIMITED /TN ${SERVICE} /TR ${cmd}`.nothrow();

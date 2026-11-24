@@ -17,6 +17,7 @@ import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } 
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
+import { stayAwake } from "./awake";
 import { computeMetrics } from "./metrics";
 import { writeUsageReport } from "./usage-report";
 import { checkUnrunnable, supervise } from "./supervisor";
@@ -1077,7 +1078,10 @@ async function daemon(cfg: Cfg) {
     }
     await _commitPush(`[${host}] recover`);
   });
-  await locked(async () => { await _pull(); journal(host, `🟢 daemon started (${hostCaps(cfg).join(", ")})`); await _commitPush(`[${host}] up`); });
+  // a worker host must not sleep while the daemon runs; the result is in the start line so every host's state is visible
+  let awake = await stayAwake();
+  const awakeNote = "how" in awake ? `awake: ${awake.how}` : L(`⚠️ cannot keep this host awake: ${awake.error}`, `⚠️ 无法阻止本机睡眠：${awake.error}`);
+  await locked(async () => { await _pull(); journal(host, `🟢 daemon started (${hostCaps(cfg).join(", ")}; ${awakeNote})`); await _commitPush(`[${host}] up`); });
   for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void drainAndExit("stop", host));
   // a stray rejection (a voided notify/medic) used to kill the process → systemd restart → running work requeued
   process.on("unhandledRejection", (e) => console.error("unhandled rejection", e));
@@ -1085,6 +1089,11 @@ async function daemon(cfg: Cfg) {
   let lastUpdate = 0, failures = 0;
   for (;;) {
     const c = loadConfig();
+    // restore the sleep block if its helper was killed; report only a change, never every tick
+    const was = awake;
+    awake = await stayAwake();
+    if ("error" in awake && !("error" in was)) journal(host, L(`⚠️ lost the sleep block: ${awake.error}`, `⚠️ 阻止睡眠失效：${awake.error}`));
+    if ("how" in awake && "error" in was) journal(host, `☕ awake again: ${awake.how}`);
     if (adoptCloudUrl(c.cloud?.url)) journal(host, `☁️ hub moved: now syncing with ${c.cloud.url}`);
     if (existsSync(RESTART_FLAG())) { // `hub restart` (throttled) / `hub restart --force`
       const force = readFileSync(RESTART_FLAG(), "utf8").includes("force");
