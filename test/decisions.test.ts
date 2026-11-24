@@ -164,6 +164,44 @@ test("a different task still gets its own card", () => {
   expect(a).not.toBe(b);
 });
 
+test("a routine that re-asks its standing question refreshes one card and lists both runs", () => {
+  const r = (summary: string) => ({ status: "needs_decision", summary, question: "焦点文件改哪几项？", recommendation: "1", options: ["1. a", "2. b"] }) as any;
+  const first = dec.openDecision({ id: "T-0012", agent: "chief-of-staff", source: "routine:focus-check" }, r("week 1"), "h");
+  const again = dec.openDecision({ id: "T-0013", agent: "chief-of-staff", source: "routine:focus-check" }, r("week 2, new evidence"), "h");
+  expect(again).toBe(first);
+  const card = core.readDoc(core.P("decisions", "open", `${first}.md`)).meta;
+  expect(card.tasks).toBe("T-0012,T-0013");
+  expect(card.source).toBe("routine:focus-check");
+  expect(card.question).toBe("焦点文件改哪几项？");
+  expect(core.readDoc(core.P("decisions", "open", `${first}.md`)).body).toContain("week 2, new evidence");
+});
+
+test("cards opened before the source was stored are matched through their task", () => {
+  core.writeDoc(core.P("tasks", "blocked", "T-0020.md"), { id: "T-0020", agent: "ops-watcher", source: "routine:security-check" }, "scan 1");
+  const old = dec.openDecision({ id: "T-0020", agent: "ops-watcher", source: "routine:security-check" }, { status: "needs_decision", summary: "scan 1", question: "修复高风险？", recommendation: "A", options: ["A: fix", "B: accept"] } as any, "h");
+  // D-0201 was written before the card recorded `source`: drop it, as the older code would have.
+  const path = core.P("decisions", "open", `${old}.md`);
+  const { meta, body } = core.readDoc(path);
+  core.writeDoc(path, { ...meta, source: undefined }, body);
+  const neu = dec.openDecision({ id: "T-0021", agent: "ops-watcher", source: "routine:security-check" }, { status: "needs_decision", summary: "scan 2", question: "修复高风险?", recommendation: "A", options: ["A: fix", "B: accept"] } as any, "h");
+  expect(neu).toBe(old);
+  expect(core.readDoc(path).meta.tasks).toBe("T-0020,T-0021");
+});
+
+test("the same question from a different routine still gets its own card", () => {
+  const r = { status: "needs_decision", summary: "ctx", question: "Merge?", recommendation: "A", options: ["A: merge", "B: wait"] } as any;
+  const a = dec.openDecision({ id: "T-0014", agent: "lead", source: "routine:triage-inbound" }, r, "h");
+  const b = dec.openDecision({ id: "T-0015", agent: "lead", source: "routine:own-prs-ci" }, r, "h");
+  expect(a).not.toBe(b);
+});
+
+test("the same routine asking a different question still gets its own card", () => {
+  const q = (question: string) => ({ status: "needs_decision", summary: "ctx", question, recommendation: "A", options: ["A: yes", "B: no"] }) as any;
+  const a = dec.openDecision({ id: "T-0016", agent: "architect", source: "routine:evolve" }, q("清理记忆吗？"), "h");
+  const b = dec.openDecision({ id: "T-0017", agent: "architect", source: "routine:evolve" }, q("合并这个补丁吗？"), "h");
+  expect(a).not.toBe(b);
+});
+
 test("a fresh menu card closes the older unanswered one and parks its idle task", () => {
   const r = (q: string) => ({ status: "needs_decision", summary: "idle", question: q, recommendation: "1", options: ["1. a", "2. b"] }) as any;
   core.writeDoc(core.P("tasks", "blocked", "T-0401.md"), { id: "T-0401", agent: "chief-of-staff", kind: "menu", source: "idle" }, "old menu");

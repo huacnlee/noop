@@ -13,7 +13,7 @@ const HOME = join(HOME_DIR, "accounts");
 const STATE = join(HOME, "state.json");
 
 export type Account = { cli: string; name: string; dir: string; default?: boolean; auth?: "oauth" | "api" };
-type AState = { cooldown_until?: string; needs_login?: boolean; last_error?: string; login_id?: string; token?: string; cred?: number; told?: string };
+type AState = { cooldown_until?: string; needs_login?: boolean; last_error?: string; login_id?: string; token?: string; cred?: number; told?: string; login_fails?: number; login_tried?: number };
 type State = { accounts: Record<string, AState>; seq: number; alerted?: Record<string, string> };
 
 const load = (): State => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : { accounts: {}, seq: 0 });
@@ -285,7 +285,7 @@ export async function startLogin(a: Account, cfg: Cfg) {
   if ([...pending.values()].some((p) => p.account === k)) return;
   const s = load();
   const id = `L-${String(++s.seq).padStart(4, "0")}`;
-  s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id };
+  s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id, login_tried: Date.now() };
   save(s);
   const { cmd, needsCode } = loginCommand(a);
   const proc = Bun.spawn(withPty([...cmd, ...claudeAuthArgs(accountEnv(a))]), {
@@ -322,10 +322,16 @@ export async function startLogin(a: Account, cfg: Cfg) {
     pending.delete(id);
     const st = load();
     const ok = code === 0;
-    st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined };
+    // A login that dies before printing a link is a broken login command, not an expired link: count it so the
+    // retry backs off instead of journaling and notifying every 30 minutes forever (L-0001…L-0019 overnight).
+    const fails = ok || sent ? 0 : (st.accounts[k]?.login_fails ?? 0) + 1;
+    st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined, login_fails: fails || undefined };
     save(st);
-    journal(host, ok ? `${k} logged in (${id})` : `${k} login ${id} failed (exit ${code})`);
-    await notify(ok ? L(`${k} logged in, the fleet continues`, `${k} 登录成功，fleet 继续运转`) : L(`${id} login did not finish (exit ${code}), a new link will follow`, `${id} 登录未完成（exit ${code}），稍后会再发新链接`), cfg);
+    const next = fails ? ` → next try in ${Math.round(loginBackoffMs(fails) / 60_000)}m` : "";
+    journal(host, ok ? `${k} logged in (${id})` : `${k} login ${id} failed (exit ${code})${next}`);
+    // The owner can act on a sent link or the first silent failure; repeating the same silent failure is noise.
+    if (ok || sent || fails === 1)
+      await notify(ok ? L(`${k} logged in, the fleet continues`, `${k} 登录成功，fleet 继续运转`) : sent ? L(`${id} login did not finish (exit ${code}), a new link will follow`, `${id} 登录未完成（exit ${code}），稍后会再发新链接`) : L(`${id} login for ${k} exited (code ${code}) without printing a link; retrying with backoff, run \`${a.cli} login\` on ${host} to fix it now`, `${id}：${k} 的登录命令没打出链接就退出了（exit ${code}），之后会逐步拉长重试间隔；可在 ${host} 上手动执行 \`${a.cli} login\` 立即修复`), cfg);
   });
   setTimeout(() => { if (pending.has(id)) proc.kill(); }, 30 * 60_000); // link expiry
 }
@@ -339,6 +345,11 @@ export function submitLoginCode(id: string, code: string): boolean {
   stdin.write(code.trim() + "\r");
   stdin.flush();
   return true;
+}
+
+/** Retry delay after `fails` consecutive logins that exited without a link: 30m, 1h, 2h … capped at 12h. */
+export function loginBackoffMs(fails: number): number {
+  return Math.min(30 * 60_000 * 2 ** Math.max(0, fails - 1), 12 * 3600_000);
 }
 
 /** Periodically retry logins for accounts still flagged (e.g. after an expired link). */
@@ -358,7 +369,9 @@ export async function retryLogins(cfg: Cfg) {
       continue;
     }
     // back off: a login that exits immediately would otherwise send a new link every tick
-    if (Date.now() - (lastLoginTry.get(key(a)) ?? 0) < 30 * 60_000) continue;
+    // persisted login_tried keeps the backoff across daemon restarts (self-updates restart it several times a day)
+    const tried = Math.max(lastLoginTry.get(key(a)) ?? 0, st.login_tried ?? 0);
+    if (Date.now() - tried < loginBackoffMs(st.login_fails ?? 0)) continue;
     lastLoginTry.set(key(a), Date.now());
     await startLogin(a, cfg);
   }

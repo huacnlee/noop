@@ -7,13 +7,14 @@ import re
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--app', type=Path, default=Path('app'))
+parser.add_argument('--config', type=Path, default=Path('nsh.json'))
 parser.add_argument('--version', required=True)
 parser.add_argument('--build', type=int, required=True)
 parser.add_argument('--channel', choices=['direct', 'store'], default='direct')
 args = parser.parse_args()
 if not re.fullmatch(r'\d+\.\d+\.\d+', args.version) or args.build < 3:
     parser.error('use a stable semantic version and a build greater than the existing Store build 2')
-path = args.app / 'nsh.json'
+path = args.config
 config = json.loads(path.read_text())
 config.update(id='dev.noop.app', version=args.version, build=args.build)
 config['updater'].pop('github', None)

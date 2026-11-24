@@ -287,9 +287,10 @@ function scratchIdleDays(dir: string): number {
   return Math.min(...probes.filter(existsSync).map(ageDays));
 }
 
-/** A git checkout still holding work: uncommitted changes, or commits on a local branch no remote has. */
+/** A scratch dir still holding work: not a git checkout at all (its files exist nowhere else, and a checkout nested
+ *  inside goes unchecked), uncommitted changes, or commits on a local branch no remote has. */
 async function holdsUnpushedWork(dir: string): Promise<boolean> {
-  if (!existsSync(join(dir, ".git"))) return false;
+  if (!existsSync(join(dir, ".git"))) return true;
   const st = await $`git -C ${dir} status --porcelain --untracked-files=normal`.quiet().nothrow();
   if (st.exitCode !== 0) return true; // can't tell: keep it
   if (st.stdout.toString().split("\n").some((l) => l.trim() && !/^\?\? (target|node_modules|dist|build)\/?$/.test(l.trim()))) return true;
@@ -347,14 +348,12 @@ export async function reapScratch(cfg: Cfg, busyRepos: Set<string>, force = fals
   for (const root of scratchRoots(cfg)) for (const name of readdirSync(root)) {
     const dir = join(root, name);
     try {
-      if (name.startsWith(".") || lstatSync(dir).isSymbolicLink()) continue;
-      const isDir = lstatSync(dir).isDirectory();
-      const idleDays = isDir ? scratchIdleDays(dir) : ageDays(dir);
-      const v = await judgeScratch(dir, { open, busy: busyRepos, idleDays,
-        minIdleDays: r.scratch_idle_days ?? 7, closedIdleDays: r.scratch_closed_task_days ?? 1,
-        hasWork: isDir ? undefined : async () => false });
+      // symlinks and loose files are not checkouts; a file here exists nowhere else
+      if (name.startsWith(".") || !lstatSync(dir).isDirectory()) continue;
+      const v = await judgeScratch(dir, { open, busy: busyRepos, idleDays: scratchIdleDays(dir),
+        minIdleDays: r.scratch_idle_days ?? 7, closedIdleDays: r.scratch_closed_task_days ?? 1 });
       if (v !== "remove") { res.kept++; continue; }
-      res.bytes += isDir ? await removeScratch(dir) : (() => { const s = statSync(dir).size; rmSync(dir, { force: true }); return s; })();
+      res.bytes += await removeScratch(dir);
       res.removed++;
     } catch { res.kept++; }
   }

@@ -18,7 +18,7 @@ on:
       - scripts/setup-linux-deps.sh
       - install-client.sh
       - install-client.ps1
-      - app/nsh.json
+      - nsh.json
       - app/build-web.sh
   workflow_dispatch:
 
@@ -33,7 +33,9 @@ env:
   # `nightly` builds against the commit of the current NSH nightly release and reuses its prebuilt CLI and runtimes,
   # so a release does not compile NSH. Pin a commit only when Noop needs NSH changes the nightly does not have yet.
   # Every job resolves it the same way, so all client runtimes and the OTA package share one commit.
-  NSH_REF: nightly
+  # Pinned to longbridge/nsh#2942 (nsh.json names the app's entry, so nsh runs from the repository root), which the
+  # nightly does not have yet. The next commits move `Speech` into nsh-extra (#2947), so go back to `nightly` with that.
+  NSH_REF: 02728012880c2ec69c52c55bd569a18956b0300f
 
 defaults:
   run:
@@ -73,7 +75,7 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          version=$(python3 -c 'import json; print(json.load(open("app/nsh.json"))["version"])')
+          version=$(python3 -c 'import json; print(json.load(open("nsh.json"))["version"])')
           [ "$GITHUB_REF_TYPE" != tag ] || version="${GITHUB_REF_NAME#v}"
           python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel "$CHANNEL"
           args=(--build "$GITHUB_RUN_NUMBER")
@@ -94,12 +96,12 @@ jobs:
             fi
           fi
           if [ "$TARGET" = web ]; then
-            (cd app && ./build-web.sh "${args[@]}")
+            app/build-web.sh "${args[@]}"
             tar -czf "assets/$ASSET" -C app/dist/web/noop .
             ls -l assets
             exit 0
           fi
-          (cd app && nsh package --target "$TARGET" -o "$out" "${args[@]}")
+          nsh package --target "$TARGET" -o "$out" "${args[@]}"
           case "$TARGET" in
             linux) mv "$out/Noop.tar.gz" "assets/$ASSET"; mv "$out"/Noop-*.tar.gz assets/ ;;
             windows) mv "$out/Noop.zip" "assets/$ASSET"; mv "$out"/Noop-*.zip assets/ ;;
@@ -172,7 +174,7 @@ jobs:
           out="$RUNNER_TEMP/out-x86_64"
           mkdir -p assets-intel
           # Name the processor: without --arch the CLI packages for the machine it runs on (arm64), even under Rosetta.
-          (cd app && nsh package --target macos --arch x86_64 -o "$out" "${args[@]}")
+          nsh package --target macos --arch x86_64 -o "$out" "${args[@]}"
           ditto -c -k --keepParent "$out/Noop.app" assets-intel/noop-macos-x86_64.zip
           mv "$out"/Noop-*-macos-x86_64.tar.gz assets-intel/
           app="$RUNNER_TEMP/verify-x86_64/Noop.app"
@@ -222,7 +224,7 @@ jobs:
           for f in *; do l=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]'); [ "$f" = "$l" ] || mv "$f" "$l"; done
           ls -l
       # OTA: the app's code as a package signed with the release key (certified by the root whose public key is in
-      # app/nsh.json). Installed apps on every platform, iOS and Android included, run it from their next launch when
+      # nsh.json). Installed apps on every platform, iOS and Android included, run it from their next launch when
       # its build is newer than theirs and their NSH runtime is new enough; otherwise they take the whole app below.
       # It has this run's build number, as the apps packaged above do, so only older installs pick it up.
       - name: Sign OTA packages and write channel manifests
@@ -238,15 +240,15 @@ jobs:
           trap 'rm -rf "$keys"' EXIT
           (umask 077 && mkdir -p "$keys" && printf '%s\n' "$NSH_PACKAGE_KEY" > "$keys/release.secret")
           printf '%s\n' "$NSH_PACKAGE_CERT" > "$keys/release.cert"
-          (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/release.cert" \
+          (nsh publish --key "$keys/release.secret" --cert "$keys/release.cert" \
             --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-$version.nshpkg")
           # The Store bundle ID needs its own root-certified package certificate.
           test -n "$NSH_STORE_PACKAGE_CERT" || { echo "NSH_STORE_PACKAGE_CERT is required" >&2; exit 1; }
           printf '%s\n' "$NSH_STORE_PACKAGE_CERT" > "$keys/store.cert"
           python3 scripts/prepare-client-release.py --version "$version" --build "$GITHUB_RUN_NUMBER" --channel store
-          (cd app && nsh publish App.tsx --key "$keys/release.secret" --cert "$keys/store.cert" \
+          (nsh publish --key "$keys/release.secret" --cert "$keys/store.cert" \
             --build "$GITHUB_RUN_NUMBER" --app-version "$version" -o "$GITHUB_WORKSPACE/assets/noop-store-$version.nshpkg")
-          nsh update-manifest --entry app --out "$RUNNER_TEMP/store-manifest" \
+          nsh update-manifest --entry . --out "$RUNNER_TEMP/store-manifest" \
             --package "assets/noop-store-$version.nshpkg" --key "$keys/release.secret" \
             --link "ios=https://apps.apple.com/app/id6835723652"
           mv "$RUNNER_TEMP/store-manifest/latest.json" assets/store-latest.json
@@ -262,7 +264,7 @@ jobs:
               *) echo "IOS_UPDATE_URL must be an App Store or TestFlight HTTPS URL" >&2; exit 1 ;;
             esac
           fi
-          nsh update-manifest assets/noop-"$version"-*.tar.gz assets/noop-"$version"-*.zip --entry app --out "$RUNNER_TEMP/direct-manifest" --key "$RUNNER_TEMP/keys/release.secret" \
+          nsh update-manifest assets/noop-"$version"-*.tar.gz assets/noop-"$version"-*.zip --entry . --out "$RUNNER_TEMP/direct-manifest" --key "$RUNNER_TEMP/keys/release.secret" \
             --package assets/noop-"$version".nshpkg \
             --link "android=https://github.com/$GITHUB_REPOSITORY/releases/latest/download/noop-android.apk" "${links[@]}"
           mv "$RUNNER_TEMP/direct-manifest/latest.json" assets/direct-latest.json

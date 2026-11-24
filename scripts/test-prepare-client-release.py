@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).with_name('prepare-client-release.py')
-CONFIG = SCRIPT.parent.parent / 'app/nsh.json'
+CONFIG = SCRIPT.parent.parent / 'nsh.json'
 
 class ReleaseMetadataTest(unittest.TestCase):
     def test_channels_preserve_capabilities_and_trust(self):
@@ -14,7 +14,7 @@ class ReleaseMetadataTest(unittest.TestCase):
             original = json.loads(CONFIG.read_text())
             (app / 'nsh.json').write_text(json.dumps(original))
             for channel, app_id in [('store', 'dev.huacnlee.noop'), ('direct', 'dev.noop.app')]:
-                subprocess.run(['python3', str(SCRIPT), '--app', directory, '--version', '1.0.1', '--build', '3', '--channel', channel], check=True)
+                subprocess.run(['python3', str(SCRIPT), '--app', directory, '--config', str(app / 'nsh.json'), '--version', '1.0.1', '--build', '3', '--channel', channel], check=True)
                 config = json.loads((app / 'nsh.json').read_text())
                 self.assertEqual((config['id'], config['version'], config['build']), (app_id, '1.0.1', 3))
                 self.assertEqual(config['capabilities'], original['capabilities'])
@@ -30,7 +30,7 @@ class ReleaseMetadataTest(unittest.TestCase):
             app = Path(directory)
             (app / 'nsh.json').write_text(CONFIG.read_text())
             for version, build in [('1.0.1', '2'), ('dev', '3')]:
-                result = subprocess.run(['python3', str(SCRIPT), '--app', directory, '--version', version, '--build', build], capture_output=True)
+                result = subprocess.run(['python3', str(SCRIPT), '--app', directory, '--config', str(app / 'nsh.json'), '--version', version, '--build', build], capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual((app / 'nsh.json').read_text(), CONFIG.read_text())
 
