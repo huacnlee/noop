@@ -115,6 +115,15 @@ export function alreadyAsked(cause: string, ids: string[], cards: Meta[]): strin
   return ids.filter((id) => !seen.has(id));
 }
 
+/** The standing answer for a platform/host cause: the newest closed card for it that the judge sent back (with its
+    instructions) or the owner answered A. Repeating the card only re-asks a settled question (T-11114: the macOS card
+    was sent back by the judge 70+ times, D-0665…D-0866, each with the same instructions). Pure: unit-tested. */
+export function standingAnswer(cause: string, cards: Meta[]): Meta | undefined {
+  if (!cause.startsWith("platform:") && !cause.startsWith("host:")) return undefined;
+  return cards.filter((c) => c.supervisor_cause === cause && c.answered && (/^SENT BACK by judge/.test(c.answer ?? "") || /^A\b/.test((c.answer ?? "").trim())))
+    .sort((a, b) => (a.answered ?? "").localeCompare(b.answered ?? "")).at(-1);
+}
+
 const CAUSE_LABEL = (c: string) =>
   c === "platform:os:macos" ? L("macOS tasks not advancing", "macOS 任务推不动") : c === "platform:os:windows" ? L("Windows tasks not advancing", "Windows 任务推不动")
     : c.startsWith("host:") ? L(`host ${c.slice(5)} unavailable`, `主机 ${c.slice(5)} 不可用`) : c === "no-wait" ? L("no wait condition recorded", "没有记录等待条件") : c.startsWith("slow:") ? L(`long run on ${c.slice(5)}`, `${c.slice(5)} 上的长时间运行`) : c;
@@ -271,6 +280,18 @@ export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = 
   for (const [cause, vs] of groupByCause(verdicts)) {
     const fresh = alreadyAsked(cause, vs.map((x) => x.id), cards);
     if (!fresh.length) continue;
+    const prec = standingAnswer(cause, cards);
+    if (prec) { // settled before: apply the standing answer once per task instead of a new card (no new D-id, no judge call)
+      for (const id of fresh) {
+        const x = byId.get(id)!;
+        if (x.meta.supervisor_precedent) continue; // applied once already: the task's own wait stands, never loop
+        writeDoc(P("tasks", "inbox", `${id}.md`), { ...x.meta, claimed_by: undefined, status: undefined, wake_at: undefined, wait_kind: undefined, decision: undefined, resumed: "yes", supervisor_precedent: prec.id },
+          `${x.body ?? ""}\n\n> Supervisor (${now()}): ${CAUSE_LABEL(cause)}. Settled by ${prec.id}, applied without a new card: ${prec.answer}\nIf the environment is still unusable after checking it, record the unverified gap in the PR/task and return done; do not return waiting on it again.\n`);
+        unlinkSync(x.path);
+        journal(host, L(`🧭 supervisor: ${id} ${CAUSE_LABEL(cause)}, applied ${prec.id} instead of a new card`, `🧭 supervisor: ${id} ${CAUSE_LABEL(cause)}，按 ${prec.id} 处理，不再发卡`)); counts.resume++;
+      }
+      continue;
+    }
     const items = fresh.map((id) => ({ id, title: byId.get(id)!.meta.title, reasons: vs.find((x) => x.id === id)!.reasons }));
     const c = cardFor(cause, items);
     const did = nextId("D", P("decisions"));

@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { P, list, readDoc, writeDoc } from "../src/core";
-import { sweepPlatform, alreadyAsked, cardFor, checkUnrunnable, classify, groupByCause, supervise, type Ctx, type Task } from "../src/supervisor";
+import { sweepPlatform, alreadyAsked, standingAnswer, cardFor, checkUnrunnable, classify, groupByCause, supervise, type Ctx, type Task } from "../src/supervisor";
 import { closeDecision, ignoreDecision } from "../src/decisions";
 
 const H = 3_600_000;
@@ -20,7 +20,7 @@ const task = (m: Record<string, string>, folder: "waiting" | "blocked" = "waitin
 // The cards supervise() opens go too: their summary names merge gates (合并), so a later file's search over
 // decisions would find them.
 afterAll(() => {
-  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202"]) for (const f of ["inbox", "waiting"]) rmSync(P("tasks", f, `${id}.md`), { force: true });
+  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202", "T-0301"]) for (const f of ["inbox", "waiting"]) rmSync(P("tasks", f, `${id}.md`), { force: true });
   for (const f of ["open", "closed"]) for (const p of list(P("decisions", f))) if (readDoc(p).meta.supervisor_cause) rmSync(p, { force: true });
 });
 
@@ -149,6 +149,36 @@ test("supervise(): one card per cause, never twice; answering resumes every task
   }
   expect(supervise(cfg, "lb").cards).toBe(0);
   expect(readFileSync(P("journal", `${new Date().toLocaleDateString("sv-SE")}.md`), "utf8")).toContain("supervisor ran");
+});
+
+test("standing answer: a platform card the judge sent back or the owner answered A settles the cause", () => {
+  const sent = { id: "D-1", supervisor_cause: "platform:os:macos", answered: "2026-11-24T10:00:00Z", answer: "SENT BACK by judge: check the Mac, else A" };
+  const owner = { id: "D-2", supervisor_cause: "platform:os:macos", answered: "2026-11-24T12:00:00Z", answer: "A" };
+  const other = { id: "D-3", supervisor_cause: "platform:os:macos", answered: "2026-11-24T13:00:00Z", answer: "放 Linux 上做" };
+  expect(standingAnswer("platform:os:macos", [sent, owner, other])?.id).toBe("D-2");
+  expect(standingAnswer("platform:os:macos", [sent])?.id).toBe("D-1");
+  expect(standingAnswer("platform:os:macos", [other, { id: "D-4", supervisor_cause: "platform:os:macos", tasks: "T-1" }])).toBeUndefined();
+  expect(standingAnswer("slow:lb", [{ ...sent, supervisor_cause: "slow:lb" }])).toBeUndefined(); // only platform/host causes
+});
+
+test("supervise(): a settled platform cause resumes new tasks with the standing answer instead of a new card, once", () => {
+  const seen = new Date().toISOString();
+  writeFileSync(P("fleet", "hosts", "huacnlee-macbook.json"), JSON.stringify({ ...mac, seen }));
+  writeFileSync(P("fleet", "hosts", "lb.json"), JSON.stringify({ ...lin, seen }));
+  writeDoc(P("decisions", "closed", "D-0901.md"), { id: "D-0901", supervisor_cause: "platform:os:macos", tasks: "T-0900", answered: seen, answer: "SENT BACK by judge: do it on Linux, record the gap (A)" }, "x");
+  const t0 = new Date(Date.now() - 10 * H).toISOString();
+  writeDoc(P("tasks", "waiting", "T-0301.md"), { id: "T-0301", title: "mac fix", requires: "os:macos", created: t0, waiting_on: "Mac", wait_check: "false", supervisor_requeued: "yes" }, "body");
+  const r = supervise({ fleet: {} }, "lb");
+  expect(r.cards).toBe(0);
+  const back = readDoc(P("tasks", "inbox", "T-0301.md"));
+  expect(back.meta.supervisor_precedent).toBe("D-0901");
+  expect(back.body).toContain("do it on Linux");
+  // waits again on the Mac: no second resume, no card
+  rmSync(P("tasks", "inbox", "T-0301.md"));
+  writeDoc(P("tasks", "waiting", "T-0301.md"), { ...back.meta, resumed: "", wakes: "9" }, "b");
+  const again = supervise({ fleet: {} }, "lb");
+  expect(again.cards).toBe(0);
+  expect(existsSync(P("tasks", "waiting", "T-0301.md"))).toBe(true);
 });
 
 test("supervise(): a replaced menu task goes to tasks/rejected instead of coming back as a new card", () => {
