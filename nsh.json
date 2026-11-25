@@ -94,7 +94,7 @@
         "speech"
       ]
     },
-    "nsh-icon": "^0.2.1",
+    "nsh-icon": "^0.2.2",
     "nsh-icon-lucide": "^0.2.1"
   }
 }
