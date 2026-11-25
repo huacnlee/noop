@@ -47,7 +47,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.nsh-dist
-        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}${{ steps.apple-sdk.outputs.key }}${{ inputs.target == 'macos' && format('-{0}', inputs.rust-target || 'native') || '' }}${{ inputs.target == 'linux' && '-features-v2' || '' }}
+        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}${{ steps.apple-sdk.outputs.key }}${{ inputs.target == 'macos' && format('-{0}', inputs.rust-target || 'native') || '' }}${{ inputs.target == 'linux' && '-features-v2' || '' }}-cli-channel
 
     # The x86_64 CLI also generates x86_64 OTA archive names. It needs Rosetta even on cache hits.
     - if: runner.os == 'macOS' && runner.arch == 'ARM64' && inputs.rust-target == 'x86_64-apple-darwin'
