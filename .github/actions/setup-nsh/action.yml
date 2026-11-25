@@ -163,7 +163,7 @@ runs:
         if [ "$NIGHTLY" != true ]; then
           # Built from a nightly's commit, the CLI says so: an app's nsh-extra then comes from that commit by Git,
           # like the runtime built here, instead of crates.io's release, which links another nsh-core.
-          NSH_CHANNEL=nightly cargo build --release --locked -p nsh-cli "${target_args[@]}""
+          NSH_CHANNEL=nightly cargo build --release --locked -p nsh-cli "${target_args[@]}"
           install -d "$out/bin"
           cp "$release_dir/nsh$exe" "$out/bin/"
         fi
