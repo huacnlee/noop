@@ -78,7 +78,11 @@ jobs:
           esac
           [ -z "$targets" ] || rustup target add $targets
           # Its C dependencies (zstd) compile for wasm with clang and llvm-ar.
-          [ "$TARGET" != web ] || { sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm; }
+          if [ "$TARGET" = web ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm
+            # nsh-extra's web runtime calls JS through wasm-bindgen; nsh names the CLI version it needs.
+            cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          fi
 
       - name: Verify release metadata
         run: python3 scripts/test-prepare-client-release.py
