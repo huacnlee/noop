@@ -89,10 +89,12 @@
   },
   "dependencies": {
     "nsh-extra": {
-      "version": "^0.6.0",
+      "version": "^0.7.0",
       "features": [
         "speech"
       ]
-    }
+    },
+    "nsh-icon": "^0.2.1",
+    "nsh-icon-lucide": "^0.2.1"
   }
 }
