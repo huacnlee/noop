@@ -836,3 +836,18 @@ test("pickTask: a higher-priority online machine with room takes the task first;
     expect(pickTask(cfg)).toContain("T-9031"); // this machine ranks higher
   } finally { rmSync(P("fleet", "hosts", "prio-big.json"), { force: true }); rmSync(P("tasks", "inbox", "T-9031.md"), { force: true }); }
 });
+
+test("pasted long text attachments are inlined for the chat brain", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { withAttachments } = await import("../src/server");
+  const root = mkdtempSync(join(tmpdir(), "noop-paste-"));
+  const md = join(root, "pasted-3.md");
+  writeFileSync(md, "第一点：修复滚动\n第二点：改图标\n");
+  const text = withAttachments("", [md]);
+  expect(text.startsWith("(the owner pasted a long text, below)")).toBe(true);
+  expect(text).toContain("第二点：改图标");
+  expect(text).toContain(`- ${md}`);
+  rmSync(root, { recursive: true, force: true });
+});

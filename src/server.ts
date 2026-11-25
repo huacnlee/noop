@@ -416,8 +416,16 @@ export function withAttachments(text: string, files: string[], missing = 0): str
   if (!files.length && !missing) return text;
   const lines = files.map((f) => `- ${f}`);
   if (missing) lines.push(`- (${missing} more image(s) could not be downloaded)`);
-  return `${text.trim() || "(see the attached images)"}\n\nAttached images from the owner (absolute paths on the primary host; open them to see; a .md is a long text the owner pasted):\n${lines.join("\n")}`;
+  // pasted long text (.md/.txt) goes inline: the chat brain may have no file access on this host, and the text is the message
+  const pasted = files.filter((f) => /\.(md|txt)$/i.test(f)).map((f) => {
+    let body = "";
+    try { body = readFileSync(f, "utf8"); } catch { return ""; }
+    if (body.length > PASTED_MAX) body = `${body.slice(0, PASTED_MAX)}\n…(truncated, full text in ${f})`;
+    return `\n\n--- pasted text (${basename(f)}) ---\n${body.trim()}\n--- end of pasted text ---`;
+  }).join("");
+  return `${text.trim() || (pasted ? "(the owner pasted a long text, below)" : "(see the attached images)")}${pasted}\n\nAttached images from the owner (absolute paths on the primary host; open them to see; a .md is a long text the owner pasted, already included above):\n${lines.join("\n")}`;
 }
+const PASTED_MAX = 60_000;
 
 export async function handleOwnerMessage(
   text: string, reply_to?: string, noAmend = false,
