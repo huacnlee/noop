@@ -38,11 +38,7 @@
       "setSession",
       "setBadge",
       "clearNotifications",
-      "vibrate",
-      "speechState",
-      "speechStart",
-      "speechStop",
-      "speechAbort"
+      "vibrate"
     ],
     "picker": true,
     "speech": true,

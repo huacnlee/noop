@@ -1790,6 +1790,18 @@ describe("voice input", () => {
     expect(app.shows("label:Stop voice input")).toBe(false);
   });
 
+  test("in a browser, a refused microphone points to the browser settings", async () => {
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, network: hub([]), width: 1200, height: 800, platform: "web" });
+    await app.waitFor("label:Voice input");
+    await app.press("label:Voice input");
+    await app.waitFor("label:Stop voice input");
+    await app.fake("nsh-extra/speech", "end", ["not-allowed"]);
+    await app.waitFor("id:attach-note");
+    expect(app.shows("text:/Allow the microphone in your browser settings/")).toBe(true);
+    expect(app.shows("text:/System Settings/")).toBe(false);
+    expect(app.shows("label:Stop voice input")).toBe(false);
+  });
+
   test("on a phone, listening shows a red stop button where the mic was; stopping keeps the words", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 390, height: 844, platform: "ios" });

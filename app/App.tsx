@@ -5021,9 +5021,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     }
     composer?.focus();
   }
-  // Dictation (语音输入): nsh's Speech in the native apps, the browser's speech recognition (through
-  // host.js) on the web. Its words land in the composer where the caret was (or at the end), live as
-  // they are heard; nothing is sent. Where there is neither, there is no button.
+  // Dictation (语音输入): nsh-extra's Speech, which uses the system recognizer in the native apps and
+  // the browser's speech recognition on the web. Its words land in the composer where the caret was
+  // (or at the end), live as they are heard; nothing is sent. Where it is unavailable, there is no button.
   const canDictate = signal(false);
   const speech = signal<"off" | "on" | "stopping">("off");
   /** The light circles the composer as long as something is under way: dictation, or a sent message not yet delivered. */
@@ -5051,14 +5051,10 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       sweepTimer = setTimeout(() => sweeps.set([]), (until - now) * 1000);
     });
   });
-  let native = false;
   let session: SpeechSession | null = null;
   void Speech.available()
     .catch(() => false)
-    .then(async (ok) => {
-      native = ok;
-      canDictate.set(ok || !!(await hostCall<{ supported: boolean }>("speechState"))?.supported);
-    });
+    .then((ok) => canDictate.set(ok));
   let caret: { start: number; end: number } | null = null;
   let before = "";
   let after = "";
@@ -5069,7 +5065,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     return /^zh\b/i.test(l) ? l : "zh-CN";
   };
   const speechError = (e: string) =>
-    e === "not-allowed" || e === "service-not-allowed" ? (native ? L("No microphone or speech recognition permission. Allow it in System Settings.", "没有麦克风或语音识别权限，请在系统设置里允许") : L("No microphone permission. Allow the microphone in your browser settings.", "没有麦克风权限，请在浏览器设置里允许使用麦克风"))
+    e === "not-allowed" || e === "service-not-allowed" ? (platform.os === "web" ? L("No microphone permission. Allow the microphone in your browser settings.", "没有麦克风权限，请在浏览器设置里允许使用麦克风") : L("No microphone or speech recognition permission. Allow it in System Settings.", "没有麦克风或语音识别权限，请在系统设置里允许"))
       : e === "no-speech" ? L("Didn’t hear anything", "没有听到声音")
       : e === "audio-capture" ? L("No microphone found", "找不到麦克风")
       : e === "network" ? L("Speech recognition needs a network connection", "语音识别需要联网")
@@ -5092,7 +5088,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     speech.set("off");
     if (error) attachNote.set(speechError(error));
   };
-  async function startDictation() {
+  function startDictation() {
     const v = draft();
     const start = Math.min(caret?.start ?? v.length, v.length);
     const end = Math.min(Math.max(caret?.end ?? v.length, start), v.length);
@@ -5101,24 +5097,17 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     dictated = v;
     attachNote.set(null);
     speech.set("on");
-    if (native) {
-      try {
-        const s = Speech.start({ lang: speechLang() });
-        session = s;
-        s.on("result", (r) => session === s && heard(r.text));
-        s.on("end", (e) => {
-          if (session !== s) return;
-          session = null;
-          ended(e.error);
-        });
-      } catch {
+    try {
+      const s = Speech.start({ lang: speechLang() });
+      session = s;
+      s.on("result", (r) => session === s && heard(r.text));
+      s.on("end", (e) => {
+        if (session !== s) return;
         session = null;
-        speech.set("off");
-        attachNote.set(L("Couldn’t start voice input", "无法开始语音输入"));
-      }
-      return;
-    }
-    if (!(await hostCall("speechStart", { lang: speechLang() })) && untracked(speech) === "on") {
+        ended(e.error);
+      });
+    } catch {
+      session = null;
       speech.set("off");
       attachNote.set(L("Couldn’t start voice input", "无法开始语音输入"));
     }
@@ -5128,19 +5117,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (drop) {
       speech.set("off");
       if (session) { const s = session; session = null; s.abort(); }
-      else void hostCall("speechAbort");
     } else {
       speech.set("stopping");
-      if (session) session.stop();
-      else void hostCall("speechStop");
+      session?.stop();
     }
   }
   /** The mic / stop button: start, stop (keeping the words), and if the recognizer hangs while finishing, a second press ends it. */
-  const toggleDictation = () => (speech() === "off" ? void startDictation() : stopDictation(speech() === "stopping"));
-  if (host.available()) {
-    host.on("speech", (p) => heard(String((p as { text?: string })?.text ?? "")));
-    host.on("speechEnd", (p) => ended((p as { error?: string })?.error));
-  }
+  const toggleDictation = () => (speech() === "off" ? startDictation() : stopDictation(speech() === "stopping"));
   cleanup(() => {
     if (untracked(speech) !== "off") stopDictation(true);
   });
