@@ -193,6 +193,8 @@ jobs:
           [ "$GITHUB_REF_TYPE" != tag ] || args+=(--app-version "${GITHUB_REF_NAME#v}")
           out="$RUNNER_TEMP/out-x86_64"
           mkdir -p assets-intel
+          # The arm64 package above built nsh-extra's runner for arm64 here; the Intel nsh builds its own.
+          rm -rf "$HOME/.nsh/target"
           # Name the processor: without --arch the CLI packages for the machine it runs on (arm64), even under Rosetta.
           nsh package --target macos --arch x86_64 -o "$out" "${args[@]}"
           ditto -c -k --keepParent "$out/Noop.app" assets-intel/noop-macos-x86_64.zip
