@@ -11,3 +11,14 @@ jobs:
       - run: bunx tsc --noEmit
       - run: bun test
       - run: git config --global user.name ci && git config --global user.email ci@ci && ./test/e2e.sh
+  # The client's `nsh test` on the current NSH nightly (the same commit `release.yml` packages with), so
+  # an nsh change that breaks the app shows up here instead of at release time.
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nsh
+        with:
+          ref: nightly
+          target: linux
+      - run: nsh test

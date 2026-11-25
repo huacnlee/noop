@@ -1,7 +1,9 @@
 name: Set up nsh
 description: >
   Puts on PATH an nsh CLI with the runtime for one target, built from a pinned commit and cached.
-  It is the layout of an nsh release (bin/ and runtime/), so packaging needs no Rust once cached.
+  It is the layout of an nsh release (bin/ and runtime/). The app links a Rust nshm (nsh-extra, for Speech), so
+  every nsh command on it builds Rust: the toolchain and the target's system packages are set up on every run,
+  and nsh-extra comes from the same nsh commit as the CLI.
 inputs:
   ref:
     description: The longbridge/nsh commit to build, or `nightly` for the commit of the current NSH nightly release
@@ -9,10 +11,6 @@ inputs:
   target:
     description: linux, windows, macos, ios, android or web
     required: true
-  rust-target:
-    description: Rust target triple for cross-compiling the macOS CLI and runtime (optional)
-    required: false
-    default: ''
 runs:
   using: composite
   steps:
@@ -47,12 +45,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.nsh-dist
-        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}${{ steps.apple-sdk.outputs.key }}${{ inputs.target == 'macos' && format('-{0}', inputs.rust-target || 'native') || '' }}${{ inputs.target == 'linux' && '-features-v2' || '' }}
-
-    # The x86_64 CLI also generates x86_64 OTA archive names. It needs Rosetta even on cache hits.
-    - if: runner.os == 'macOS' && runner.arch == 'ARM64' && inputs.rust-target == 'x86_64-apple-darwin'
-      shell: bash
-      run: sudo softwareupdate --install-rosetta --agree-to-license
+        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}${{ steps.apple-sdk.outputs.key }}${{ inputs.target == 'linux' && '-features-v2' || '' }}
 
     # `nsh package` needs a JDK and the SDK's platform for Android, cached or not.
     - if: inputs.target == 'android'
@@ -79,19 +72,17 @@ runs:
         GH_TOKEN: ${{ github.token }}
         REF: ${{ steps.ref.outputs.sha }}
         TARGET: ${{ inputs.target }}
-        RUST_TARGET: ${{ inputs.rust-target }}
       run: |
         commit="$(gh release view nightly -R longbridge/nsh --json targetCommitish -q .targetCommitish || true)"
         if [ "$commit" != "$REF" ]; then
           echo "NSH nightly is $commit, not $REF: building from source"
           exit 0
         fi
-        case "$RUNNER_OS-$RUNNER_ARCH-$RUST_TARGET" in
-          Linux-X64-) asset=nsh-linux-x86_64.tar.gz ;;
-          macOS-ARM64-) asset=nsh-macos-arm64.tar.gz ;;
-          macOS-ARM64-x86_64-apple-darwin) asset=nsh-macos-x86_64.tar.gz ;;
-          Windows-X64-) asset=nsh-windows-x86_64.zip ;;
-          *) echo "No NSH nightly for $RUNNER_OS-$RUNNER_ARCH $RUST_TARGET: building from source"; exit 0 ;;
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) asset=nsh-linux-x86_64.tar.gz ;;
+          macOS-ARM64) asset=nsh-macos-arm64.tar.gz ;;
+          Windows-X64) asset=nsh-windows-x86_64.zip ;;
+          *) echo "No NSH nightly for $RUNNER_OS-$RUNNER_ARCH: building from source"; exit 0 ;;
         esac
         assets=("$asset")
         [ "$TARGET" != ios ] || assets+=(nsh-ios-macos-arm64.tar.gz)
@@ -120,22 +111,58 @@ runs:
         repository: longbridge/nsh
         ref: ${{ steps.ref.outputs.sha }}
         path: .nsh-src
-        # Keep the native build's host tools when cross-compiling Intel on the same Mac runner.
-        clean: ${{ inputs.target != 'macos' || inputs.rust-target == '' }}
-    - if: steps.cache.outputs.cache-hit != 'true' && (steps.nightly.outputs.used != 'true' || inputs.target == 'linux')
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ inputs.rust-target }}
-
-    # Cached distributions need runtime libraries, not a C/Rust build toolchain.
-    - if: runner.os == 'Linux' && ((steps.cache.outputs.cache-hit != 'true' && steps.nightly.outputs.used != 'true') || inputs.target == 'linux')
+    # The app's hosts are built here (nsh-extra is Rust), cached CLI or not: the Rust targets nsh package builds for.
+    - id: rust
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
-        PREBUILT: ${{ steps.nightly.outputs.used }}
+      run: |
+        case "$TARGET" in
+          ios) targets=aarch64-apple-ios ;;
+          android) targets=aarch64-linux-android,armv7-linux-androideabi ;;
+          web) targets=wasm32-unknown-unknown ;;
+          # The Intel package's runner is built from source next to the native one.
+          macos) targets=x86_64-apple-darwin ;;
+          *) targets="" ;;
+        esac
+        echo "targets=$targets" >> "$GITHUB_OUTPUT"
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ steps.rust.outputs.targets }}
+    # On the web nsh-extra calls the browser through wasm-bindgen, whose CLI must be the version nsh links.
+    - id: wasm-bindgen
+      if: inputs.target == 'web'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REF: ${{ steps.ref.outputs.sha }}
+      run: |
+        version="$(gh api "repos/longbridge/nsh/contents/Cargo.toml?ref=$REF" -H 'Accept: application/vnd.github.raw' \
+          | sed -n 's/^wasm-bindgen = .*"=\([0-9.]*\)".*/\1/p' | head -1)"
+        [ -n "$version" ] || { echo "::error::no wasm-bindgen pin in longbridge/nsh's Cargo.toml at $REF"; exit 1; }
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - if: inputs.target == 'web'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-bindgen-cli@${{ steps.wasm-bindgen.outputs.version }}
+    # The app's Rust builds: Cargo's downloads, the installed nshm and the generated hosts' workspaces.
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/.nsh/nshms
+          ~/.nsh/builds
+          ~/.nsh/target
+        key: nsh-app-rust-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}-${{ hashFiles('nsh.lock') }}
+        restore-keys: |
+          nsh-app-rust-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-
+    - if: runner.os == 'Linux'
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
       run: bash "$GITHUB_WORKSPACE/scripts/setup-linux-deps.sh"
-    - if: steps.cache.outputs.cache-hit != 'true' && (steps.nightly.outputs.used != 'true' || inputs.target == 'linux') && runner.os == 'Windows'
+    - if: runner.os == 'Windows'
       shell: bash
       run: |
         # QuickJS is C: bindgen needs libclang, which the image's LLVM has.
@@ -148,22 +175,15 @@ runs:
       working-directory: .nsh-src
       env:
         TARGET: ${{ inputs.target }}
-        RUST_TARGET: ${{ inputs.rust-target }}
         NIGHTLY: ${{ steps.nightly.outputs.used }}
       run: |
         out="$HOME/.nsh-dist"
         exe=""; [ "$RUNNER_OS" != Windows ] || exe=.exe
-        target_args=()
-        release_dir=target/release
-        if [ -n "$RUST_TARGET" ]; then
-          [ "$TARGET" = macos ] || { echo "::error::rust-target is supported only for macos"; exit 1; }
-          target_args=(--target "$RUST_TARGET")
-          release_dir="target/$RUST_TARGET/release"
-        fi
         if [ "$NIGHTLY" != true ]; then
-          cargo build --release --locked -p nsh-cli "${target_args[@]}"
+          # A main commit, as a nightly is: the CLI then builds the app's Rust (nsh-extra) at this commit too.
+          NSH_CHANNEL=nightly cargo build --release --locked -p nsh-cli
           install -d "$out/bin"
-          cp "$release_dir/nsh$exe" "$out/bin/"
+          cp "target/release/nsh$exe" "$out/bin/"
         fi
         case "$TARGET" in
           linux)
@@ -177,8 +197,8 @@ runs:
             cargo build --release --locked -p nsh-windows-app
             install -d "$out/runtime/windows"; cp target/release/nsh-windows-app.exe "$out/runtime/windows/" ;;
           macos)
-            cargo build --release --locked -p nsh-macos-app "${target_args[@]}"
-            install -d "$out/runtime/macos"; cp "$release_dir/nsh-macos-app" "$out/runtime/macos/" ;;
+            cargo build --release --locked -p nsh-macos-app
+            install -d "$out/runtime/macos"; cp target/release/nsh-macos-app "$out/runtime/macos/" ;;
           ios)
             rustup target add aarch64-apple-ios
             SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)" cargo build --release --locked -p nsh-ios-app --target aarch64-apple-ios
@@ -207,7 +227,7 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: ~/.nsh-dist
-        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}-${{ inputs.rust-target || 'native' }}
+        key: nsh-dist-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.ref.outputs.sha }}${{ steps.apple-sdk.outputs.key }}
 
     - if: inputs.target == 'ios'
       shell: bash

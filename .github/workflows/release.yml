@@ -159,16 +159,9 @@ jobs:
           esac
           rm assets/sha256sums
 
-      # Reuse this ARM runner for Intel after packaging and testing the native app.
-      # The installer currently supports only Apple silicon; Intel users download the archive.
-      - name: Set up Intel nsh
-        if: matrix.target == 'macos'
-        uses: ./.github/actions/setup-nsh
-        with:
-          ref: ${{ env.NSH_REF }}
-          target: macos
-          rust-target: x86_64-apple-darwin
-
+      # Reuse this ARM runner and its nsh for Intel after packaging and testing the native app: the app's Rust
+      # (nsh-extra) builds the Intel runner from source. The installer currently supports only Apple silicon; Intel
+      # users download the archive.
       - name: Package and verify Intel macOS
         if: matrix.target == 'macos'
         run: |
@@ -176,7 +169,7 @@ jobs:
           [ "$GITHUB_REF_TYPE" != tag ] || args+=(--app-version "${GITHUB_REF_NAME#v}")
           out="$RUNNER_TEMP/out-x86_64"
           mkdir -p assets-intel
-          # Name the processor: without --arch the CLI packages for the machine it runs on (arm64), even under Rosetta.
+          # Name the processor: without --arch the CLI packages for the machine it runs on (arm64).
           nsh package --target macos --arch x86_64 -o "$out" "${args[@]}"
           ditto -c -k --keepParent "$out/Noop.app" assets-intel/noop-macos-x86_64.zip
           mv "$out"/Noop-*-macos-x86_64.tar.gz assets-intel/
