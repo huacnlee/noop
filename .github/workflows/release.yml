@@ -33,9 +33,7 @@ env:
   # `nightly` builds against the commit of the current NSH nightly release and reuses its prebuilt CLI and runtimes,
   # so a release does not compile NSH. Pin a commit only when Noop needs NSH changes the nightly does not have yet.
   # Every job resolves it the same way, so all client runtimes and the OTA package share one commit.
-  # Pinned to longbridge/nsh#2942 (nsh.json names the app's entry, so nsh runs from the repository root), which the
-  # nightly does not have yet. The next commits move `Speech` into nsh-extra (#2947), so go back to `nightly` with that.
-  NSH_REF: 02728012880c2ec69c52c55bd569a18956b0300f
+  NSH_REF: nightly
 
 defaults:
   run:
@@ -50,6 +48,8 @@ jobs:
         include:
           - { target: linux, os: ubuntu-24.04, asset: noop-linux-x86_64.tar.gz, installer: install-client.sh }
           - { target: windows, os: windows-latest, asset: noop-windows-x86_64.zip, installer: install-client.ps1 }
+          # The Microsoft Store build (Store channel): an unsigned MSIX, signed by the Store; uploaded with `nsh publish windows`.
+          - { target: windows, os: windows-latest, asset: noop-windows-store-x86_64.msix, channel: store }
           - { target: macos, os: macos-15, asset: noop-macos-arm64.zip, installer: install-client.sh }
           - { target: ios, os: xcode-27, asset: noop-ios-unsigned.ipa }
           - { target: ios, os: xcode-27, asset: noop-ios-store-unsigned.ipa, channel: store }
@@ -101,10 +101,13 @@ jobs:
             ls -l assets
             exit 0
           fi
+          [ "$TARGET.$CHANNEL" != windows.store ] || args+=(--format msix)
           nsh package --target "$TARGET" -o "$out" "${args[@]}"
           case "$TARGET" in
             linux) mv "$out/Noop.tar.gz" "assets/$ASSET"; mv "$out"/Noop-*.tar.gz assets/ ;;
-            windows) mv "$out/Noop.zip" "assets/$ASSET"; mv "$out"/Noop-*.zip assets/ ;;
+            windows)
+              if [ "$CHANNEL" = store ]; then mv "$out/Noop.msix" "assets/$ASSET"
+              else mv "$out/Noop.zip" "assets/$ASSET"; mv "$out"/Noop-*.zip assets/; fi ;;
             macos) ditto -c -k --keepParent "$out/Noop.app" "assets/$ASSET"; mv "$out"/Noop-*.tar.gz assets/ ;;
             ios)
               executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$out/Noop.app/Info.plist")

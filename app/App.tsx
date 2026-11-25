@@ -38,9 +38,11 @@ import {
   untracked,
   Video,
   View,
-  windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Speech, Clipboard, Notifications } from "nsh";
+  windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Clipboard, Notifications } from "nsh";
+import { Speech } from "nsh-extra";
 import fs from "fs/promises";
-import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
+import type { InputRef, InputStyle, JSX, ScrollRef, ViewStyle } from "nsh";
+import type { SpeechSession } from "nsh-extra";
 import { AlertDialog, Popover, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
 // MenuButton and SegmentedControl through the namespaces: runtimes before NSH's native iOS controls (longbridge/nsh#1736)
 // lack these exports, and a missing named import would fail to link. Without them iOS keeps the drawn menu and choices.
@@ -6138,7 +6140,7 @@ function FieldHint(props: { text: string }) {
  * The look every text field of a form shares (`Field`, a multi-line field): the field fill and hairline, a firmer edge
  * under the pointer, and on focus Noop's ring (`focusRing`) rather than a solid accent outline.
  */
-const fieldLook = (): ViewStyle => ({
+const fieldLook = (): InputStyle => ({
   paddingHorizontal: 12,
   borderRadius: corner.field,
   borderCurve: "continuous",

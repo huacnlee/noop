@@ -77,6 +77,22 @@
         "https://raw.githubusercontent.com/huacnlee/noop/main/website/public/screenshot.png"
       ],
       "archiveUrl": "https://github.com/huacnlee/noop/releases/download/v{version}/noop-{version}-linux-x86_64.tar.gz"
+    },
+    "windows": {
+      "productId": "9P8G3V5WV3T9"
+    }
+  },
+  "windows": {
+    "identityName": "huacnlee.NoopAgent",
+    "publisher": "CN=43482E1E-9E96-4A95-82A1-D43F087CD981",
+    "publisherDisplayName": "huacnlee"
+  },
+  "dependencies": {
+    "nsh-extra": {
+      "version": "^0.6.0",
+      "features": [
+        "speech"
+      ]
     }
   }
 }
