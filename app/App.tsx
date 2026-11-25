@@ -63,7 +63,6 @@ const SegmentedControl = (nshMobile as { SegmentedControl?: (props: SegmentedCon
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
 import { badgeCount } from "./badge";
-import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc, isImage } from "./files";
 import { parseHubMarkdown } from "./markdown";
 import { messageTags, taskTagId } from "./message-tags";
@@ -1050,7 +1049,7 @@ function SentCheck() {
       accessibilityLabel={L("Sent", "已发送")}
       style={{ width: 14, height: 16, alignItems: "center", justifyContent: "center", opacity: fade }}
     >
-      <CheckMark size={14} weight={2.2} tint={colors.muted} />
+      <Icon name="check" size={14} weight={2.2} tint={colors.muted} />
     </View>
   );
 }
