@@ -77,6 +77,8 @@ jobs:
             *) targets="" ;;
           esac
           [ -z "$targets" ] || rustup target add $targets
+          # Its C dependencies (zstd) compile for wasm with clang and llvm-ar.
+          [ "$TARGET" != web ] || { sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm; }
 
       - name: Verify release metadata
         run: python3 scripts/test-prepare-client-release.py
