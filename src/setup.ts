@@ -1,9 +1,10 @@
 // hub init / install / update — out-of-the-box setup and self-update.
 import { $ } from "bun";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { CODE, DATA, HOME_DIR, P, isCloudDeployHost } from "./core";
+import { machineName } from "./machine";
 
 const STATE_DIRS = [
   "tasks/proposed", "tasks/rejected", "tasks/waiting", "tasks/inbox", "tasks/active", "tasks/blocked", "tasks/failed", "tasks/done",
@@ -51,7 +52,7 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
   const { commitPush, pull, loadConfig, hostName } = await import("./core");
   const { readHubToml, syncMode, writeHubToml } = await import("./sync");
   mkdirSync(DATA, { recursive: true });
-  const me = hostname().split(".")[0];
+  const me = machineName();
   const joined = readHubToml().cloud?.url;
   const primaryHere = existsSync(P("config.toml")) && new RegExp(`^\\s*primary\\s*=\\s*"${me}"`, "m").test(readFileSync(P("config.toml"), "utf8"));
   if (!opts.primary && !primaryHere) {

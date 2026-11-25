@@ -2,7 +2,8 @@ import "./test-isolation";
 // noop core — shared files as the world (stigmergy; synced via the owner's Worker, src/sync.ts), task queue, agent runner, journal, memory.
 import { OFFLINE_AFTER_MINUTES } from "../cloud/src/budget";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
-import { homedir, hostname, networkInterfaces } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
+import { machineName } from "./machine";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import * as sync from "./sync";
 import { recoverMemory, snapshotMemory } from "./integrity";
@@ -72,7 +73,7 @@ export function loadConfig(): Cfg {
 }
 
 export const hostName = (cfg: Cfg): string =>
-  process.env.HUB_HOST || cfg.host?.name || hostname().split(".")[0];
+  process.env.HUB_HOST || cfg.host?.name || machineName();
 
 export const now = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
 export const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD local

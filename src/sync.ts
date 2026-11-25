@@ -13,6 +13,7 @@ import "./test-isolation";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hostname } from "node:os";
+import { machineName } from "./machine";
 import { LAZY_PUSH_MS, PULL_MIN_MS, latestOnly } from "../cloud/src/budget";
 import { isDamaged, nulCount, writeFileDurable } from "./integrity";
 
@@ -60,7 +61,7 @@ function httpTransport(url: string, token: string): Transport {
     try {
       const r = await fetch(base + path, {
         method: init.method ?? "GET", body: init.body === undefined ? undefined : JSON.stringify(init.body),
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Noop-Host": process.env.HUB_HOST || require("node:os").hostname().split(".")[0] }, signal: AbortSignal.timeout(60_000),
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Noop-Host": process.env.HUB_HOST || machineName() }, signal: AbortSignal.timeout(60_000),
       });
       return { status: r.status, json: await r.json().catch(() => ({})) };
     } catch { return null; }
