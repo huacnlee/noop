@@ -159,11 +159,16 @@ export function trackedPrs(m: Meta, body = ""): string[] {
   return [...out];
 }
 
-/** A merge is a wake-up event, not proof that all acceptance criteria are met. */
+/** A merge is a wake-up event, not proof that all acceptance criteria are met. "STATE closedAt", e.g. "MERGED 2026-01-02T03:04:05Z" or "OPEN". */
 function prState(ref: string): string {
   const [repo, n] = ref.split("#");
-  try { return Bun.spawnSync(["gh", "pr", "view", n, "-R", repo, "--json", "state", "-q", ".state"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; }
+  try { return Bun.spawnSync(["gh", "pr", "view", n, "-R", repo, "--json", "state,closedAt", "-q", '.state + " " + (.closedAt // "")'], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; }
 }
+
+/** Every tracked PR was already merged or closed when the task was created: the links are background (a follow-up
+    citing what its parent shipped), not PRs the task waits to land, so they never wake or close it. Pure: unit-tested. */
+export const settledBeforeTask = (m: Meta, closedAt: (string | undefined)[]) =>
+  closedAt.every((at) => !!at && Date.parse(at) < Date.parse(m.created ?? ""));
 
 /** Head-commit workflow runs that will never start on their own: GitHub holds them until a maintainer clicks
     "Approve and run" (fork/first-time contributors, protected environments). One graphql call per PR. */
@@ -204,8 +209,9 @@ export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = 
     // owner has decided. Close it quietly instead of waking it or pinging the owner again (T-10394: T-10076 kept a
     // "stuck" notice alive for #2346 a day after the owner merged it).
     if (task.folder === "blocked" && ctx.decision(task.meta.decision ?? "") !== "open") {
-      const states = prs.map((r) => readPrState(r));
-      if (!states.every((x) => x === "MERGED" || x === "CLOSED")) continue;
+      const read = prs.map((r) => readPrState(r).split(" "));
+      const states = read.map(([s]) => s);
+      if (!states.every((x) => x === "MERGED" || x === "CLOSED") || settledBeforeTask(task.meta, read.map(([, at]) => at))) continue;
       writeDoc(P("tasks", "done", `${task.meta.id}.md`), { ...task.meta, status: "done", finished: new Date(t).toISOString(), wake_at: undefined, claimed_by: undefined },
         `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} ${states.join("/").toLowerCase()} while this task was blocked; closed without further work or notices.\n`);
       unlinkSync(task.path);
@@ -226,7 +232,9 @@ export function supervise(cfg: Cfg, host: string, t = Date.now(), readPrState = 
       journal(host, L(`🧭 supervisor: ${task.meta.id} closed after waiting again on merged ${prs.join(", ")}`, `🧭 supervisor: ${task.meta.id} 的 ${prs.join("、")} 已合并却再次等待，已收尾关闭${task.meta.waiting_on ? `；验证缺口：${task.meta.waiting_on}` : ""}`)); merged++;
       continue;
     }
-    if (task.meta.supervisor_merged_prs === signature || !prs.every((r) => readPrState(r) === "MERGED")) continue;
+    if (task.meta.supervisor_merged_prs === signature) continue;
+    const read = prs.map((r) => readPrState(r).split(" "));
+    if (!read.every(([s]) => s === "MERGED") || settledBeforeTask(task.meta, read.map(([, at]) => at))) continue;
     writeDoc(P("tasks", "inbox", `${task.meta.id}.md`), { ...task.meta, status: undefined, finished: undefined, resumed: "yes", supervisor_merged_prs: signature, wake_at: undefined, wait_kind: undefined, claimed_by: undefined },
       `${task.body ?? ""}\n\n> Supervisor (${now()}): ${prs.join(", ")} merged while this task waited. Check remaining acceptance criteria and follow-ups; return done if the goal is met, otherwise continue the unfinished work. Do not wait for these PRs to merge again. After a merge only acceptance prerequisites remain: record any extra verification you cannot finish now (screenshots, device checks) as a verification gap in the summary and return done; returning waiting again closes this task automatically.\n`);
     unlinkSync(task.path);

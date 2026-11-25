@@ -263,6 +263,36 @@ test("merged PRs wake a task once for acceptance checks; waiting again afterward
   }
 });
 
+import { settledBeforeTask } from "../src/supervisor";
+test("PRs merged before the task was created are background: they never wake or close it", () => {
+  const created = new Date(NOW).toISOString();
+  const before = new Date(NOW - H).toISOString(), after = new Date(NOW + H).toISOString();
+  expect(settledBeforeTask({ created }, [before])).toBe(true);
+  expect(settledBeforeTask({ created }, [before, after])).toBe(false);
+  expect(settledBeforeTask({ created }, [before, undefined])).toBe(false); // the other PR is still open
+  expect(settledBeforeTask({}, [before])).toBe(false); // no creation time: keep the old behaviour
+  const id = "T-9407-test";
+  const waiting = P("tasks", "waiting", `${id}.md`);
+  const blocked = P("tasks", "blocked", `${id}-b.md`);
+  const inbox = P("tasks", "inbox", `${id}.md`);
+  const done = [P("tasks", "done", `${id}.md`), P("tasks", "done", `${id}-b.md`)];
+  const gate = "[ $(date -u +%s) -lt 1794000000 ]"; // waits for tonight's game, not for a PR
+  const body = "Shipped in https://github.com/acme/core-api/pull/7; verify it during tonight's game.";
+  try {
+    writeDoc(waiting, { id, title: "Verify core-api #7 live", waiting_on: "tonight's game", wait_kind: "human", wait_check: gate, created }, body);
+    writeDoc(blocked, { id: `${id}-b`, title: "Verify core-api #7 live", status: "blocked", waiting_on: "tonight's game", wait_kind: "human", created }, body);
+    for (let i = 0; i < 2; i++) supervise({}, "test", NOW, () => `MERGED ${before}`, () => false);
+    expect([existsSync(waiting), existsSync(blocked), existsSync(inbox), ...done.map(existsSync)]).toEqual([true, true, false, false, false]);
+    // a PR the task does wait on still wakes it once it merges
+    writeDoc(waiting, { id, title: "Verify core-api #7 live", waiting_on: "core-api #8", wait_kind: "human", wait_check: gate, created }, `${body}\nFix: https://github.com/acme/core-api/pull/8`);
+    supervise({}, "test", NOW, (r) => r.endsWith("#7") ? `MERGED ${before}` : `MERGED ${after}`, () => false);
+    expect(existsSync(waiting)).toBe(false);
+    expect(readDoc(inbox).meta.supervisor_merged_prs).toBe("acme/core-api#7,acme/core-api#8");
+  } finally {
+    for (const path of [waiting, blocked, inbox, ...done]) rmSync(path, { force: true });
+  }
+});
+
 import { approvalPending } from "../src/supervisor";
 test("CI held for approval turns a machine wait into a visible owner wait", () => {
   expect(approvalPending([{ status: "WAITING" }, { status: "QUEUED" }])).toBe(true);
