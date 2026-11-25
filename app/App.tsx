@@ -39,9 +39,10 @@ import {
   Video,
   View,
   windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Clipboard, Notifications } from "nsh";
-import { Speech, type SpeechSession } from "nsh-extra";
+import { Speech } from "nsh-extra";
 import fs from "fs/promises";
-import type { InputRef, JSX, ScrollRef, ViewStyle } from "nsh";
+import type { InputRef, InputStyle, JSX, ScrollRef, ViewStyle } from "nsh";
+import type { SpeechSession } from "nsh-extra";
 import { AlertDialog, Popover, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, Sheet, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
 // MenuButton and SegmentedControl through the namespaces: runtimes before NSH's native iOS controls (longbridge/nsh#1736)
 // lack these exports, and a missing named import would fail to link. Without them iOS keeps the drawn menu and choices.
@@ -62,7 +63,6 @@ const SegmentedControl = (nshMobile as { SegmentedControl?: (props: SegmentedCon
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf } from "./avatars";
 import { badgeCount } from "./badge";
-import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc, isImage } from "./files";
 import { parseHubMarkdown } from "./markdown";
 import { messageTags, taskTagId } from "./message-tags";
@@ -1049,7 +1049,7 @@ function SentCheck() {
       accessibilityLabel={L("Sent", "已发送")}
       style={{ width: 14, height: 16, alignItems: "center", justifyContent: "center", opacity: fade }}
     >
-      <CheckMark size={14} weight={2.2} tint={colors.muted} />
+      <Icon name="check" size={14} weight={2.2} tint={colors.muted} />
     </View>
   );
 }
@@ -5021,12 +5021,11 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     }
     composer?.focus();
   }
-  // Dictation (语音输入): nsh-extra's Speech, the system's recognizer in the native apps and the browser's
-  // Web Speech API on the web. Its words land in the composer where the caret was (or at the end), live as
-  // they are heard; nothing is sent. Where nothing recognizes speech, there is no button.
+  // Dictation (语音输入): nsh's Speech in the native apps, the browser's speech recognition (through
+  // host.js) on the web. Its words land in the composer where the caret was (or at the end), live as
+  // they are heard; nothing is sent. Where there is neither, there is no button.
   const canDictate = signal(false);
   const speech = signal<"off" | "on" | "stopping">("off");
-  const web = platform.os === "web";
   /** The light circles the composer as long as something is under way: dictation, or a sent message not yet delivered. */
   const busy = computed(() => {
     if (speech() === "on") return true;
@@ -5052,10 +5051,14 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       sweepTimer = setTimeout(() => sweeps.set([]), (until - now) * 1000);
     });
   });
+  let native = false;
   let session: SpeechSession | null = null;
   void Speech.available()
     .catch(() => false)
-    .then((ok) => canDictate.set(ok));
+    .then(async (ok) => {
+      native = ok;
+      canDictate.set(ok || !!(await hostCall<{ supported: boolean }>("speechState"))?.supported);
+    });
   let caret: { start: number; end: number } | null = null;
   let before = "";
   let after = "";
@@ -5066,7 +5069,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     return /^zh\b/i.test(l) ? l : "zh-CN";
   };
   const speechError = (e: string) =>
-    e === "not-allowed" ? (!web ? L("No microphone or speech recognition permission. Allow it in System Settings.", "没有麦克风或语音识别权限，请在系统设置里允许") : L("No microphone permission. Allow the microphone in your browser settings.", "没有麦克风权限，请在浏览器设置里允许使用麦克风"))
+    e === "not-allowed" || e === "service-not-allowed" ? (native ? L("No microphone or speech recognition permission. Allow it in System Settings.", "没有麦克风或语音识别权限，请在系统设置里允许") : L("No microphone permission. Allow the microphone in your browser settings.", "没有麦克风权限，请在浏览器设置里允许使用麦克风"))
       : e === "no-speech" ? L("Didn’t hear anything", "没有听到声音")
       : e === "audio-capture" ? L("No microphone found", "找不到麦克风")
       : e === "network" ? L("Speech recognition needs a network connection", "语音识别需要联网")
@@ -5089,7 +5092,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     speech.set("off");
     if (error) attachNote.set(speechError(error));
   };
-  function startDictation() {
+  async function startDictation() {
     const v = draft();
     const start = Math.min(caret?.start ?? v.length, v.length);
     const end = Math.min(Math.max(caret?.end ?? v.length, start), v.length);
@@ -5098,17 +5101,24 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     dictated = v;
     attachNote.set(null);
     speech.set("on");
-    try {
-      const s = Speech.start({ lang: speechLang() });
-      session = s;
-      s.on("result", (r) => session === s && heard(r.text));
-      s.on("end", (e) => {
-        if (session !== s) return;
+    if (native) {
+      try {
+        const s = Speech.start({ lang: speechLang() });
+        session = s;
+        s.on("result", (r) => session === s && heard(r.text));
+        s.on("end", (e) => {
+          if (session !== s) return;
+          session = null;
+          ended(e.error);
+        });
+      } catch {
         session = null;
-        ended(e.error);
-      });
-    } catch {
-      session = null;
+        speech.set("off");
+        attachNote.set(L("Couldn’t start voice input", "无法开始语音输入"));
+      }
+      return;
+    }
+    if (!(await hostCall("speechStart", { lang: speechLang() })) && untracked(speech) === "on") {
       speech.set("off");
       attachNote.set(L("Couldn’t start voice input", "无法开始语音输入"));
     }
@@ -5118,13 +5128,19 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (drop) {
       speech.set("off");
       if (session) { const s = session; session = null; s.abort(); }
+      else void hostCall("speechAbort");
     } else {
       speech.set("stopping");
-      session?.stop();
+      if (session) session.stop();
+      else void hostCall("speechStop");
     }
   }
   /** The mic / stop button: start, stop (keeping the words), and if the recognizer hangs while finishing, a second press ends it. */
-  const toggleDictation = () => (speech() === "off" ? startDictation() : stopDictation(speech() === "stopping"));
+  const toggleDictation = () => (speech() === "off" ? void startDictation() : stopDictation(speech() === "stopping"));
+  if (host.available()) {
+    host.on("speech", (p) => heard(String((p as { text?: string })?.text ?? "")));
+    host.on("speechEnd", (p) => ended((p as { error?: string })?.error));
+  }
   cleanup(() => {
     if (untracked(speech) !== "off") stopDictation(true);
   });
@@ -6123,7 +6139,7 @@ function FieldHint(props: { text: string }) {
  * The look every text field of a form shares (`Field`, a multi-line field): the field fill and hairline, a firmer edge
  * under the pointer, and on focus Noop's ring (`focusRing`) rather than a solid accent outline.
  */
-const fieldLook = (): ViewStyle => ({
+const fieldLook = (): InputStyle => ({
   paddingHorizontal: 12,
   borderRadius: corner.field,
   borderCurve: "continuous",

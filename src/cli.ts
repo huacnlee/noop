@@ -750,6 +750,20 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   // The cooldown above only covers a menu card that is still open. A run that found nothing worth asking raises no card,
   // so without this the next run fires every 15 minutes, each one a full model run that again answers "nothing new".
   if (sinceLast < cooldown && state.last_idle_task && !raisedDecision(state.last_idle_task)) return;
+  if (cfg.idle?.mode === "explore") {
+    // Owner 2026-11-25 (T-11170): an idle fleet finds its own work. The planner picks the next items from the team OKR
+    // (memory/okr.md) and dispatches them as followups instead of asking the owner to choose from a menu.
+    const agent = (cfg.idle?.agent as string | undefined) ?? "planner";
+    const id = newTask("Plan and dispatch self-driven work (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
+Follow your profile: read memory/okr.md, memory/focus.md and the open work of each channel, pick the 1-4 highest-value items
+that need no owner decision, and return them as followups (each with goal, acceptance criteria and evidence to bring back).
+Do not send a menu. If nothing qualifies, return done with one line saying why.`,
+      { agent, priority: "normal", source: "idle", extra: { kind: "explore" } });
+    state.last_menu = new Date().toISOString();
+    state.last_idle_task = id;
+    journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} ${agent} planning self-driven work`);
+    return;
+  }
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
 Build the owner's next-action menu per your profile. Return needs_decision only for candidates with new evidence or a prepared result that changes the owner's decision. If none qualify, return done with a brief no-change summary and no question, options, or followups; leave pending decisions unanswered.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — assess what changed before offering a refresh.` : ""}`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });

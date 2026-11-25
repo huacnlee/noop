@@ -3,11 +3,33 @@
   "packages": [
     {
       "name": "nsh-extra",
-      "version": "0.6.0",
-      "source": "git+https://github.com/longbridge/nsh?rev=2964346c285f57004f2531fb768cc9840b8d7ff5",
-      "commit": "2964346c285f57004f2531fb768cc9840b8d7ff5",
-      "dir": "github.com/longbridge/nsh/2964346c285f/crates/nsh-extra",
+      "version": "0.7.0",
+      "source": "git+https://github.com/longbridge/nsh?rev=7d701ea67e3d523094f681d453b73b5f7d87a5c8",
+      "commit": "7d701ea67e3d523094f681d453b73b5f7d87a5c8",
+      "dir": "github.com/longbridge/nsh/7d701ea67e3d/crates/nsh-extra",
       "module": "nsh-extra"
+    },
+    {
+      "name": "nsh-icon",
+      "version": "0.2.1",
+      "source": "crates.io",
+      "checksum": "sha256-23415dda67494164ae3d1a299ef9c527e68f8d48b19d5f72969b65b1b6fe8468",
+      "dir": "nsh-icon/0.2.1",
+      "module": "nsh-icon"
+    },
+    {
+      "name": "nsh-icon-lucide",
+      "version": "0.2.1",
+      "source": "crates.io",
+      "checksum": "sha256-aa2647c3cd43f805a5290ea165148044690fa0450bd956af96da9f26faecd8f5",
+      "dir": "nsh-icon-lucide/0.2.1",
+      "module": "nsh-icon-lucide/native",
+      "exports": {
+        "nsh-icon-lucide": "tsx/index.ts"
+      },
+      "dependencies": [
+        "nsh-icon"
+      ]
     }
   ]
 }

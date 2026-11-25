@@ -245,6 +245,7 @@ const ROLE_ZH: Record<string, { title: string; about: string }> = {
   apprentice: { title: "学徒", about: "从你自己的 AI 会话里学习你怎么做事、怎么判断、偏好什么" },
   architect: { title: "团队架构师", about: "持续调整这个团队的规则、提示词、记忆和角色，贴合你真实的工作" },
   "chief-of-staff": { title: "幕僚长", about: "团队空闲时给你列出可以直接开干的下一步选项" },
+  planner: { title: "规划", about: "按团队 OKR 主动找事、派探索任务，带着验证过的方案来找你" },
   dispatcher: { title: "分诊调度", about: "扫描所有进来的信号，拆成任务交给对应成员" },
   lead: { title: "负责人", about: "任务的默认负责人，决定一件事需要走多少流程" },
   "ops-watcher": { title: "线上值守", about: "盯线上告警和 CI 健康" },

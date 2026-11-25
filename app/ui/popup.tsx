@@ -1,7 +1,7 @@
 // The popup families' one surface and the motion they come in with.
 import type { JSX, MotionSpec, ViewStyle } from "nsh";
 import { createMotion, Easing, View } from "nsh";
-import { CheckMark } from "./icons";
+import { Icon } from "./icons";
 import { finish } from "./theme";
 
 /** The side of its trigger a popup is on. */
@@ -90,7 +90,7 @@ export function MenuMark(props: { kind?: "check" | "dot"; tint: string; size?: n
       {props.kind === "dot" ? (
         <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: props.tint }} />
       ) : (
-        <CheckMark size={size() - 2} weight={2.7} tint={props.tint} />
+        <Icon name="check" size={size() - 2} weight={2.7} tint={props.tint} />
       )}
     </View>
   );

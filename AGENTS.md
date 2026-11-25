@@ -107,7 +107,11 @@ key (`NSH_APP_STORE_*`, a team key: it needs the issuer ID, which that file hold
   `NSH_REF` includes it. CLIs without
   longbridge/nsh#3114 write `only-arches` for the machine running them, not the archive: on an Apple silicon Mac
   fix it to `x86_64` by hand.
-- Windows (Microsoft Store): `nsh publish windows <msix>` needs a Partner Center product (`store.windows.productId`),
-  `windows.identityName` and `windows.publisher` from its Product identity page, an `.msix` package, and an Azure AD
-  app (`NSH_MS_TENANT_ID`, `NSH_MS_CLIENT_ID`, `NSH_MS_CLIENT_SECRET`). None exist yet.
+- Windows (Microsoft Store): the app is `9P8G3V5WV3T9` (`store.windows.productId`), package identity
+  `huacnlee.NoopAgent` / `CN=43482E1E-9E96-4A95-82A1-D43F087CD981` / `huacnlee` (`nsh.json` `windows`, copied from
+  Partner Center's Product identity; the Store rejects any other). Release CI builds the Store channel's unsigned
+  `noop-windows-store-x86_64.msix` (the Store signs it). The first submission (pricing, age rating, listing,
+  package) is made in Partner Center by hand; later releases go through `nsh publish windows <msix>` with an Azure AD
+  app associated with Partner Center (`NSH_MS_TENANT_ID`, `NSH_MS_CLIENT_ID`, `NSH_MS_CLIENT_SECRET`, kept outside
+  the repository).
 - macOS: NSH has no Mac App Store upload; macOS ships as the signed, notarized direct download.

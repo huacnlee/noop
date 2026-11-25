@@ -1,255 +1,105 @@
-import { Canvas, Image, Path2D } from "nsh";
+import type { TextStyle } from "nsh";
+import { Icon as SetIcon } from "nsh-icon";
+import {
+  ArrowDown,
+  ArrowUp,
+  Bell,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Component,
+  Copy,
+  Download,
+  FileText,
+  Globe,
+  Image,
+  Images,
+  Layers,
+  Lock,
+  Maximize2,
+  Menu,
+  MessageCircle,
+  Mic,
+  Minimize2,
+  Minus,
+  Moon,
+  PanelLeft,
+  Pause,
+  Play,
+  Plus,
+  Reply,
+  Replace,
+  ScrollText,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  Square,
+  Sun,
+  Terminal,
+  Trash,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from "nsh-icon-lucide";
 
-/**
- * Icons from Lucide (https://lucide.dev, ISC License, Copyright (c) Lucide Icons and Contributors):
- * each is the SVG geometry of one icon in its 24 × 24 box, stroked with the tint. `github` is the
- * filled GitHub mark, since Lucide ships no brand icons.
- */
-type Glyph =
-  | "photos"
-  | "lists"
-  | "scroll"
-  | "nav"
-  | "form"
-  | "mobile"
-  | "components"
-  | "controls"
-  | "gestures"
-  | "physics"
-  | "animation"
-  | "image"
-  | "canvas"
-  | "tailwind"
-  | "styles"
-  | "text"
-  | "media"
-  | "system"
-  | "storage"
-  | "stocks"
-  | "chat"
-  | "chevron"
-  | "pipette"
-  | "chevron-up"
-  | "chevron-down"
-  | "back"
-  | "check"
-  | "smile"
-  | "plus"
-  | "minus"
-  | "arrow-up"
-  | "arrow-down"
-  | "reply"
-  | "play"
-  | "pause"
-  | "stop"
-  | "search"
-  | "star"
-  | "bell"
-  | "spark"
-  | "sidebar"
-  | "sun"
-  | "globe"
-  | "moon"
-  | "volume-low"
-  | "volume-high"
-  | "code"
-  | "sliders"
-  | "settings"
-  | "stepper"
-  | "otp"
-  | "panel-bottom"
-  | "replace"
-  | "replace-all"
-  | "diagnostics"
-  | "close"
-  | "copy"
-  | "trash"
-  | "share"
-  | "download"
-  | "link"
-  | "eye"
-  | "eye-off"
-  | "mail"
-  | "mic"
-  | "lock"
-  | "merge"
-  | "checkbox"
-  | "radio"
-  | "switch"
-  | "tabs"
-  | "select"
-  | "collapsible"
-  | "progress"
-  | "chart"
-  | "layers"
-  | "document"
-  | "richtext"
-  | "diff"
-  | "table"
-  | "menu"
-  | "dock"
-  | "header"
-  | "terminal"
-  | "popover"
-  | "tooltip"
-  | "sheet"
-  | "button"
-  | "external"
-  | "folder"
-  | "folder-open"
-  | "file"
-  | "zoom-in"
-  | "zoom-out"
-  | "maximize"
-  | "minimize"
-  | "tree";
+/** The GitHub mark, filled with the text color (Lucide ships no brand icons). */
+const GITHUB = `data:image/svg+xml,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`,
+)}`;
 
-const PATHS: Record<Glyph, string> = {
-  "photos": "M22 11l-1.296 -1.296a2.4 2.4 0 0 0 -3.408 0L11 16M4 8a2 2 0 0 0 -2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2M12 7a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M10 2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2Z",
-  "lists": "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13",
-  "scroll": "M15 12h-5M15 8h-5M19 17V5a2 2 0 0 0 -2 -2H4M8 21h12a2 2 0 0 0 2 -2v-1a1 1 0 0 0 -1 -1H11a1 1 0 0 0 -1 1v1a2 2 0 1 1 -4 0V5a2 2 0 1 0 -4 0v2a1 1 0 0 0 1 1h3",
-  "nav": "M3 11L22 2L13 21L11 13L3 11Z",
-  "form": "M12 20h-1a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2H6M13 8h7a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-7M5 16H4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2h1M6 4h1a2 2 0 0 1 2 2a2 2 0 0 1 2 -2h1M9 6v12",
-  "mobile": "M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-16a2 2 0 0 1 2 -2ZM12 18h.01",
-  "components": "M15.536 11.293a1 1 0 0 0 0 1.414l2.376 2.377a1 1 0 0 0 1.414 0l2.377 -2.377a1 1 0 0 0 0 -1.414l-2.377 -2.377a1 1 0 0 0 -1.414 0zM2.297 11.293a1 1 0 0 0 0 1.414l2.377 2.377a1 1 0 0 0 1.414 0l2.377 -2.377a1 1 0 0 0 0 -1.414L6.088 8.916a1 1 0 0 0 -1.414 0zM8.916 17.912a1 1 0 0 0 0 1.415l2.377 2.376a1 1 0 0 0 1.414 0l2.377 -2.376a1 1 0 0 0 0 -1.415l-2.377 -2.376a1 1 0 0 0 -1.414 0zM8.916 4.674a1 1 0 0 0 0 1.414l2.377 2.376a1 1 0 0 0 1.414 0l2.377 -2.376a1 1 0 0 0 0 -1.414l-2.377 -2.377a1 1 0 0 0 -1.414 0z",
-  "controls": "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3",
-  "gestures": "M22 14a8 8 0 0 1 -8 8M18 11v-1a2 2 0 0 0 -2 -2a2 2 0 0 0 -2 2M14 10V9a2 2 0 0 0 -2 -2a2 2 0 0 0 -2 2v1M10 9.5V4a2 2 0 0 0 -2 -2a2 2 0 0 0 -2 2v10M18 11a2 2 0 1 1 4 0v3a8 8 0 0 1 -8 8h-2c-2.8 0 -4.5 -.86 -5.99 -2.34l-3.6 -3.6a2 2 0 0 1 2.83 -2.82L7 15",
-  "physics": "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M20.2 20.2c2.04 -2.03 .02 -7.36 -4.5 -11.9c-4.54 -4.52 -9.87 -6.54 -11.9 -4.5c-2.04 2.03 -.02 7.36 4.5 11.9c4.54 4.52 9.87 6.54 11.9 4.5ZM15.7 15.7c4.52 -4.54 6.54 -9.87 4.5 -11.9c-2.03 -2.04 -7.36 -.02 -11.9 4.5c-4.52 4.54 -6.54 9.87 -4.5 11.9c2.03 2.04 7.36 .02 11.9 -4.5Z",
-  "animation": "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0 -1.594 1.594l-1.051 5.558a1 1 0 0 1 -1.966 0l-1.051 -5.558a2 2 0 0 0 -1.594 -1.594l-5.558 -1.051a1 1 0 0 1 0 -1.966l5.558 -1.051a2 2 0 0 0 1.594 -1.594zM20 2v4M22 4h-4M2 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
-  "image": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM7 9a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M21 15l-3.086 -3.086a2 2 0 0 0 -2.828 0L6 21",
-  "canvas": "M11 10l3 3M6.5 21A3.5 3.5 0 1 0 3 17.5a2.62 2.62 0 0 1 -.708 1.792A1 1 0 0 0 3 21zM9.969 17.031L21.378 5.624a1 1 0 0 0 -3.002 -3.002L6.967 14.031",
-  "tailwind": "M12.8 19.6A2 2 0 1 0 14 16H2M17.5 8a2.5 2.5 0 1 1 2 4H2M9.8 4.4A2 2 0 1 1 11 8H2",
-  "styles": "M12 22a1 1 0 0 1 0 -20a10 9 0 0 1 10 9a5 5 0 0 1 -5 5h-2.25a1.75 1.75 0 0 0 -1.4 2.8l.3 .4a1.75 1.75 0 0 1 -1.4 2.8zM13 6.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0 -1 0M17 10.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0 -1 0M6 12.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0 -1 0M8 7.5a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0 -1 0",
-  "text": "M12 4v16M4 7V5a1 1 0 0 1 1 -1h14a1 1 0 0 1 1 1v2M9 20h6",
-  "media": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM7 3v18M3 7.5h4M3 12h18M3 16.5h4M17 3v18M17 7.5h4M17 16.5h4",
-  "system": "M12 20v2M12 2v2M17 20v2M17 2v2M2 12h2M2 17h2M2 7h2M20 12h2M20 17h2M20 7h2M7 20v2M7 2v2M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2ZM9 8h6a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-6a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1Z",
-  "storage": "M3 5a9 3 0 1 0 18 0a9 3 0 1 0 -18 0M3 5V19A9 3 0 0 0 21 19V5M3 12A9 3 0 0 0 21 12",
-  "stocks": "M16 7h6v6M22 7l-8.5 8.5l-5 -5L2 17",
-  "chat": "M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413 -.998a2 2 0 0 1 1.099 .092a10 10 0 1 0 -4.777 -4.719",
-  "chevron": "M9 18l6 -6l-6 -6",
-  "pipette": "M12 9l-8.414 8.414A2 2 0 0 0 3 18.828v1.344a2 2 0 0 1 -.586 1.414A2 2 0 0 1 3.828 21h1.344a2 2 0 0 0 1.414 -.586L15 12M18 9l.4 .4a1 1 0 1 1 -3 3l-3.8 -3.8a1 1 0 1 1 3 -3l.4 .4l3.4 -3.4a1 1 0 1 1 3 3zM2 22l.414 -.414",
-  "chevron-up": "M18 15l-6 -6l-6 6",
-  "chevron-down": "M6 9l6 6l6 -6",
-  "back": "M15 18l-6 -6l6 -6",
-  "check": "M20 6L9 17l-5 -5",
-  "smile": "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01",
-  "plus": "M5 12h14M12 5v14",
-  "minus": "M5 12h14",
-  "arrow-up": "M5 12l7 -7l7 7M12 19V5",
-  "arrow-down": "M12 5v14M19 12l-7 7l-7 -7",
-  "reply": "M20 18v-2a4 4 0 0 0 -4 -4H4M9 17l-5 -5l5 -5",
-  "play": "M5 5a2 2 0 0 1 3.008 -1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z",
-  "pause": "M15 3h3a1 1 0 0 1 1 1v16a1 1 0 0 1 -1 1h-3a1 1 0 0 1 -1 -1v-16a1 1 0 0 1 1 -1ZM6 3h3a1 1 0 0 1 1 1v16a1 1 0 0 1 -1 1h-3a1 1 0 0 1 -1 -1v-16a1 1 0 0 1 1 -1Z",
-  "stop": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2Z",
-  "search": "M21 21l-4.34 -4.34M3 11a8 8 0 1 0 16 0a8 8 0 1 0 -16 0",
-  "star": "M11.525 2.295a.53 .53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166 .756a.53 .53 0 0 1 .294 .904l-3.736 3.638a2.123 2.123 0 0 0 -.611 1.878l.882 5.14a.53 .53 0 0 1 -.771 .56l-4.618 -2.428a2.122 2.122 0 0 0 -1.973 0L6.396 21.01a.53 .53 0 0 1 -.77 -.56l.881 -5.139a2.122 2.122 0 0 0 -.611 -1.879L2.16 9.795a.53 .53 0 0 1 .294 -.906l5.165 -.755a2.122 2.122 0 0 0 1.597 -1.16z",
-  "bell": "M10.268 21a2 2 0 0 0 3.464 0M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74 -1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499 -1.411 5.956 -2.738 7.326",
-  "spark": "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0 -1.594 1.594l-1.051 5.558a1 1 0 0 1 -1.966 0l-1.051 -5.558a2 2 0 0 0 -1.594 -1.594l-5.558 -1.051a1 1 0 0 1 0 -1.966l5.558 -1.051a2 2 0 0 0 1.594 -1.594z",
-  "sidebar": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM9 3v18",
-  "sun": "M8 12a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41",
-  "globe": "M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0M12 2a14.5 14.5 0 0 0 0 20a14.5 14.5 0 0 0 0 -20M2 12h20",
-  "moon": "M20.985 12.486a9 9 0 1 1 -9.473 -9.472c.405 -.022 .617 .46 .402 .803a6 6 0 0 0 8.268 8.268c.344 -.215 .825 -.004 .803 .401",
-  "volume-low": "M11 4.702a.705 .705 0 0 0 -1.203 -.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0 -1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997 .413l3.383 3.384A.705 .705 0 0 0 11 19.298zM16 9a5 5 0 0 1 0 6",
-  "volume-high": "M11 4.702a.705 .705 0 0 0 -1.203 -.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0 -1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997 .413l3.383 3.384A.705 .705 0 0 0 11 19.298zM16 9a5 5 0 0 1 0 6M19.364 18.364a9 9 0 0 0 0 -12.728",
-  "code": "M16 18l6 -6l-6 -6M8 6l-6 6l6 6",
-  "sliders": "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3",
-  "settings": "M9.671 4.136a2.34 2.34 0 0 1 4.659 0a2.34 2.34 0 0 0 3.319 1.915a2.34 2.34 0 0 1 2.33 4.033a2.34 2.34 0 0 0 0 3.831a2.34 2.34 0 0 1 -2.33 4.033a2.34 2.34 0 0 0 -3.319 1.915a2.34 2.34 0 0 1 -4.659 0a2.34 2.34 0 0 0 -3.32 -1.915a2.34 2.34 0 0 1 -2.33 -4.033a2.34 2.34 0 0 0 0 -3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319 -1.915M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
-  "stepper": "M11 5h10M11 12h10M11 19h10M4 4h1v5M4 9h2M6.5 20H3.4c0 -1 2.6 -1.925 2.6 -3.5a1.5 1.5 0 0 0 -2.6 -1.02",
-  "otp": "M4 6h16a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2ZM12 12h.01M17 12h.01M7 12h.01",
-  "panel-bottom": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM3 15h18",
-  "replace": "M14 4a1 1 0 0 1 1 -1M15 10a1 1 0 0 1 -1 -1M21 4a1 1 0 0 0 -1 -1M21 9a1 1 0 0 1 -1 1M3 7l3 3l3 -3M6 10V5a2 2 0 0 1 2 -2h2M4 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1 -1 1h-5a1 1 0 0 1 -1 -1v-5a1 1 0 0 1 1 -1Z",
-  "replace-all": "M14 14a1 1 0 0 1 1 1v5a1 1 0 0 1 -1 1M14 4a1 1 0 0 1 1 -1M15 10a1 1 0 0 1 -1 -1M19 14a1 1 0 0 1 1 1v5a1 1 0 0 1 -1 1M21 4a1 1 0 0 0 -1 -1M21 9a1 1 0 0 1 -1 1M3 7l3 3l3 -3M6 10V5a2 2 0 0 1 2 -2h2M4 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1 -1 1h-5a1 1 0 0 1 -1 -1v-5a1 1 0 0 1 1 -1Z",
-  "diagnostics": "M22 12h-2.48a2 2 0 0 0 -1.93 1.46l-2.35 8.36a.25 .25 0 0 1 -.48 0L9.24 2.18a.25 .25 0 0 0 -.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2",
-  "close": "M18 6L6 18M6 6l12 12",
-  "copy": "M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2ZM4 16c-1.1 0 -2 -.9 -2 -2V4c0 -1.1 .9 -2 2 -2h10c1.1 0 2 .9 2 2",
-  "trash": "M10 11v6M14 11v6M19 6v14a2 2 0 0 1 -2 2H7a2 2 0 0 1 -2 -2V6M3 6h18M8 6V4a2 2 0 0 1 2 -2h4a2 2 0 0 1 2 2v2",
-  "share": "M12 2v13M16 6l-4 -4l-4 4M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-8",
-  "download": "M12 15V3M21 15v4a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2v-4M7 10l5 5l5 -5",
-  "link": "M10 13a5 5 0 0 0 7.54 .54l3 -3a5 5 0 0 0 -7.07 -7.07l-1.72 1.71M14 11a5 5 0 0 0 -7.54 -.54l-3 3a5 5 0 0 0 7.07 7.07l1.71 -1.71",
-  "eye": "M2.062 12.348a1 1 0 0 1 0 -.696a10.75 10.75 0 0 1 19.876 0a1 1 0 0 1 0 .696a10.75 10.75 0 0 1 -19.876 0M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
-  "eye-off": "M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575a1 1 0 0 1 0 .696a10.747 10.747 0 0 1 -1.444 2.49M14.084 14.158a3 3 0 0 1 -4.242 -4.242M17.479 17.499a10.75 10.75 0 0 1 -15.417 -5.151a1 1 0 0 1 0 -.696a10.75 10.75 0 0 1 4.446 -5.143M2 2l20 20",
-  "mail": "M22 7l-8.991 5.727a2 2 0 0 1 -2.009 0L2 7M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2Z",
-  "mic": "M12 19v3M19 10v2a7 7 0 0 1 -14 0v-2M12 2h0a3 3 0 0 1 3 3v7a3 3 0 0 1 -3 3h0a3 3 0 0 1 -3 -3v-7a3 3 0 0 1 3 -3Z",
-  "lock": "M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-7a2 2 0 0 1 2 -2ZM7 11V7a5 5 0 0 1 10 0v4",
-  "merge": "M15 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M6 21V9a9 9 0 0 0 9 9",
-  "checkbox": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM16 9l-5.5 5.5L8 12",
-  "radio": "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0",
-  "switch": "M12 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M9 5h6a7 7 0 0 1 7 7v0a7 7 0 0 1 -7 7h-6a7 7 0 0 1 -7 -7v0a7 7 0 0 1 7 -7Z",
-  "tabs": "M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2ZM10 4v4M2 8h20M6 4v4",
-  "select": "M7 15l5 5l5 -5M7 9l5 -5l5 5",
-  "collapsible": "M7 20l5 -5l5 5M7 4l5 5l5 -5",
-  "progress": "M12 2v4M16.2 7.8l2.9 -2.9M18 12h4M16.2 16.2l2.9 2.9M12 18v4M4.9 19.1l2.9 -2.9M2 12h4M4.9 4.9l2.9 2.9",
-  "chart": "M3 3v16a2 2 0 0 0 2 2h16M7 16h8M7 11h12M7 6h3",
-  "layers": "M12.83 2.18a2 2 0 0 0 -1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58 -3.9a1 1 0 0 0 0 -1.83zM2 12a1 1 0 0 0 .58 .91l8.6 3.91a2 2 0 0 0 1.65 0l8.58 -3.9A1 1 0 0 0 22 12M2 17a1 1 0 0 0 .58 .91l8.6 3.91a2 2 0 0 0 1.65 0l8.58 -3.9A1 1 0 0 0 22 17",
-  "document": "M6 22a2 2 0 0 1 -2 -2V4a2 2 0 0 1 2 -2h8a2.4 2.4 0 0 1 1.704 .706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1 -2 2zM14 2v5a1 1 0 0 0 1 1h5M10 9H8M16 13H8M16 17H8",
-  "richtext": "M13 4v16M17 4v16M19 4H9.5a4.5 4.5 0 0 0 0 9H13",
-  "diff": "M12 3v14M5 10h14M5 21h14",
-  "table": "M12 3v18M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM3 9h18M3 15h18",
-  "menu": "M4 5h16M4 12h16M4 19h16",
-  "dock": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM3 15h18",
-  "header": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM3 9h18",
-  "terminal": "M12 19h8M4 17l6 -6l-6 -6",
-  "popover": "M22 17a2 2 0 0 1 -2 2H6.828a2 2 0 0 0 -1.414 .586l-2.202 2.202A.71 .71 0 0 1 2 21.286V5a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2z",
-  "tooltip": "M22 17a2 2 0 0 1 -2 2H6.828a2 2 0 0 0 -1.414 .586l-2.202 2.202A.71 .71 0 0 1 2 21.286V5a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2zM7 11h10M7 15h6M7 7h8",
-  "sheet": "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2ZM3 15h18M9 10l3 -3l3 3",
-  "button": "M4 6h16a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2Z",
-  "external": "M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2V8a2 2 0 0 1 2 -2h6",
-  "folder": "M20 20a2 2 0 0 0 2 -2V8a2 2 0 0 0 -2 -2h-7.9a2 2 0 0 1 -1.69 -.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0 -2 2v13a2 2 0 0 0 2 2Z",
-  "folder-open": "M6 14l1.5 -2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1 -1.95 1.5H4a2 2 0 0 1 -2 -2V5a2 2 0 0 1 2 -2h3.9a2 2 0 0 1 1.69 .9l.81 1.2a2 2 0 0 0 1.67 .9H18a2 2 0 0 1 2 2v2",
-  "file": "M6 22a2 2 0 0 1 -2 -2V4a2 2 0 0 1 2 -2h8a2.4 2.4 0 0 1 1.704 .706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1 -2 2zM14 2v5a1 1 0 0 0 1 1h5",
-  "zoom-in": "M3 11a8 8 0 1 0 16 0a8 8 0 1 0 -16 0M21 21L16.65 16.65M11 8L11 14M8 11L14 11",
-  "zoom-out": "M3 11a8 8 0 1 0 16 0a8 8 0 1 0 -16 0M21 21L16.65 16.65M8 11L14 11",
-  "maximize": "M15 3h6v6M21 3l-7 7M3 21l7 -7M9 21H3v-6",
-  "minimize": "M14 10l7 -7M20 10h-6V4M3 21l7 -7M4 14h6v6",
-  "tree": "M20 10a1 1 0 0 0 1 -1V6a1 1 0 0 0 -1 -1h-2.5a1 1 0 0 1 -.8 -.4l-.9 -1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0 -1 1v5a1 1 0 0 0 1 1ZM20 21a1 1 0 0 0 1 -1v-3a1 1 0 0 0 -1 -1h-2.9a1 1 0 0 1 -.88 -.55l-.42 -.85a1 1 0 0 0 -.92 -.6H13a1 1 0 0 0 -1 1v5a1 1 0 0 0 1 1ZM3 5a2 2 0 0 0 2 2h3M3 3v13a2 2 0 0 0 2 2h3",
-};
+/** The app's icons by role, drawn from Lucide (https://lucide.dev) through nsh-icon. */
+const ICONS = {
+  "photos": Images,
+  "scroll": ScrollText,
+  "components": Component,
+  "image": Image,
+  "chat": MessageCircle,
+  "chevron": ChevronRight,
+  "chevron-up": ChevronUp,
+  "chevron-down": ChevronDown,
+  "back": ChevronLeft,
+  "check": Check,
+  "plus": Plus,
+  "minus": Minus,
+  "arrow-up": ArrowUp,
+  "arrow-down": ArrowDown,
+  "reply": Reply,
+  "play": Play,
+  "pause": Pause,
+  "stop": Square,
+  "search": Search,
+  "bell": Bell,
+  "sidebar": PanelLeft,
+  "sun": Sun,
+  "globe": Globe,
+  "moon": Moon,
+  "sliders": SlidersHorizontal,
+  "settings": Settings,
+  "replace": Replace,
+  "close": X,
+  "copy": Copy,
+  "trash": Trash,
+  "download": Download,
+  "mic": Mic,
+  "lock": Lock,
+  "layers": Layers,
+  "document": FileText,
+  "menu": Menu,
+  "terminal": Terminal,
+  "zoom-in": ZoomIn,
+  "zoom-out": ZoomOut,
+  "maximize": Maximize2,
+  "minimize": Minimize2,
+  "github": GITHUB,
+} satisfies Record<string, string>;
 
-export type IconName = Glyph | "github";
+export type IconName = keyof typeof ICONS;
 
-const cache = new Map<string, Path2D>();
-const path = (name: Glyph) => {
-  let p = cache.get(name);
-  if (!p) cache.set(name, (p = new Path2D(PATHS[name])));
-  return p;
-};
-
-/** The GitHub mark in a 16 × 16 box, filled. */
-const GITHUB = new Path2D(
-  "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z",
-);
-
-/** A Lucide glyph, stroked with `tint`; `weight` is the stroke in its 24-unit box (Lucide's 2 by default). */
+/** An icon in `tint`; `weight` is its stroke in Lucide's 24-unit box (2 by default). */
 export function Icon(props: { name: IconName; size?: number; tint: string; weight?: number }) {
-  const size = props.size ?? 20;
-  return (
-    <Canvas
-      style={{ pointerEvents: "none", width: size, height: size }}
-      draw={(cx, { width }) => {
-        cx.strokeStyle = props.tint;
-        cx.fillStyle = props.tint;
-        if (props.name === "github") {
-          cx.scale(width / 16, width / 16);
-          cx.fill(GITHUB);
-          return;
-        }
-        cx.scale(width / 24, width / 24);
-        cx.lineWidth = props.weight ?? 2;
-        cx.lineCap = "round";
-        cx.lineJoin = "round";
-        cx.stroke(path(props.name));
-      }}
-    />
-  );
-}
-
-/** Lucide's check as an SVG in one color, recolored by `tintColor`. */
-const checkSvg = (weight: number) =>
-  `data:image/svg+xml,${encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="${PATHS.check}" fill="none" stroke="#000" stroke-width="${weight}" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  )}`;
-
-/** A check mark drawn as SVG, in `tint`; `weight` is the stroke in its 24-unit box (2.4 by default). */
-export function CheckMark(props: { size?: number; tint: string; weight?: number }) {
-  const size = props.size ?? 20;
-  return <Image src={checkSvg(props.weight ?? 2.4)} style={{ pointerEvents: "none", width: size, height: size, tintColor: props.tint }} />;
+  // The icon draws in the text color, which any element takes.
+  const style = (): TextStyle => ({ pointerEvents: "none", color: props.tint });
+  return <SetIcon icon={ICONS[props.name]} size={props.size ?? 20} strokeWidth={props.weight} style={style()} />;
 }
