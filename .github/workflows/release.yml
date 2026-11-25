@@ -63,6 +63,21 @@ jobs:
           ref: ${{ env.NSH_REF }}
           target: ${{ matrix.target }}
 
+      # nsh-extra (Speech) is Rust, built for each platform the app is packaged for.
+      - name: Add the Rust targets nsh-extra builds for
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          case "$TARGET" in
+            android) targets="aarch64-linux-android armv7-linux-androideabi x86_64-linux-android" ;;
+            ios) targets="aarch64-apple-ios aarch64-apple-ios-sim" ;;
+            web) targets="wasm32-unknown-unknown" ;;
+            macos) targets="aarch64-apple-darwin x86_64-apple-darwin" ;;
+            *) targets="" ;;
+          esac
+          [ -z "$targets" ] || rustup target add $targets
+
       - name: Verify release metadata
         run: python3 scripts/test-prepare-client-release.py
 
