@@ -197,10 +197,12 @@ jobs:
           [ "$GITHUB_REF_TYPE" != tag ] || args+=(--app-version "${GITHUB_REF_NAME#v}")
           out="$RUNNER_TEMP/out-x86_64"
           mkdir -p assets-intel
-          # The arm64 package above built nsh-extra's runner for arm64 here; the Intel nsh builds its own.
+          # nsh-extra's runner is built by cargo for its host: the arm64 package above left an arm64 one, so build
+          # it again with an x86_64 toolchain under Rosetta.
           rm -rf "$HOME/.nsh/target"
+          rustup toolchain install stable-x86_64-apple-darwin --profile minimal --no-self-update
           # Name the processor: without --arch the CLI packages for the machine it runs on (arm64), even under Rosetta.
-          nsh package --target macos --arch x86_64 -o "$out" "${args[@]}"
+          RUSTUP_TOOLCHAIN=stable-x86_64-apple-darwin arch -x86_64 nsh package --target macos --arch x86_64 -o "$out" "${args[@]}"
           ditto -c -k --keepParent "$out/Noop.app" assets-intel/noop-macos-x86_64.zip
           mv "$out"/Noop-*-macos-x86_64.tar.gz assets-intel/
           app="$RUNNER_TEMP/verify-x86_64/Noop.app"
