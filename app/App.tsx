@@ -54,7 +54,7 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
 import { chatScreen, nsmetry } from "./analytics";
-import { useNsMetry, useScreenTracking } from "./nsmetry";
+import { useNsMetry, useScreenTracking } from "nsmetry";
 
 /** One row of the system menu `MenuButton` shows: an action, a submenu (`items`) or an inline group (`inline`). */
 type MenuButtonItem = { id: string; label: string; icon?: string; disabled?: boolean; checked?: boolean; inline?: boolean; items?: MenuButtonItem[] };

@@ -2,7 +2,7 @@
 // Only screen names and the app version leave the device, with a random install id kept in Storage
 // under "nsmetry.uid": no email, hub address, task, channel or message content.
 import { signal } from "nsh";
-import { createNsMetry } from "./nsmetry";
+import { createNsMetry } from "nsmetry";
 import { CLIENT_VERSION } from "./version";
 
 export const nsmetry = createNsMetry({
