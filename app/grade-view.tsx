@@ -28,14 +28,20 @@ export function gradeSummary(g: Grade): string {
   ].filter(Boolean).join(L(", ", "，"));
 }
 
+/** How wide an axis label is. */
+const LABEL = 72;
+
 /** The radar: five axes, five rings (D to S), the grades as one polygon in the score's tier color. `axes` labels the axes. */
 export function GradeRadar(props: { grade: Grade; size: number; axes?: boolean; testID?: string }) {
   // labels need room around the rings
   const pad = () => (props.axes ? 30 : 1.5);
+  // the side axes' labels (72 wide, centered on their point) reach past the chart's square: widen the box so they stay
+  // inside it instead of spilling into the card's padding
+  const side = () => (props.axes ? Math.max(0, Math.ceil(LABEL / 2 - (props.size / 2) * (1 - Math.cos(Math.PI / 10)) - 12 * Math.cos(Math.PI / 10))) : 0);
   return (
-    <View testID={props.testID} accessibilityLabel={gradeSummary(props.grade)} style={{ width: props.size, height: props.size, position: "relative" }}>
+    <View testID={props.testID} accessibilityLabel={gradeSummary(props.grade)} style={{ width: props.size + side() * 2, height: props.size, position: "relative" }}>
       <Canvas
-        style={{ width: props.size, height: props.size }}
+        style={{ width: props.size, height: props.size, marginLeft: side() }}
         draw={(cx, s) => {
           const r = Math.min(s.width, s.height) / 2 - pad();
           const mx = s.width / 2, my = s.height / 2;
@@ -77,7 +83,7 @@ export function GradeRadar(props: { grade: Grade; size: number; axes?: boolean; 
             const half = props.size / 2;
             const [x, y] = corner(half, half, half - 12, i);
             return (
-              <Text style={{ position: "absolute", left: x - 36, top: y - 9, width: 72, textAlign: "center", fontSize: 12, lineHeight: 18, color: colors.muted, numberOfLines: 1 }}>
+              <Text style={{ position: "absolute", left: side() + x - LABEL / 2, top: y - 9, width: LABEL, textAlign: "center", fontSize: 12, lineHeight: 18, color: colors.muted, numberOfLines: 1 }}>
                 {labels(zh()).dims[i]}
               </Text>
             );
