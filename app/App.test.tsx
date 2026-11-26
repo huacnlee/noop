@@ -2311,6 +2311,7 @@ describe("commands", () => {
     await app.type("id:allow-entry", "not-an-ip");
     await app.press("id:allow-confirm");
     await app.waitFor("id:allow-entry-note");
+    await app.clear("id:allow-entry");
     await app.type("id:allow-entry", "192.220.47.149");
     await app.press("id:allow-confirm");
     await app.waitFor("id:allow-row-192.220.47.149");
