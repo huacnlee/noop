@@ -26,7 +26,7 @@ export function telemetryEnabled(cfg: Cfg, env = process.env): boolean {
 const osName = () => ({ darwin: "macOS", win32: "Windows NT 10.0", linux: "Linux" } as Record<string, string>)[process.platform] ?? "Other";
 
 /** The build date of the running Noop (commit date of the install), e.g. 2026-11-26; "unknown" without git. */
-async function build(): Promise<string> {
+export async function build(): Promise<string> {
   const r = await $`git log -1 --format=%cs`.cwd(CODE).quiet().nothrow();
   return r.exitCode === 0 ? r.stdout.toString().trim() || "unknown" : "unknown";
 }

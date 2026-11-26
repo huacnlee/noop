@@ -11,6 +11,7 @@ import { ipAllowed, normalizeAllowList, parseAllowList } from "../cloud/src/ipal
 import { type Cfg, CODE, L, P, _commitPush, _pull, hostName, journal, locked, HOME_DIR } from "./core";
 import { updateChannel } from "./channels";
 import { writeHubToml } from "./sync";
+import { build as telemetryBuild, telemetryEnabled } from "./telemetry";
 import { ensureWebClient } from "./webclient";
 import { type Event, MEDIA, appendEvent, applyOp, handleOwnerMessage, saveSettings, setMirror, settingsView, status, cancelTask, updateFleet } from "./server";
 
@@ -270,7 +271,9 @@ export async function cloudDeploy(cfg: Cfg) {
   console.log(L(`Deploying to your Cloudflare account (Worker: ${name})…`, `部署到你的 Cloudflare 账号（Worker：${name}）…`));
   // [cloud] domain (e.g. noop.example.com on a zone in the same account) attaches a Custom Domain and becomes the URL
   const domain = String(cfg.cloud?.domain ?? "").trim();
-  const deploy = () => $`${wr} deploy --name ${name} ${domain ? ["--domain", domain] : []}`.cwd(dir).env(env).quiet().nothrow();
+  // the build date lets the Worker's daily usage report (cloud/src/telemetry.ts) say which Noop it runs
+  const buildVar = `NOOP_BUILD:${await telemetryBuild()}`;
+  const deploy = () => $`${wr} deploy --name ${name} ${domain ? ["--domain", domain] : []} --var ${buildVar}`.cwd(dir).env(env).quiet().nothrow();
   let dep = await deploy();
   let out = dep.stdout.toString() + dep.stderr.toString();
   // a brand-new Cloudflare account has no workers.dev subdomain yet, and wrangler can only ask for one with a
@@ -288,7 +291,7 @@ export async function cloudDeploy(cfg: Cfg) {
   }
   if (dep.exitCode !== 0) return fail(out.slice(-1500));
   const url = domain ? `https://${domain}` : out.match(/https:\/\/[\w.-]+\.workers\.dev/)?.[0];
-  const secrets: Record<string, string> = { HUB_TOKEN: cfg.server.token, ...(allow !== undefined ? { HUB_ALLOW_IPS: allow } : {}) };
+  const secrets: Record<string, string> = { HUB_TOKEN: cfg.server.token, HUB_TELEMETRY: telemetryEnabled(cfg) ? "on" : "off", ...(allow !== undefined ? { HUB_ALLOW_IPS: allow } : {}) };
   const e = cfg.email ?? {};
   if (e.to && e.host) {
     secrets.HUB_OWNER_EMAIL = String(e.to);

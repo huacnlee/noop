@@ -41,6 +41,7 @@ async function cfMail(binding: SendEmail, from: string, to: string, subject: str
 import { sendPush, type PushSub, type Vapid } from "./push";
 import { CORS, Mcp } from "./mcp";
 import { L, setLang } from "./i18n";
+import { DailyReport, NSMETRY_URL, telemetryOn } from "./telemetry";
 import { checkAllowEdit, ipAllowed, normalizeAllowList, parseAllowList } from "./ipallow";
 import { notificationFor, type NotifyRules } from "../../app/notify";
 
@@ -55,6 +56,8 @@ interface Env {
   HUB_MOVED_TO?: string;    // the hub moved to another Worker (e.g. another account): forward every request there
   HUB_LANG?: string;        // [owner] language: "en" gives English text, otherwise Simplified Chinese
   HUB_ALLOW_IPS?: string;   // optional source-IP allow-list (IPs / CIDRs, comma or space separated); set → everyone else gets 403
+  HUB_TELEMETRY?: string;   // "off": no daily usage report (telemetry.ts); from [telemetry] enabled
+  NOOP_BUILD?: string;      // the Noop build date the primary deployed (a --var of noop cloud deploy)
 }
 
 const json = (d: unknown, status = 200) => Response.json(d, { status });
@@ -675,8 +678,34 @@ export class Hub extends DurableObject<Env> {
     return callbackPage(true, L(`Signed in to ${name}`, `已登录 ${name}`), L("Every machine can use it now. You can close this page.", "所有机器都可以使用了，可以关闭这个页面。"));
   }
 
+  /** Once a day, the usage counts to NsMetry (telemetry.ts). */
+  report = new DailyReport({
+    enabled: () => telemetryOn(this.env.HUB_TELEMETRY),
+    build: () => this.env.NOOP_BUILD || "unknown",
+    lastDay: () => String(this.get("nsmetry_day") ?? ""),
+    markDay: (day) => this.set("nsmetry_day", day),
+    installId: () => {
+      const id = this.get("nsmetry_id");
+      if (typeof id === "string") return id;
+      const fresh = crypto.randomUUID();
+      this.set("nsmetry_id", fresh);
+      return fresh;
+    },
+    seen: () => ({
+      machines: ((this.get("status")?.hosts ?? []) as unknown[]).length,
+      // the sessions table holds a handful of rows (one per signed-in device); read once a day
+      sessions: this.sql.exec("SELECT ua, scope FROM sessions WHERE last_seen > ?", Date.now() - 86_400_000).toArray()
+        .map((r) => ({ ua: String(r.ua ?? ""), scope: r.scope == null ? null : String(r.scope) })),
+    }),
+    post: (body) => fetch(NSMETRY_URL, { method: "POST", headers: { "content-type": "text/plain" }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) }).then((r) => r.status),
+  });
+
   async fetch(req: Request): Promise<Response> {
-    try { return await this.handle(req); } finally { this.settle(1, routeKey(req)); }
+    try { return await this.handle(req); } finally {
+      this.settle(1, routeKey(req));
+      const send = this.report.tick();
+      if (send) this.ctx.waitUntil(send);
+    }
   }
 
   async handle(req: Request): Promise<Response> {
