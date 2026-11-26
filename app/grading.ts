@@ -97,9 +97,9 @@ type Labels = { dims: string[]; short: string[]; fit: Record<Fit, string>; score
 export function labels(zh: boolean): Labels {
   return zh
     ? { dims: ["偏题", "体量", "风险", "验证缺口", "自主决定"], short: ["偏", "量", "险", "验", "决"], fit: { over: "过度", right: "恰当", under: "偏简" },
-        score: "关注分", pending: "待", title: "Noop 自评", legend: "越高越需要你看：S 最高，D 最低；关注分 = 五项之和 × 4" }
+        score: "关注分", pending: "待", title: "Noop 自评", legend: "越高越需要你看，S 最高，D 最低；关注分 = 五项之和 × 4" }
     : { dims: ["Drift", "Size", "Risk", "Proof gap", "Own calls"], short: ["Dr", "Sz", "Rk", "Pf", "Cl"], fit: { over: "Over-built", right: "Right-sized", under: "Too thin" },
-        score: "Attention", pending: "?", title: "Noop self-grade", legend: "Higher means look harder: S highest, D lowest; attention = sum of the five × 4" };
+        score: "Attention", pending: "?", title: "Noop self-grade", legend: "higher means look harder, S highest, D lowest; attention = sum of the five × 4" };
 }
 
 /** A changed file as a PR lists it. */
@@ -150,16 +150,35 @@ export function withMeasuredSize(g: Grade, m: { lines: number; modules: number; 
 const START = "<!-- noop-grade -->";
 const END = "<!-- /noop-grade -->";
 
-/** The block that opens a PR / MR description: the scores first, then one line of evidence per dimension. */
+/** A grade's or a tier's color on a PR / MR page: an HTML color that reads on both GitHub's light and dark themes.
+ *  The higher, the louder, as in the app: S red, A orange, B blue, C and D gray; "?" is red (evidence missing). */
+export function webColor(l: Letter | null): string {
+  return l === "S" || l === "?" ? "#e5534b" : l === "A" ? "#db6d28" : l === "B" ? "#4184e4" : "#8b949e";
+}
+
+/** A square in `color` before a grade, in GitHub / GitLab markdown: the hosts strip `style`, but render math with `\color`.
+ *  The letter stays in the page's own font: colored math letters come out in a serif italic that is hard to read. */
+const swatch = (color: string) => `$\\color{${color}}\\blacksquare$`;
+
+/** Whether a PR / MR description is written in Chinese: the block follows the language the project's PRs use. */
+export const isChineseText = (text: string): boolean => /[\u4e00-\u9fff]/.test(text.replace(/<!--[\s\S]*?-->/g, ""));
+
+/** The block that opens a PR / MR description: one line of scores, each marked with its color, and a one-line legend.
+ *  The evidence stays in the app: a reviewer of the PR needs the scores at a glance, not the agent's reasoning. */
 export function gradeMarkdown(g: Grade, zh: boolean): string {
   const t = labels(zh);
   const l = letters(g.grades);
   const score = attention(g.grades);
-  const head = `**${t.title}** · ${t.score} ${score === null ? "—" : `${score}·${tier(score)}`}${g.fit ? ` · ${zh ? "分寸" : "Fit"}: ${t.fit[g.fit]}` : ""}`;
-  const table = `| ${t.dims.join(" | ")} |\n|${t.dims.map(() => ":-:").join("|")}|\n| ${l.map((x) => (x === "?" ? t.pending : x)).join(" | ")} |`;
-  const why = DIMS.map((_, i) => `- ${t.dims[i]} ${l[i] === "?" ? t.pending : l[i]}${g.notes?.[i] ? `: ${g.notes[i]}` : ""}`);
-  if (g.fit && g.notes?.[DIMS.length]) why.push(`- ${zh ? "分寸" : "Fit"} ${t.fit[g.fit]}: ${g.notes[DIMS.length]}`);
-  return [START, head, "", table, "", `<sub>${t.legend}</sub>`, "", ...why, END].join("\n");
+  const mark = (x: Letter, text: string = x) => `${swatch(webColor(x))} ${text}`;
+  const head = [
+    `**${t.title}**`,
+    score === null ? `${t.score} —` : mark(tier(score)!, `${t.score} **${score} ${tier(score)}**`),
+    ...(g.fit ? [t.fit[g.fit]] : []),
+    ...l.map((x, i) => mark(x, `${t.dims[i]} **${x === "?" ? t.pending : x}**`)),
+  ].join(" · ");
+  // at full size: inside <sub> the squares sit on the baseline below the raised letters
+  const legend = `${(["S", "A", "B"] as Letter[]).map((x) => mark(x)).join(" ")} ${mark("C", "C D")}${zh ? "：" : ": "}${t.legend}`;
+  return [START, head, legend, END].join("\n");
 }
 
 /** `body` with the grade block at its top: an earlier block is replaced, the rest kept as it was. */

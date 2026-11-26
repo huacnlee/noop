@@ -397,7 +397,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   // the scores open each PR / MR the run named, so a reviewer sees them before the diff
   if (grade && res.status !== "failed") {
     const links = reviews;
-    if (links.length) void track(stampReviews(links, grade, !isEnglish()).then((ok) => {
+    if (links.length) void track(stampReviews(links, grade).then((ok) => {
       if (ok.length < links.length) console.warn(`[grade] ${meta.id}: could not update ${links.filter((l) => !ok.includes(l)).join(", ")}`);
     }));
   }

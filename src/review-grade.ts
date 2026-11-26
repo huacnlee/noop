@@ -1,6 +1,6 @@
 // Puts a task's self-grade at the top of the PRs / MRs it opened, so a reviewer sees the scores before the diff.
 // One read and one edit per PR (gh: GraphQL), only when a run returns grades: no polling, nothing on the Worker.
-import { type ChangedFile, type Grade, gradeMarkdown, measureSize, reviewLinks, withGradeBlock, withMeasuredSize } from "../app/grading";
+import { type ChangedFile, type Grade, gradeMarkdown, isChineseText, measureSize, reviewLinks, withGradeBlock, withMeasuredSize } from "../app/grading";
 
 type Run = (cmd: string[], input?: string, env?: Record<string, string>) => Promise<{ code: number; out: string }>;
 
@@ -45,8 +45,11 @@ export async function measuredGrade(grade: Grade, links: string[], zh: boolean, 
   return files.length ? withMeasuredSize(grade, measureSize(files), zh) : grade;
 }
 
+/** `body` with the grade on top, in the language the description is written in (each project's own rule, not the owner's chat language). */
+export const stampedBody = (body: string, grade: Grade): string => withGradeBlock(body, gradeMarkdown(grade, isChineseText(withGradeBlock(body, ""))));
+
 /** Rewrites one PR / MR description with the grade block on top. False when the CLI is missing or refused. */
-export async function stampReview(url: string, block: string, exec: Run = run): Promise<boolean> {
+export async function stampReview(url: string, grade: Grade, exec: Run = run): Promise<boolean> {
   const mr = gitlabMr(url);
   if (mr) {
     const env = { GITLAB_HOST: mr.host };
@@ -54,11 +57,11 @@ export async function stampReview(url: string, block: string, exec: Run = run): 
     if (view.code !== 0) return false;
     let body = "";
     try { body = String(JSON.parse(view.out).description ?? ""); } catch { return false; }
-    return (await exec(["glab", "mr", "update", mr.iid, "-R", mr.repo, "--description", withGradeBlock(body, block)], undefined, env)).code === 0;
+    return (await exec(["glab", "mr", "update", mr.iid, "-R", mr.repo, "--description", stampedBody(body, grade)], undefined, env)).code === 0;
   }
   const view = await exec(["gh", "pr", "view", url, "--json", "body", "-q", ".body"]);
   if (view.code !== 0) return false;
-  return (await exec(["gh", "pr", "edit", url, "--body-file", "-"], withGradeBlock(view.out.replace(/\n$/, ""), block))).code === 0;
+  return (await exec(["gh", "pr", "edit", url, "--body-file", "-"], stampedBody(view.out.replace(/\n$/, ""), grade))).code === 0;
 }
 
 /** The PRs / MRs a run names: its `prs`, else the links in its summary. */
@@ -68,9 +71,8 @@ export function runReviews(prs: unknown, summary: string): string[] {
 }
 
 /** Stamps every PR / MR of a run; returns the links that were updated. */
-export async function stampReviews(links: string[], grade: Grade, zh: boolean, exec: Run = run): Promise<string[]> {
-  const block = gradeMarkdown(grade, zh);
+export async function stampReviews(links: string[], grade: Grade, exec: Run = run): Promise<string[]> {
   const done: string[] = [];
-  for (const url of links) if (await stampReview(url, block, exec).catch(() => false)) done.push(url);
+  for (const url of links) if (await stampReview(url, grade, exec).catch(() => false)) done.push(url);
   return done;
 }
