@@ -4119,11 +4119,35 @@ function VersionRows(props: { hub: Hub }) {
   // The installed app around that code (on iOS its CFBundleShortVersionString / CFBundleVersion) and its NSH runtime.
   const info = (nshUpdater as { shellInfo?: () => ShellInfo }).shellInfo?.();
   const shell = shellLine(info, platform.os);
+  // Settings' manual check: the same OTA flow as the hourly one, with an answer either way.
+  const checking = signal(false);
+  const checked = signal<"" | "ready" | "shell" | "latest" | "failed">("");
+  const checkNow = async () => {
+    if (checking()) return;
+    checking.set(true);
+    checked.set("");
+    checked.set(await updates.checkNow());
+    checking.set(false);
+  };
+  const phone = platform.os === "ios" || platform.os === "android";
+  const checkedText = () => {
+    const u = appUpdate();
+    const v = u.kind === "none" ? "" : u.version;
+    switch (checked()) {
+      case "ready": return phone ? L(`${v} is downloaded. Reopen Noop to use it.`, `${v} 已下载，重新打开 Noop 即可使用。`) : L(`${v} is downloaded. Restart from the sidebar to use it.`, `${v} 已下载，在侧边栏点重启即可更新。`);
+      case "shell": return L(`The code is up to date. A new app shell ${v} is available below.`, `代码已是最新；有新外壳 ${v}，可在下方更新。`);
+      case "latest": return L("You’re up to date.", "已是最新版本。");
+      case "failed": return L("Couldn’t check for updates. Check your network and try again.", "检查更新失败，请检查网络后重试。");
+      default: return "";
+    }
+  };
   const shellText = shell?.text === "no-packages" ? L(`${info!.version ?? "?"} (${info!.build ?? "?"}) takes no over-the-air updates: install the app again`, `${info!.version ?? "?"}（${info!.build ?? "?"}）收不到自动更新：请重新安装 App`)
     : shell?.text;
   return (
     <>
-      <SetRow first label={L("This app", "本机客户端")} value={client} testID="version-client" />
+      <SetRow first label={L("This app", "本机客户端")} value={client} testID="version-client"
+        trailing={<Button label={checking() ? L("Checking…", "检查中…") : L("Check for updates", "检查更新")} size="sm" variant="secondary" loading={checking()} disabled={checking()} onPress={() => void checkNow()} testID="check-update" />}
+        below={<If when={checked()}><Text testID="check-update-result" style={{ fontSize: 13, lineHeight: 18, color: checked() === "failed" ? colors.danger : colors.muted }}>{checkedText()}</Text></If>} />
       <If when={shell}>
         <SetRow label={L("App shell", "外壳")} value={shell?.tone === "ok" ? shellText : undefined} detail={shell?.tone === "bad" ? shellText : undefined} tone={shell?.tone === "bad" ? "danger" : undefined} testID="version-shell" below={<ShellUpdate state={appUpdate()} onUpdate={() => void updates.installShell()} />} />
       </If>

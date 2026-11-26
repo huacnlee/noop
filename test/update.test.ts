@@ -208,3 +208,25 @@ test("a failed shell check preserves the verified OTA for the next launch", asyn
   expect(t.last()).toEqual({ kind: "staged", version: pkg.version });
   expect(t.calls).toEqual(["pkg-check", "pkg-download"]);
 });
+
+test("on a phone a shell the app cannot install is never a store link in the sidebar", async () => {
+  const t = withPackages(null, false);
+  t.api.check = async () => ({ ...update, canInstall: false, url: "https://apps.apple.com/app/id123" });
+  await t.updates.check();
+  expect(t.last()).toMatchObject({ kind: "shell", phase: "available", version: "1.2.0" });
+});
+
+test("check now runs the OTA flow and says what it found", async () => {
+  const ready = withPackages(pkg, false);
+  ready.api.check = async () => null;
+  expect(await ready.updates.checkNow()).toBe("ready");
+  const latest = withPackages(null);
+  latest.api.check = async () => null;
+  expect(await latest.updates.checkNow()).toBe("latest");
+  const failed = withPackages(null);
+  failed.api.check = async () => { throw new Error("offline"); };
+  expect(await failed.updates.checkNow()).toBe("failed");
+  const shell = withPackages(null, false);
+  shell.api.check = async () => ({ ...update, canInstall: false });
+  expect(await shell.updates.checkNow()).toBe("shell");
+});
