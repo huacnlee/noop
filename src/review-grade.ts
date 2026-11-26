@@ -1,6 +1,6 @@
-// Puts a task's self-grade at the top of the PRs / MRs it opened, so a reviewer sees the scores before the diff.
-// One read and one edit per PR (gh: GraphQL), only when a run returns grades: no polling, nothing on the Worker.
-import { type ChangedFile, type Grade, gradeMarkdown, isChineseText, measureSize, reviewLinks, withGradeBlock, withMeasuredSize } from "../app/grading";
+// Posts a task's self-grade as a comment on the PRs / MRs it opened, and a reviewer's grade on the PRs it reviewed,
+// so a reader sees the scores before the diff. One read and at most one comment per PR, only when a run returns grades.
+import { type ChangedFile, type Grade, type GradeKind, gradeMarker, gradeMarkdown, isChineseText, lastGradeMarker, measureSize, parseGrades, reviewLinks, withMeasuredSize, withoutGradeBlock } from "../app/grading";
 
 type Run = (cmd: string[], input?: string, env?: Record<string, string>) => Promise<{ code: number; out: string }>;
 
@@ -45,23 +45,51 @@ export async function measuredGrade(grade: Grade, links: string[], zh: boolean, 
   return files.length ? withMeasuredSize(grade, measureSize(files), zh) : grade;
 }
 
-/** `body` with the grade on top, in the language the description is written in (each project's own rule, not the owner's chat language). */
-export const stampedBody = (body: string, grade: Grade): string => withGradeBlock(body, gradeMarkdown(grade, isChineseText(withGradeBlock(body, ""))));
+/** What a grade comment needs from a PR / MR: its description, its comments (oldest first) and its head commit. */
+type Thread = { body: string; comments: string[]; head: string };
 
-/** Rewrites one PR / MR description with the grade block on top. False when the CLI is missing or refused. */
-export async function stampReview(url: string, grade: Grade, exec: Run = run): Promise<boolean> {
+async function readThread(url: string, exec: Run): Promise<Thread | null> {
   const mr = gitlabMr(url);
   if (mr) {
     const env = { GITLAB_HOST: mr.host };
     const view = await exec(["glab", "mr", "view", mr.iid, "-R", mr.repo, "-F", "json"], undefined, env);
-    if (view.code !== 0) return false;
-    let body = "";
-    try { body = String(JSON.parse(view.out).description ?? ""); } catch { return false; }
-    return (await exec(["glab", "mr", "update", mr.iid, "-R", mr.repo, "--description", stampedBody(body, grade)], undefined, env)).code === 0;
+    if (view.code !== 0) return null;
+    const notes = await exec(["glab", "api", `projects/${encodeURIComponent(mr.repo)}/merge_requests/${mr.iid}/notes?sort=asc&per_page=100`], undefined, env);
+    try {
+      const v = JSON.parse(view.out);
+      const n = notes.code === 0 ? (JSON.parse(notes.out) as { body?: string }[]).map((x) => String(x.body ?? "")) : [];
+      return { body: String(v.description ?? ""), comments: n, head: String(v.sha ?? "") };
+    } catch { return null; }
   }
-  const view = await exec(["gh", "pr", "view", url, "--json", "body", "-q", ".body"]);
-  if (view.code !== 0) return false;
-  return (await exec(["gh", "pr", "edit", url, "--body-file", "-"], stampedBody(view.out.replace(/\n$/, ""), grade))).code === 0;
+  const view = await exec(["gh", "pr", "view", url, "--json", "body,comments,headRefOid"]);
+  if (view.code !== 0) return null;
+  try {
+    const v = JSON.parse(view.out) as { body?: string; comments?: { body?: string }[]; headRefOid?: string };
+    return { body: String(v.body ?? ""), comments: (v.comments ?? []).map((c) => String(c.body ?? "")), head: String(v.headRefOid ?? "") };
+  } catch { return null; }
+}
+
+/** Posts the grade as a comment on one PR / MR, in the language its description is written in (each project's own rule,
+ *  not the owner's chat language). A later run with a new grade or a new head commit adds another comment; the same
+ *  grade on the same commit is not posted twice. A grade block an earlier version put in the description is removed.
+ *  False when the CLI is missing or refused. */
+export async function stampReview(url: string, grade: Grade, exec: Run = run, opts: { kind?: GradeKind; signature?: string } = {}): Promise<boolean> {
+  const kind = opts.kind ?? "self";
+  const t = await readThread(url, exec);
+  if (!t) return false;
+  const mr = gitlabMr(url);
+  const env = mr ? { GITLAB_HOST: mr.host } : undefined;
+  const clean = withoutGradeBlock(t.body);
+  if (clean !== t.body) {
+    const edit = mr ? await exec(["glab", "mr", "update", mr.iid, "-R", mr.repo, "--description", clean], undefined, env)
+      : await exec(["gh", "pr", "edit", url, "--body-file", "-"], clean);
+    if (edit.code !== 0) return false;
+  }
+  if (lastGradeMarker(t.comments, kind) === gradeMarker(kind, grade, t.head)) return true;
+  const text = gradeMarkdown(grade, isChineseText(clean), { kind, head: t.head, signature: opts.signature });
+  const post = mr ? await exec(["glab", "mr", "note", mr.iid, "-R", mr.repo, "-m", text], undefined, env)
+    : await exec(["gh", "pr", "comment", url, "--body-file", "-"], text);
+  return post.code === 0;
 }
 
 /** The PRs / MRs a run names: its `prs`, else the links in its summary. */
@@ -71,8 +99,21 @@ export function runReviews(prs: unknown, summary: string): string[] {
 }
 
 /** Stamps every PR / MR of a run; returns the links that were updated. */
-export async function stampReviews(links: string[], grade: Grade, exec: Run = run): Promise<string[]> {
+export async function stampReviews(links: string[], grade: Grade, exec: Run = run, opts: { kind?: GradeKind; signature?: string } = {}): Promise<string[]> {
   const done: string[] = [];
-  for (const url of links) if (await stampReview(url, grade, exec).catch(() => false)) done.push(url);
+  for (const url of links) if (await stampReview(url, grade, exec, opts).catch(() => false)) done.push(url);
   return done;
+}
+
+/** A review run's `reviewed` field → each reviewed PR / MR with its grade; entries without a link or a grade are dropped. */
+export function reviewedGrades(raw: unknown): { url: string; grade: Grade }[] {
+  if (!Array.isArray(raw)) return [];
+  const out: { url: string; grade: Grade }[] = [];
+  for (const r of raw.slice(0, 30)) {
+    const o = (r ?? {}) as { pr?: unknown; grades?: unknown };
+    const url = reviewLinks(String(o.pr ?? ""))[0];
+    const grade = parseGrades(o.grades);
+    if (url && grade && !out.some((x) => x.url === url)) out.push({ url, grade });
+  }
+  return out;
 }

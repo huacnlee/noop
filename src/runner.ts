@@ -30,8 +30,10 @@ export type Result = {
   followups?: { title: string; body?: string; agent?: string; priority?: string; repo?: string; requires?: string; host?: string }[];
   /** The agent's self-grade of this run's work (see GRADE_SPEC); parse it with `parseGrades`. */
   grades?: unknown;
-  /** PRs / MRs this run opened or updated: their descriptions get the grade block. */
+  /** PRs / MRs this run opened or updated: each gets the grade as a comment. */
   prs?: unknown;
+  /** Review runs: other people's PRs / MRs this run reviewed, each with its grade (`{pr, grades}`); posted as comments. */
+  reviewed?: unknown;
 };
 
 export type RunLimits = {
@@ -80,7 +82,8 @@ const RESULT_SPEC = () => `Finish the work, then end your final reply with EXACT
   "channels": ["existing-slug", {"name": "New topic", "goal": "what it is for"}],   // see # Channels; [] when none fits
   "followups": [{"title": "...", "body": "...", "agent": "<agent id>", "priority": "normal", "difficulty": "hard if it needs deep engineering/design work", "requires": "os:macos when it needs macOS/iOS/Xcode (os:windows for Windows); omit otherwise"}],
   "grades": {"drift": "D: ...", "size": "C: ...", "risk": "B: ...", "proof": "C: ...", "calls": "D: ...", "fit": "right: ..."},   // see # Self-grade
-  "prs": ["https://github.com/o/r/pull/123"]   // every PR / MR this run opened or updated
+  "prs": ["https://github.com/o/r/pull/123"],   // every PR / MR this run opened or updated
+  "reviewed": [{"pr": "https://github.com/o/r/pull/45", "grades": {"drift": "C: ...", "size": "B: ...", "risk": "B: ...", "proof": "C: ...", "calls": "B: ...", "fit": "right: ..."}}]   // review runs only: each PR / MR you reviewed this run, graded by the same rubric
 }
 ${GRADE_SPEC}
 Write summary, question, options and the grades' evidence in the owner's language (${L("English", "Simplified Chinese")} unless the owner writes otherwise), plain text, no emoji; keep identifiers, links and code as they are.

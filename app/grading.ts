@@ -93,13 +93,13 @@ export function gradeOf(meta: Record<string, string | undefined>, withNotes = tr
   return { grades: meta.grade, fit: asFit(meta.grade_fit), ...(notes ? { notes } : {}) };
 }
 
-type Labels = { dims: string[]; short: string[]; fit: Record<Fit, string>; score: string; pending: string; title: string; legend: string };
+type Labels = { dims: string[]; short: string[]; fit: Record<Fit, string>; score: string; pending: string; title: string; review: string; legend: string };
 export function labels(zh: boolean): Labels {
   return zh
     ? { dims: ["偏题", "体量", "风险", "验证缺口", "自主决定"], short: ["偏", "量", "险", "验", "决"], fit: { over: "过度", right: "恰当", under: "偏简" },
-        score: "关注分", pending: "待", title: "Noop 自评", legend: "越高越需要你看，S 最高，D 最低；关注分 = 五项之和 × 4" }
+        score: "关注分", pending: "待", title: "Noop 自评", review: "Noop 审查评分", legend: "越高越需要你看，S 最高，D 最低；关注分 = 五项之和 × 4" }
     : { dims: ["Drift", "Size", "Risk", "Proof gap", "Own calls"], short: ["Dr", "Sz", "Rk", "Pf", "Cl"], fit: { over: "Over-built", right: "Right-sized", under: "Too thin" },
-        score: "Attention", pending: "?", title: "Noop self-grade", legend: "higher means look harder, S highest, D lowest; attention = sum of the five × 4" };
+        score: "Attention", pending: "?", title: "Noop self-grade", review: "Noop review grade", legend: "higher means look harder, S highest, D lowest; attention = sum of the five × 4" };
 }
 
 /** A changed file as a PR lists it. */
@@ -147,6 +147,7 @@ export function withMeasuredSize(g: Grade, m: { lines: number; modules: number; 
   return { ...g, grades: l.join(""), notes };
 }
 
+/** The block earlier versions put on top of a PR / MR description; stripped when the grade moves to a comment. */
 const START = "<!-- noop-grade -->";
 const END = "<!-- /noop-grade -->";
 
@@ -160,32 +161,51 @@ export function webColor(l: Letter | null): string {
  *  The letter stays in the page's own font: colored math letters come out in a serif italic that is hard to read. */
 const swatch = (color: string) => `$\\color{${color}}\\blacksquare$`;
 
-/** Whether a PR / MR description is written in Chinese: the block follows the language the project's PRs use. */
+/** Whether a PR / MR description is written in Chinese: the grade follows the language the project's PRs use. */
 export const isChineseText = (text: string): boolean => /[\u4e00-\u9fff]/.test(text.replace(/<!--[\s\S]*?-->/g, ""));
 
-/** The block that opens a PR / MR description: one line of scores, each marked with its color, and a one-line legend.
- *  The evidence stays in the app: a reviewer of the PR needs the scores at a glance, not the agent's reasoning. */
-export function gradeMarkdown(g: Grade, zh: boolean): string {
+/** Whose grade a comment carries: the agent's own work ("self"), or a PR Noop reviewed ("review"). */
+export type GradeKind = "self" | "review";
+
+/** The hidden first line of a grade comment: which kind, and what it said, so an unchanged grade is not posted twice. */
+export const gradeMarker = (kind: GradeKind, g: Grade, head = ""): string =>
+  `<!-- noop-grade:${kind} ${letters(g.grades).join("")} ${g.fit ?? "-"} ${head.slice(0, 7) || "-"} -->`;
+
+/** The marker of the latest grade comment of `kind` among a PR's / MR's comments (oldest first), if any. */
+export function lastGradeMarker(comments: string[], kind: GradeKind): string | null {
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const m = comments[i].match(new RegExp(`<!-- noop-grade:${kind} [^>]*-->`));
+    if (m) return m[0];
+  }
+  return null;
+}
+
+/** A grade comment on a PR / MR: one line of scores, each marked with its color, and a one-line legend.
+ *  The evidence stays in the app: a reviewer of the PR needs the scores at a glance, not the agent's reasoning.
+ *  A comment, not the description: the merge commit stays free of it, and each later run adds its own. */
+export function gradeMarkdown(g: Grade, zh: boolean, opts: { kind?: GradeKind; head?: string; signature?: string } = {}): string {
   const t = labels(zh);
+  const kind = opts.kind ?? "self";
   const l = letters(g.grades);
   const score = attention(g.grades);
   const mark = (x: Letter, text: string = x) => `${swatch(webColor(x))} ${text}`;
+  const title = kind === "review" ? t.review : t.title;
   const head = [
-    `**${t.title}**`,
+    `**${title}**${opts.head ? ` \`${opts.head.slice(0, 7)}\`` : ""}`,
     score === null ? `${t.score} —` : mark(tier(score)!, `${t.score} **${score} ${tier(score)}**`),
     ...(g.fit ? [t.fit[g.fit]] : []),
     ...l.map((x, i) => mark(x, `${t.dims[i]} **${x === "?" ? t.pending : x}**`)),
   ].join(" · ");
   // at full size: inside <sub> the squares sit on the baseline below the raised letters
   const legend = `${(["S", "A", "B"] as Letter[]).map((x) => mark(x)).join(" ")} ${mark("C", "C D")}${zh ? "：" : ": "}${t.legend}`;
-  return [START, head, legend, END].join("\n");
+  return [gradeMarker(kind, g, opts.head), head, legend, ...(opts.signature ? ["", opts.signature] : [])].join("\n");
 }
 
-/** `body` with the grade block at its top: an earlier block is replaced, the rest kept as it was. */
-export function withGradeBlock(body: string, block: string): string {
+/** `body` without the grade block earlier versions put on top of it; unchanged when it has none. */
+export function withoutGradeBlock(body: string): string {
   const s = body.indexOf(START), e = body.indexOf(END);
-  const rest = s >= 0 && e > s ? body.slice(0, s) + body.slice(e + END.length) : body;
-  return `${block}\n\n${rest.trim()}`.trimEnd() + "\n";
+  if (s < 0 || e < s) return body;
+  return `${body.slice(0, s)}${body.slice(e + END.length)}`.trim() + "\n";
 }
 
 /** PR / MR links in a text: GitHub pull requests and GitLab merge requests, each once. */
@@ -207,4 +227,5 @@ The owner reviews by your grade, so make it checkable: a flattering grade the di
 Tie-breaks: lines vs modules → the higher. Doing unasked things is drift; choosing how is calls. Risk is the worst plausible outcome. Proof counts only what ran in this run.
 "fit" against the smallest change that fully meets the request: "over" (extra layers, options, features), "right", or "under" (requested cases, errors, platforms or tests missing), with what is extra or missing.
 Format: "grades": {"drift": "C: also renamed two helpers in the file", "size": "C: 34 product lines in src/", "risk": "B: changes the task list order; revertible", "proof": "C: sort.test.ts added, 12 pass; CI running", "calls": "B: order unspecified, newest-first like the chat list", "fit": "right: one comparator and its test"}, plus "prs": ["<every PR / MR this run opened or updated>"].
-Noop stamps the scores on those PRs / MRs itself; do not write them into descriptions. Omit "grades" for lookups, reviews of others' work, no-change routine runs and delegated runs.`;
+Noop posts the scores as a comment on those PRs / MRs itself, in each PR's own language, and adds a new one when a later run regrades; do not write them into descriptions or comments. Omit "grades" for lookups, reviews of others' work, no-change routine runs and delegated runs.
+Reviewing someone else's PR / MR: grade it by the same rubric in "reviewed" (one entry per PR / MR you reviewed this run, the author's work in place of yours: drift from its stated goal or issue, proof gap = what its tests and CI did not cover, calls = choices it leaves to the maintainer). Noop posts it as a review-grade comment; do not repeat the scores in your review text.`;

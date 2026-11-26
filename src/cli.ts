@@ -32,13 +32,13 @@ import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, retireUnrunnableProposed, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
-import { CODE, L, isEnglish, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, isEnglish, signature, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, networkBlocked, pendingLoginIds, pickAccount, reportFailure, reportNetworkBlock, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
 import { strayWorkspaces, taskWorkspace, workspaceRoot } from "./workspaces";
 import { gradeMeta, parseGrades } from "../app/grading";
-import { measuredGrade, runReviews, stampReviews } from "./review-grade";
+import { measuredGrade, reviewedGrades, runReviews, stampReviews } from "./review-grade";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
@@ -394,11 +394,16 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     if (res.status !== "done") void track(handleFailure(meta, body, res.summary, out, cfg, host));
   }
   await _commitPush(`[${host}] ${res.status} ${meta.id}: ${meta.title}`);
-  // the scores open each PR / MR the run named, so a reviewer sees them before the diff
-  if (grade && res.status !== "failed") {
-    const links = reviews;
-    if (links.length) void track(stampReviews(links, grade).then((ok) => {
-      if (ok.length < links.length) console.warn(`[grade] ${meta.id}: could not update ${links.filter((l) => !ok.includes(l)).join(", ")}`);
+  // the scores go in a comment on each PR / MR the run named, so a reader sees them before the diff; a review run's grades
+  // of the PRs it reviewed go on those PRs the same way
+  if (res.status !== "failed") {
+    const sig = { signature: signature(agent, host, cfg) };
+    const posts = [
+      ...(grade && reviews.length ? [{ links: reviews, grade, opts: { ...sig, kind: "self" as const } }] : []),
+      ...reviewedGrades(res.reviewed).map((r) => ({ links: [r.url], grade: r.grade, opts: { ...sig, kind: "review" as const } })),
+    ];
+    for (const p of posts) void track(stampReviews(p.links, p.grade, undefined, p.opts).then((ok) => {
+      if (ok.length < p.links.length) console.warn(`[grade] ${meta.id}: could not comment on ${p.links.filter((l) => !ok.includes(l)).join(", ")}`);
     }));
   }
   });
