@@ -24,6 +24,8 @@ export type HubEvent = {
 export type HostInfo = {
   host: string;
   caps: string[];
+  /** The fleet's primary: it runs the server, routines and the judge. */
+  primary?: boolean;
   seen?: string;
   busy?: number;
   stats?: { loadRatio?: number; load1?: number; cores?: number; memFreePct?: number; diskFreeGB?: number; diskFreePct?: number; [k: string]: unknown };
@@ -318,7 +320,7 @@ export type SettingsView = {
     max_parallel: number | null;
     media_days?: number;
     /** Machines and their task priority (higher takes tasks first; 0 by default). */
-    hosts?: { host: string; priority: number }[];
+    hosts?: { host: string; priority: number; primary?: boolean }[];
   };
   options: { clis: string[][]; autonomy: string[] };
 };

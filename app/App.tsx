@@ -2121,6 +2121,7 @@ function MachineDetail(props: { hub: Hub; host: string; wide: boolean; onTask: (
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Indicator status="online" />
               <Text style={{ userSelect: "text", fontSize: 20, fontWeight: "600", color: colors.text }}>{h()!.host}</Text>
+              <If when={h()!.primary}><PrimaryBadge host={h()!.host} /></If>
             </View>
             <Text style={{ fontSize: 14, color: colors.muted }}>
               {[L("Online", "在线"), [h()!.os ?? osOf(h()!), h()!.arch].filter(Boolean).join(" "), h()!.seen ? L(`Seen ${ago(h()!.seen)}`, `心跳 ${ago(h()!.seen)}`) : "", L(`${h()!.busy ?? 0} running`, `${h()!.busy ?? 0} 个运行中`)].filter(Boolean).join(" · ")}
@@ -2460,6 +2461,7 @@ function Sidebar(props: {
               <SidebarRow onPress={() => props.onMachine(h().host)} selected={props.machine() === h().host} title={L(`Load ${loadOf(h())}% · Disk ${h().stats?.diskFreeGB ?? "?"} GB free · ${h().busy ?? 0} running`, `负载 ${loadOf(h())}% · 磁盘 ${h().stats?.diskFreeGB ?? "?"}GB · ${h().busy ?? 0} 个运行中`)}>
                 <Indicator status="online" />
                 <Text style={rowText()}>{h().host}</Text>
+                <If when={h().primary}><PrimaryBadge host={h().host} /></If>
                 <If when={(h().busy ?? 0) > 0}>
                   <Text style={{ fontSize: 13, color: colors.muted, fontVariant: ["tabular-nums"] }}>{L(`${h().busy} running`, `${h().busy} 运行中`)}</Text>
                 </If>
@@ -2797,7 +2799,16 @@ function PriorityInput(props: { host: string; value: number; onChange: (value: n
   );
 }
 /** Machine priority rows: changes stay a local draft until Save sends them in one write (clicks never write). */
-function HostPriorityRows(props: { hosts: { host: string; priority: number }[]; save: (patch: Record<string, unknown>) => Promise<void>; row: (host: string, index: number, input: JSX.Element) => JSX.Element }) {
+/** Marks the fleet's primary wherever machines are listed. */
+function PrimaryBadge(props: { host: string }) {
+  return (
+    <View testID={`primary-${props.host}`} accessibilityLabel={L(`${props.host} is the primary`, `${props.host} 是主控机`)}>
+      <Badge label={L("Primary", "主控机")} variant="info" />
+    </View>
+  );
+}
+
+function HostPriorityRows(props: { hosts: { host: string; priority: number; primary?: boolean }[]; save: (patch: Record<string, unknown>) => Promise<void>; row: (host: string, index: number, input: JSX.Element, primary: boolean) => JSX.Element }) {
   const draft = signal<Record<string, number>>({});
   const busy = signal(false);
   const value = (h: { host: string; priority: number }) => draft()[h.host] ?? h.priority;
@@ -2813,7 +2824,7 @@ function HostPriorityRows(props: { hosts: { host: string; priority: number }[]; 
       <Each of={props.hosts}>
         {(h, i) => props.row(h().host, i(), (
           <PriorityInput host={h().host} value={value(h())} onChange={(v) => draft.update((d) => ({ ...d, [h().host]: v }))} />
-        ))}
+        ), !!h().primary)}
       </Each>
       <If when={changed().length > 0}>
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8, paddingHorizontal: 16, paddingVertical: 12 }}>
@@ -3366,9 +3377,12 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               </Group>
               <If when={(e().hosts ?? []).length > 0}>
               <Group title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
-                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, _i, input) => (
+                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, _i, input, primary) => (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
-                    <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{host}</Text>
+                    <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text style={{ flexShrink: 1, fontSize: 15.5, color: colors.text, numberOfLines: 1 }}>{host}</Text>
+                      <If when={primary}><PrimaryBadge host={host} /></If>
+                    </View>
                     {input}
                   </View>
                 )} />
@@ -4105,6 +4119,7 @@ function VersionRows(props: { hub: Hub }) {
           return (
             <SetRow
               label={h().host}
+              badge={h().primary ? <PrimaryBadge host={h().host} /> : undefined}
               value={h().rev?.slice(0, 7) ?? L("Unknown", "未知")}
               chevron={!!h().rev_url}
               onPress={h().rev_url ? () => void openUrl(h().rev_url!).catch(() => {}) : undefined}
@@ -4138,6 +4153,8 @@ function VersionRows(props: { hub: Hub }) {
 
 function SetRow(props: {
   label: string;
+  /** A tag right after the label (the primary machine). */
+  badge?: JSX.Element;
   detail?: string;
   value?: string;
   first?: boolean;
@@ -4168,8 +4185,11 @@ function SetRow(props: {
       </If>
       {props.leading}
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minWidth: 0 }}>
         <Text
           style={{
+            flexShrink: 1,
+            flexGrow: props.badge ? 0 : 1,
             fontSize: 16,
             textAlign: props.tone === "danger" && !props.trailing && !props.chevron ? "center" : "left",
             color: props.disabled ? colors.faint : props.tone === "danger" ? colors.danger : props.tone === "accent" ? colors.info : colors.text,
@@ -4178,6 +4198,8 @@ function SetRow(props: {
         >
           {props.label}
         </Text>
+        {props.badge}
+        </View>
         <If when={props.detail}>
           <Text style={{ fontSize: 13, lineHeight: 18, color: colors.muted }}>{props.detail}</Text>
         </If>
@@ -4328,7 +4350,7 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
             </Section>
             <If when={(e().hosts ?? []).length > 0}>
               <Section title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
-                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, i, input) => <SetRow first={i === 0} label={host} trailing={input} />} />
+                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, i, input, primary) => <SetRow first={i === 0} label={host} badge={primary ? <PrimaryBadge host={host} /> : undefined} trailing={input} />} />
               </Section>
             </If>
           </View>

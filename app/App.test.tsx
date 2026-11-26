@@ -26,7 +26,7 @@ const status = {
   decisions: [{ id: "D-0001", kind: "decision", question: "要不要升级依赖？", held: true }],
   recent: [{ id: "T-0005", title: "修复登录页", agent: "dev", host: "linux-box", state: "done", finished: ts(30), updated: ts(30) }],
   hosts: [{
-    host: "linux-box", caps: ["os:linux", "arch:x64", "cli:claude"], seen: ts(59), busy: 1,
+    host: "linux-box", caps: ["os:linux", "arch:x64", "cli:claude"], primary: true, seen: ts(59), busy: 1,
     stats: { loadRatio: 0.42, cores: 8, memFreePct: 40, diskFreeGB: 120, diskFreePct: 60 },
     os: "linux", arch: "x64", lan: "192.168.1.20", clis: ["claude"], accounts: [{ cli: "claude", name: "default", state: "ok" }],
     running: [{ id: "T-0007", title: "截图检查 gallery", agent: "dev", started: ts(50) }],
@@ -956,10 +956,12 @@ describe("channel", () => {
     expect(app.shows("c1cc085")).toBe(true);
     await app.waitFor("id:lan-linux-box");
     expect(app.shows("192.168.1.20")).toBe(true);
+    expect(app.count("id:primary-linux-box")).toBe(2); // the primary is marked in the sidebar and on its page
     await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-version");
     await app.waitFor("id:version-linux-box");
+    await app.waitFor("id:primary-linux-box");
     app.onDialog((d) => (d.title === "Update all machines?" ? "Cancel" : null));
     await app.press("id:update-fleet");
     await app.waitUntil(() => app.dialogs().length === 1);
@@ -1507,7 +1509,7 @@ describe("team settings", () => {
 
   test("sets a machine's task priority", async () => {
     const puts: unknown[] = [];
-    let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2, hosts: [{ host: "mini", priority: 0 }] }, options: { clis: [], autonomy: [] } };
+    let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2, hosts: [{ host: "mini", priority: 0, primary: true }, { host: "box", priority: 0 }] }, options: { clis: [], autonomy: [] } };
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
       network: {
@@ -1516,7 +1518,7 @@ describe("team settings", () => {
         [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
           const p = JSON.parse(r.body!);
           puts.push(p);
-          view = { ...view, effective: { ...view.effective, hosts: [{ host: "mini", priority: p.fleet.host_priority.mini }] } };
+          view = { ...view, effective: { ...view.effective, hosts: [{ host: "mini", priority: p.fleet.host_priority.mini, primary: true }, { host: "box", priority: 0 }] } };
           return { body: view };
         },
       },
@@ -1525,6 +1527,8 @@ describe("team settings", () => {
     await app.press("id:settings");
     await app.press("id:settings-tab-parallel");
     await app.waitFor("text:Machine priority");
+    await app.waitFor("id:primary-mini"); // the primary is marked, the other machine is not
+    expect(app.count("id:primary-box")).toBe(0);
     await app.press("id:priority-mini-inc");
     await app.press("id:priority-mini-inc");
     expect(puts).toEqual([]); // clicks stay a draft

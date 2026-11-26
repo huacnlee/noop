@@ -194,13 +194,18 @@ type TaskView = ReturnType<typeof taskView>;
 const taskStore = () => localStore({ acts: {}, status: () => ({}), feed: () => [] });
 
 /** Per host: what it runs now, what it finished lately, and (for this machine) its AI accounts. */
+/** The fleet's primary: the one [fleet] primary names, else this machine (only the primary serves the API). */
+const primaryHost = (cfg: Cfg | null) => String(cfg?.fleet?.primary ?? "") || (cfg ? hostName(cfg) : "");
+
 function hostViews(active: TaskView[], finished: TaskView[]) {
   let cfg: Cfg | null = null;
   try { cfg = loadConfig(); } catch {}
   const me = cfg ? hostName(cfg) : "";
+  const primary = primaryHost(cfg);
   const ran = (t: TaskView, h: string) => t.host === h || t.runs.some((r) => r.host === h);
   return onlineHosts(cfg ?? {}).map((h) => ({
     ...h,
+    primary: h.host === primary,
     os: h.caps.find((c) => c.startsWith("os:"))?.slice(3),
     arch: h.caps.find((c) => c.startsWith("arch:"))?.slice(5),
     clis: h.caps.filter((c) => c.startsWith("cli:")).map((c) => c.slice(4)),
@@ -302,7 +307,7 @@ export function settingsView() {
       routines: (cfg.routine ?? []).map((r: any) => ({ name: r.name, desc: routineDesc(r), every: r.every, agent: r.agent, enabled: r.enabled !== false })),
       max_parallel: cfg.host?.max_parallel ?? null,
       media_days: mediaDays(cfg),
-      hosts: knownHosts().map((host) => ({ host, priority: hostPriority(cfg, host) })),
+      hosts: knownHosts().map((host) => ({ host, priority: hostPriority(cfg, host), primary: host === primaryHost(cfg) })),
     },
     options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
   };
