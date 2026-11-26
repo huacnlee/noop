@@ -93,15 +93,13 @@ export function gradeOf(meta: Record<string, string | undefined>, withNotes = tr
   return { grades: meta.grade, fit: asFit(meta.grade_fit), ...(notes ? { notes } : {}) };
 }
 
-type Labels = { dims: string[]; short: string[]; fit: Record<Fit, string>; score: string; pending: string; title: string; review: string; legend: string; key: [Letter, string][] };
+type Labels = { dims: string[]; short: string[]; fit: Record<Fit, string>; score: string; pending: string; title: string; legend: string };
 export function labels(zh: boolean): Labels {
   return zh
     ? { dims: ["偏题", "体量", "风险", "验证缺口", "自主决定"], short: ["偏", "量", "险", "验", "决"], fit: { over: "过度", right: "恰当", under: "偏简" },
-        score: "关注分", pending: "待", title: "Noop 自评", review: "Noop 审查评分", legend: "越高越需要你看，S 最高，D 最低；关注分 = 五项之和 × 4",
-        key: [["S", "必须细看"], ["A", "重点看"], ["B", "看一眼"], ["C", "基本放心"]] }
+        score: "关注分", pending: "待", title: "Noop 自评", legend: "越高越需要你看，S 最高，D 最低；关注分 = 五项之和 × 4" }
     : { dims: ["Drift", "Size", "Risk", "Proof gap", "Own calls"], short: ["Dr", "Sz", "Rk", "Pf", "Cl"], fit: { over: "Over-built", right: "Right-sized", under: "Too thin" },
-        score: "Attention", pending: "?", title: "Noop self-grade", review: "Noop review grade", legend: "higher means look harder, S highest, D lowest; attention = sum of the five × 4",
-        key: [["S", "look closely"], ["A", "check"], ["B", "glance"], ["C", "fine"]] };
+        score: "Attention", pending: "?", title: "Noop self-grade", legend: "higher means look harder, S highest, D lowest; attention = sum of the five × 4" };
 }
 
 /** A changed file as a PR lists it. */
@@ -159,9 +157,6 @@ export function webColor(l: Letter | null): string {
   return l === "S" || l === "?" ? "#e5534b" : l === "A" ? "#db6d28" : l === "B" ? "#4184e4" : "#8b949e";
 }
 
-/** Whether a PR / MR description is written in Chinese: the grade follows the language the project's PRs use. */
-export const isChineseText = (text: string): boolean => /[\u4e00-\u9fff]/.test(text.replace(/<!--[\s\S]*?-->/g, ""));
-
 /** Whose grade a comment carries: the agent's own work ("self"), or a PR Noop reviewed ("review"). */
 export type GradeKind = "self" | "review";
 
@@ -178,42 +173,62 @@ export function lastGradeMarker(comments: string[], kind: GradeKind): string | n
   return null;
 }
 
+/** What a grade comment says, in English and Chinese side by side: the owner reads both, whatever the project writes in. */
+const WEB = {
+  dims: ["Drift 偏题", "Size 体量", "Risk 风险", "Proof gap 验证缺口", "Own calls 自主决定"],
+  fit: { over: "Over-built 过度", right: "Right-sized 恰当", under: "Too thin 偏简" } as Record<Fit, string>,
+  score: "Attention 关注分", title: "Noop self-grade 自评", review: "Noop review grade 审查评分",
+  key: [["S", "细看 look closely"], ["A", "重点看 check"], ["B", "看一眼 glance"], ["C", "放心 fine"]] as [Letter, string][],
+};
+
+/** The chart's ink on a transparent background, per GitHub theme: "auto" is a mid gray for clients that ignore `<picture>`. */
+const INK = { light: "#1f2328", dark: "#e6edf3", auto: "#8b949e" } as const;
+export type ChartTheme = keyof typeof INK;
+
+/** Rendered width of the chart on the page, in CSS pixels; the PNG is twice that for sharp text. */
+export const CHART_WIDTH = 400;
+
 /** A radar chart of the five grades as an image URL (quickchart.io renders Chart.js to PNG): GitHub / GitLab comments
- *  cannot run scripts or keep inline SVG, and an image is the one form every client, the mobile apps included, shows. */
-export function radarUrl(g: Grade, dims: string[], key: [Letter, string][] = []): string {
+ *  cannot run scripts, keep inline SVG or load data: images, and an image is the one form every client, the mobile apps
+ *  included, shows. Transparent, with ink for one theme; the legend is the color key, in English and Chinese. */
+export function radarUrl(g: Grade, theme: ChartTheme = "auto"): string {
   const l = letters(g.grades);
   const score = attention(g.grades);
   const line = webColor(score === null ? "?" : tier(score));
+  const ink = INK[theme], grid = "rgba(139,148,158,0.35)";
   const c = {
     type: "radar",
     data: {
-      labels: dims.map((d, i) => `${d} ${l[i]}`),
-      datasets: [{ label: score === null ? "?" : `${score}/100`, data: l.map((x) => POINTS[x]), backgroundColor: `${line}40`, borderColor: line, pointBackgroundColor: l.map((x) => webColor(x)), pointBorderColor: l.map((x) => webColor(x)), pointRadius: 5 },
+      labels: WEB.dims.map((d, i) => `${d} ${l[i]}`),
+      datasets: [{ label: `${WEB.score} ${score === null ? "?" : `${score}/100`}`, data: l.map((x) => POINTS[x]), backgroundColor: `${line}40`, borderColor: line, pointBackgroundColor: l.map((x) => webColor(x)), pointBorderColor: l.map((x) => webColor(x)), pointRadius: 4 },
         // The color key lives in the chart's own legend: empty series, one per color, so the comment holds one image.
-        ...key.map(([x, text]) => ({ label: `${x === "C" ? "C/D" : x} ${text}`, data: [], backgroundColor: webColor(x), borderColor: webColor(x) }))],
+        ...WEB.key.map(([x, text]) => ({ label: `${x === "C" ? "C/D" : x} ${text}`, data: [], backgroundColor: webColor(x), borderColor: webColor(x) }))],
     },
-    options: { legend: { position: "bottom", labels: { boxWidth: 10, fontSize: 11, padding: 8 } }, layout: { padding: 2 },
-      scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { fontSize: 12 } } },
+    options: { legend: { position: "bottom", labels: { boxWidth: 10, fontSize: 11, padding: 6, fontColor: ink } }, layout: { padding: 2 },
+      scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { fontSize: 11, fontColor: ink }, gridLines: { color: grid }, angleLines: { color: grid } } },
   };
-  return `https://quickchart.io/chart?w=380&h=250&bkg=white&f=svg&c=${encodeURIComponent(JSON.stringify(c))}`;
+  return `https://quickchart.io/chart?w=${CHART_WIDTH}&h=290&devicePixelRatio=2&bkg=transparent&c=${encodeURIComponent(JSON.stringify(c))}`;
 }
 
-/** A grade comment on a PR / MR: a one-line verdict, and one compact radar chart whose legend
- *  is the color key. The evidence stays in the app: a reviewer needs the scores at a glance.
+/** A grade comment on a PR / MR: a one-line verdict, and one compact radar chart whose legend is the color key,
+ *  drawn for GitHub's light or dark theme through `<picture>`. English and Chinese side by side.
+ *  The evidence stays in the app: a reviewer needs the scores at a glance.
  *  A comment, not the description: the merge commit stays free of it, and each later run adds its own. */
-export function gradeMarkdown(g: Grade, zh: boolean, opts: { kind?: GradeKind; head?: string; signature?: string } = {}): string {
-  const t = labels(zh);
+export function gradeMarkdown(g: Grade, opts: { kind?: GradeKind; head?: string; signature?: string } = {}): string {
   const kind = opts.kind ?? "self";
   const l = letters(g.grades);
   const score = attention(g.grades);
-  const title = kind === "review" ? t.review : t.title;
+  const title = kind === "review" ? WEB.review : WEB.title;
   const head = [
     `**${title}**${opts.head ? ` \`${opts.head.slice(0, 7)}\`` : ""}`,
-    score === null ? `${t.score} —` : `${t.score} **${score}/100 ${tier(score)}**`,
-    ...(g.fit ? [t.fit[g.fit]] : []),
+    score === null ? `${WEB.score} —` : `${WEB.score} **${score}/100 ${tier(score)}**`,
+    ...(g.fit ? [WEB.fit[g.fit]] : []),
   ].join(" · ");
-  return [gradeMarker(kind, g, opts.head), head, "", `![${t.dims.map((d, i) => `${d} ${l[i]}`).join(", ")}](${radarUrl(g, t.dims, t.key)})`,
-    ...(opts.signature ? ["", opts.signature] : [])].join("\n");
+  const alt = WEB.dims.map((d, i) => `${d} ${l[i]}`).join(", ");
+  const chart = `<picture><source media="(prefers-color-scheme: dark)" srcset="${radarUrl(g, "dark")}">`
+    + `<source media="(prefers-color-scheme: light)" srcset="${radarUrl(g, "light")}">`
+    + `<img alt="${alt}" width="${CHART_WIDTH}" src="${radarUrl(g, "auto")}"></picture>`;
+  return [gradeMarker(kind, g, opts.head), head, "", chart, ...(opts.signature ? ["", opts.signature] : [])].join("\n");
 }
 
 /** `body` without the grade block earlier versions put on top of it; unchanged when it has none. */

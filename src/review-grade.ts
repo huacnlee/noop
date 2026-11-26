@@ -1,6 +1,6 @@
 // Posts a task's self-grade as a comment on the PRs / MRs it opened, and a reviewer's grade on the PRs it reviewed,
 // so a reader sees the scores before the diff. One read and at most one comment per PR, only when a run returns grades.
-import { type ChangedFile, type Grade, type GradeKind, gradeMarker, gradeMarkdown, isChineseText, lastGradeMarker, measureSize, parseGrades, reviewLinks, withMeasuredSize, withoutGradeBlock } from "../app/grading";
+import { type ChangedFile, type Grade, type GradeKind, gradeMarker, gradeMarkdown, lastGradeMarker, measureSize, parseGrades, reviewLinks, withMeasuredSize, withoutGradeBlock } from "../app/grading";
 
 type Run = (cmd: string[], input?: string, env?: Record<string, string>) => Promise<{ code: number; out: string }>;
 
@@ -86,7 +86,7 @@ export async function stampReview(url: string, grade: Grade, exec: Run = run, op
     if (edit.code !== 0) return false;
   }
   if (lastGradeMarker(t.comments, kind) === gradeMarker(kind, grade, t.head)) return true;
-  const text = gradeMarkdown(grade, isChineseText(clean), { kind, head: t.head, signature: opts.signature });
+  const text = gradeMarkdown(grade, { kind, head: t.head, signature: opts.signature });
   const post = mr ? await exec(["glab", "mr", "note", mr.iid, "-R", mr.repo, "-m", text], undefined, env)
     : await exec(["gh", "pr", "comment", url, "--body-file", "-"], text);
   return post.code === 0;
