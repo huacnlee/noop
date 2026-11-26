@@ -38,7 +38,7 @@ import { channelPrompt, channels, resolveChannels, updateChannel } from "./chann
 import { shellBash } from "./shell";
 import { strayWorkspaces, taskWorkspace, workspaceRoot } from "./workspaces";
 import { gradeMeta, parseGrades } from "../app/grading";
-import { runReviews, stampReviews } from "./review-grade";
+import { measuredGrade, runReviews, stampReviews } from "./review-grade";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
@@ -329,6 +329,10 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     });
     return;
   }
+  // the agent's self-grade of this run, its size measured from the PRs / MRs it names (outside the lock: one read per PR)
+  const reviews = runReviews(res.prs, `${res.summary}\n${res.waiting_on ?? ""}`);
+  const selfGrade = parseGrades(res.grades);
+  const grade = selfGrade && reviews.length && res.status !== "failed" ? await measuredGrade(selfGrade, reviews, !isEnglish()).catch(() => selfGrade) : selfGrade;
   await locked(async () => {
   await _pull();
 
@@ -345,8 +349,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     children.push(id);
     journal(host, `  ↳ ${id} → ${f.agent ?? agent}: ${f.title}`);
   }
-  // the agent's self-grade of this run (a later run without one keeps the earlier grade)
-  const grade = parseGrades(res.grades);
+  // a later run without a grade keeps the earlier one
   const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined, ...(grade ? gradeMeta(grade) : {}) };
   const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
@@ -393,7 +396,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   await _commitPush(`[${host}] ${res.status} ${meta.id}: ${meta.title}`);
   // the scores open each PR / MR the run named, so a reviewer sees them before the diff
   if (grade && res.status !== "failed") {
-    const links = runReviews(res.prs, `${res.summary}\n${res.waiting_on ?? ""}`);
+    const links = reviews;
     if (links.length) void track(stampReviews(links, grade, !isEnglish()).then((ok) => {
       if (ok.length < links.length) console.warn(`[grade] ${meta.id}: could not update ${links.filter((l) => !ok.includes(l)).join(", ")}`);
     }));
