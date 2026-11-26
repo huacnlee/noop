@@ -66,10 +66,24 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
     console.log(`✔ joined ${url}; data mirrored to ${DATA}\n  next: hub install   (runs the daemon as a service)`);
     return;
   }
-  if (await syncMode() === "remote") await pull(); // re-running init: start from what the Worker has
+  // `init --primary <url> --token <HUB_TOKEN>`: adopt a Worker deployed with the Deploy to Cloudflare button
+  // (deploy/cloudflare) instead of deploying one with wrangler
+  const adopt = opts.primary && opts.worker ? adoptedWorker(opts.worker, opts.token) : undefined;
+  if (adopt === null) { process.exitCode = 1; return; }
+  if (adopt) writeHubToml({ cloud: adopt.cloud, server: { token: adopt.token } });
+  if (await syncMode() === "remote" && !(await pull()) && adopt) { // re-running init: start from what the Worker has
+    console.error(`could not sync from ${adopt.cloud.url}: check the URL and that --token is the Worker's HUB_TOKEN`);
+    process.exitCode = 1;
+    return;
+  }
   seedTemplates();
   const cfgPath = P("config.toml");
   let cfg = readFileSync(cfgPath, "utf8");
+  if (adopt) { // record it in the shared config too, as `noop cloud deploy` does
+    const block = `[cloud]\nurl = "${adopt.cloud.url}"\nname = "${adopt.cloud.name}"\n`;
+    cfg = /^\[cloud\]/m.test(cfg) ? cfg.replace(/^\[cloud\][^\[]*/m, `${block}\n`) : `${cfg.trimEnd()}\n\n${block}`;
+    writeFileSync(cfgPath, cfg);
+  }
   if (cfg.includes('primary = "__PRIMARY__"')) {
     cfg = cfg.replace('primary = "__PRIMARY__"', `primary = "${me}"`)
       .replace('# url = "__URL__"', `url = "http://${me}:8787"`);
@@ -87,6 +101,16 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
   }
   if (await syncMode() === "remote" && !(await commitPush(`[${me}] init`))) console.error("could not push the initial data; it will sync on the next daemon tick");
   console.log(`✔ data: ${DATA}\n  next: hub install   (runs the daemon as a service)`);
+}
+
+/** The [cloud] settings for a Worker someone already deployed (the Deploy to Cloudflare button), or null with the
+ *  reason printed. The Worker name is the first label of a workers.dev address; a custom domain keeps "noop". */
+export function adoptedWorker(worker: string, token?: string): { cloud: { url: string; name: string }; token: string } | null {
+  const url = worker.trim().replace(/\/$/, "");
+  if (!/^https?:\/\/[^/\s]+$/.test(url)) { console.error(`not a Worker address: ${worker} (e.g. https://noop.<you>.workers.dev)`); return null; }
+  if (!token?.trim()) { console.error("--token is required: the HUB_TOKEN you entered when deploying the Worker"); return null; }
+  const name = url.match(/^https:\/\/([a-z0-9-]+)\.[a-z0-9-]+\.workers\.dev$/i)?.[1] ?? "noop";
+  return { cloud: { url, name }, token: token.trim() };
 }
 
 function writeLocalConfig(me: string) {

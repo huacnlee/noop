@@ -97,6 +97,8 @@ pre { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; pad
 .downloads { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 8px; }
 .downloads .text-link { font-size: inherit; }
 .script-link { flex-shrink: 0; font-size: 12px; text-underline-offset: 4px; text-decoration-color: var(--border); color: var(--muted); }
+.deploy-button { display: inline-flex; margin-top: 8px; border-radius: 6px; }
+.deploy-button img { display: block; height: 32px; width: auto; }
 .requirements { font-size: 12px; line-height: 1.85; color: var(--muted); margin: 12px 0 0; max-width: 76em; }
 .requirements .text-link { font-size: inherit; white-space: nowrap; }
 
@@ -161,7 +163,7 @@ footer .text-link { font-size: inherit; }
   .actions { min-height: 0; }
   .install-heading { gap: 8px; }
   .install-heading h2 { font-size: 15px; }
-  .install-tabs { gap: 0; }
+  .install-tabs { gap: 0; min-width: 0; overflow-x: auto; scrollbar-width: none; }
   .install-tabs [role=tab] { padding: 8px 6px; font-size: 12px; white-space: nowrap; }
   .quick-install { padding-bottom: 32px; }
   .command-block { flex-direction: column; align-items: stretch; gap: 0; }

@@ -25,6 +25,23 @@ curl -fsSL https://huacnlee.github.io/noop/install.sh | bash -s -- --primary
 
 You'll be asked to log in to your Cloudflare account once (the free plan is enough).
 
+### Or deploy to Cloudflare with one click
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/huacnlee/noop/tree/main/deploy/cloudflare)
+
+Prefer the Cloudflare dashboard to logging in from a terminal (for example on a headless server)? The button copies a small template to your GitHub and deploys the Noop Worker, with the web client, to your own account. When it asks, enter:
+
+- `HUB_TOKEN`: a long random string, for example from `openssl rand -hex 32`. Keep it, the primary needs it.
+- `HUB_OWNER_EMAIL`: your email address. Only this address can sign in.
+
+Then connect the primary with your Worker address and that token:
+
+```bash
+curl -fsSL https://huacnlee.github.io/noop/install.sh | bash -s -- --primary https://noop.<you>.workers.dev --token <HUB_TOKEN>
+```
+
+The button deploys the latest release. To update the Worker later, retry the latest build of the Worker in the Cloudflare dashboard, or run `bunx wrangler login` once on the primary so it redeploys the Worker on each update. Email login codes also need a sender: see [deploy/cloudflare](deploy/cloudflare/README.md#email-login-codes).
+
 On macOS, install from a terminal in your logged-in desktop session. Noop starts at login using a launchd agent and prevents idle sleep while running. Keep the primary Mac logged in and awake; sleep, logout or closing the lid pauses scheduling and chat processing until it returns. The same `--primary` command works on both platforms.
 
 Add more machines whenever you like — they help when they're online and are never waited for:

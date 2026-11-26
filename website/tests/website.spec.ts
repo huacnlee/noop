@@ -110,6 +110,13 @@ test('tabs switch with mouse and keyboard and copy the chosen command', async ({
   await expect(page.getByRole('tabpanel')).toHaveCount(1);
   await first.focus();
   await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'One-click deploy', exact: true })).toBeFocused();
+  await expect(page.getByRole('tabpanel').getByRole('link', { name: 'Deploy to Cloudflare' })).toHaveAttribute('href', 'https://deploy.workers.cloudflare.com/?url=https://github.com/huacnlee/noop/tree/main/deploy/cloudflare');
+  await page.locator('[data-copy="command-cloudflare-0"]').click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`curl -fsSL ${site}/install.sh | bash -s -- --primary https://noop.<you>.workers.dev --token <HUB_TOKEN>`);
+  await page.keyboard.press('Tab');
+  await page.getByRole('tab', { name: 'One-click deploy', exact: true }).focus();
+  await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('tab', { name: 'More machines', exact: true })).toBeFocused();
   await expect(page.getByRole('tabpanel')).toHaveAttribute('id', 'panel-more');
   await page.locator('[data-copy="command-more-1"]').click();
