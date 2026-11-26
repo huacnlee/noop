@@ -260,7 +260,7 @@ function cleanupSteps(cfg: Cfg, busyRepos: Set<string>): Step[] {
 }
 
 // ------------------------------------------------------------------ agent scratch checkouts / worktrees
-// Agents put one checkout or `git worktree` per task under ~/.agent-hub/work; nothing ever removed them, so a busy
+// Agents put one checkout or `git worktree` per task under ~/.noop/work (formerly ~/.agent-hub/work); nothing ever removed them, so a busy
 // host collected 1000+ directories. Reap the ones whose task is closed, keeping anything that still holds work.
 
 /** Task ids a scratch dir name refers to: "t10829-prof", "gf-10648", "nsh-T-H0057" → T-10829, T-10648, T-H0057. */
@@ -332,9 +332,10 @@ export async function judgeScratch(dir: string, o: { open: Set<string>; busy: Se
   return "remove";
 }
 
-/** Scratch roots: resources.scratch_dirs, default ~/.agent-hub/work. ~/work is the owner's and is never reaped. */
+/** Scratch roots: resources.scratch_dirs, default the workspace root ~/.noop/work plus the old ~/.agent-hub/work.
+ *  ~/work is the owner's and is never reaped. */
 const scratchRoots = (cfg: Cfg): string[] =>
-  (cfg.resources?.scratch_dirs ?? ["~/.agent-hub/work"]).map((d: string) => d.replace(/^~/, homedir())).filter(existsSync);
+  (cfg.resources?.scratch_dirs ?? [cfg.resources?.workspace_dir ?? "~/.noop/work", "~/.agent-hub/work"]).map((d: string) => d.replace(/^~/, homedir())).filter(existsSync);
 
 let lastScratchReap = 0;
 

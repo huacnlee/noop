@@ -124,7 +124,7 @@ ${deadlinePrompt(limits)}
 ${channelPrompt()}
 
 # Task ${meta.id}: ${meta.title}
-Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.agent-hub/work — never inside the hub folder ${ROOT}, which syncs to the cloud. Reuse an existing checkout of the repo there when one is clean (e.g. ~/.agent-hub/work/<repo>, \`git fetch\` + new branch) instead of cloning again; only add a worktree when you need to edit in parallel, name it after the task (e.g. <repo>-${meta.id}), and remove it (\`git worktree remove\`) once its branch is pushed and you return done — keep it only while returning waiting   Host capabilities: ${meta.host_caps ?? ""}
+Working directory: ${workspaceNote(meta, ROOT)}   Host capabilities: ${meta.host_caps ?? ""}
 Priority: ${meta.priority}   Source: ${meta.source}
 
 ${body}
@@ -175,7 +175,7 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false, mcpArgs:
     // non-interactive: workspace-write sandbox with network, never ask for approval
     const cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write",
       "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true"];
-    for (const dir of codexWritableDirs(homedir(), cfg.resources?.work_dirs)) cmd.push("--add-dir", dir);
+    for (const dir of codexWritableDirs(homedir(), [...(cfg.resources?.work_dirs ?? []), ...(cfg.resources?.workspace_dir ? [cfg.resources.workspace_dir] : [])])) cmd.push("--add-dir", dir);
     if (c.model) cmd.push("-m", c.model);
     cmd.push(...mcpArgs);
     return [...cmd, "-"];
@@ -190,6 +190,16 @@ export function startModel(cli: string, cmd: string[], codexHome?: string): stri
   if (i >= 0 && cmd[i + 1]) return cmd[i + 1];
   if (cli === "codex") return readIf(join(codexHome, "config.toml"), 100000).match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1];
   return undefined;
+}
+
+/** Where the task runs and where scratch goes. Every Noop working copy lives under ~/.noop/work so the owner can
+ *  delete them all at once; the owner's own checkouts (and the folders around them) are never written to. */
+export function workspaceNote(meta: Record<string, string | undefined>, root = ROOT): string {
+  const ws = meta.workspace || root;
+  const repoLine = meta.repo && meta.workspace
+    ? `${ws} — your own git worktree of ${meta.repo}, made by Noop for this task (detached at the remote's default branch: fetch and create your branch here). ${meta.repo} is the owner's checkout: never switch its branch, write files in it, or create worktrees or folders inside it or next to it (no \`../<repo>-x\`).`
+    : ws;
+  return `${repoLine}   Scratch space (more checkouts, worktrees, logs, build targets): ~/.noop/work only — never the owner's source folders, never inside the hub folder ${root}, which syncs to the cloud. Name anything you add there after the task (e.g. ~/.noop/work/<repo>-${meta.id}, ~/.noop/work/${meta.id}-logs); if you need a second worktree, \`git worktree add ~/.noop/work/<repo>-${meta.id}-2\`. Remove extra worktrees (\`git worktree remove\`) once their branch is pushed and you return done; Noop removes the task's own workspace after the task closes.`;
 }
 
 /** Running agent processes by task id (so the owner can cancel one). */

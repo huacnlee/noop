@@ -36,6 +36,7 @@ import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState,
 import { accountEnv, accountsStatus, classify, failoverAccount, networkBlocked, pendingLoginIds, pickAccount, reportFailure, reportNetworkBlock, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
+import { strayWorkspaces, taskWorkspace, workspaceRoot } from "./workspaces";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
@@ -189,6 +190,9 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   let acct: NonNullable<typeof first> = first;
   const promptBody = meta.requeue_note ? `${body}\n\n> ${meta.requeue_note}\n` : body;
   let cli = acct.cli, out = "", res!: ReturnType<typeof parseResult>;
+  // a repo task works in its own worktree under ~/.noop/work, never in the owner's checkout
+  const cwd = await taskWorkspace(meta, cfg, P(), (line) => journal(host, `⚠️ ${meta.id} ${line}`));
+  const promptMeta = { ...meta, workspace: cwd };
   for (let hop = 0; ; hop++) { // quota / login trouble: switch account or CLI on this host instead of waiting it out
     cli = acct.cli;
     const model = cfg.clis?.[cli]?.model ?? (cli === "claude" ? "claude-opus-5-5" : "default");
@@ -207,7 +211,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const workCfg = limits.checkpointMinutes
       ? { ...cfg, clis: { ...cfg.clis, timeout_minutes: limits.workMinutes } }
       : cfg;
-    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note, limits), meta.repo || P(), workCfg, log, !!meta.gate_override,
+    out = await runAgent(cli, buildPrompt(promptMeta, promptBody, cfg, b.note, limits), cwd, workCfg, log, !!meta.gate_override,
       { ...b.env, ...accountEnv(acct) });
     if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; } // the owner cancelled it while it ran
     if (out.includes(RUN_LIMIT)) {
@@ -240,8 +244,8 @@ async function processTask(path: string, cfg: Cfg, host: string) {
           checkpointAt: limits.hardAt,
           hardAt: limits.hardAt,
         };
-        const checkpointOut = await runAgent(cli, buildPrompt(meta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
-          meta.repo || P(), checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
+        const checkpointOut = await runAgent(cli, buildPrompt(promptMeta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
+          cwd, checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
         if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; }
         const checkpoint = parseResult(checkpointOut);
         if (checkpoint.status !== "failed" && (checkpoint.status !== "waiting" || checkpoint.wait_check)) {
@@ -1298,6 +1302,7 @@ const HELP = `Noop — your own AI team
   noop metrics [days]         per-agent success, judge vs owner decisions (feeds self-evolution)
   noop usage                  weekly usage report (also posted every Monday by the built-in routine)
   noop agents                 list fleet members
+  noop workspaces             where task worktrees live (~/.noop/work) and any left outside it, e.g. next to your repos (lists only)
   noop notify "text"          test Slack/Discord
   noop security [--json]      check this Noop deployment (2FA, sessions, OAuth clients, allow-lists) and this machine's Noop setup
   noop 2fa setup              bind (or re-bind) the authenticator app every sign-in requires; noop 2fa confirm <code> · noop 2fa status
@@ -1455,6 +1460,14 @@ async function main() {
       return void (await cloudDeploy(cfg));
     }
     case "notify": return void console.log(await notify(rest.join(" "), cfg));
+    case "workspaces": {
+      const stray = await strayWorkspaces(cfg);
+      console.log(`Noop workspaces: ${workspaceRoot(cfg)}`);
+      if (!stray.length) return void console.log("Nothing left outside it.");
+      console.log(`Left outside it (${stray.length}; nothing was removed):`);
+      for (const s of stray) console.log(`  ${s.kind.padEnd(15)} ${s.path}${s.repo ? `  (of ${s.repo})` : ""}`);
+      return;
+    }
     default: console.log(HELP);
   }
 }
