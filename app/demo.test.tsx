@@ -65,6 +65,23 @@ describe("demo in the app", () => {
     expect(app.storage()["hub.url"]).toBe("http://demo");
   });
 
+  test("a task's self-grade shows under its result, in the task list and on its page", async () => {
+    const app = await open("./App.tsx", { network: {} });
+    await app.waitFor("id:try-demo");
+    await app.press("id:try-demo");
+    await app.waitFor("id:composer");
+    // under the agent's result in the chat
+    await app.waitFor("text:Attention 24");
+    await app.waitFor("text:Over-built");
+    // the task's own page: the radar, the meters and each grade's evidence
+    await app.press("text:T-0116");
+    await app.waitFor("id:task-grade");
+    await app.waitFor("id:task-grade-radar");
+    await app.waitFor("text:/Right-sized/");
+    await app.waitFor("text:/50 CI runs in a row passed/");
+    if (process.env.GRADE_SHOTS) await app.screenshot(`${process.env.GRADE_SHOTS}/task-grade.png`);
+  });
+
   test("the address demo signs in with the codes it shows", async () => {
     const app = await open("./App.tsx", { network: {} });
     await app.waitFor("Sign in to Noop");

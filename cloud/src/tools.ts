@@ -5,6 +5,7 @@
 // (git-synced data repo, running agents); the cloud store forwards it to the primary daemon over the existing
 // owner→fleet inbox — so a write has exactly one implementation, on the machine that owns the data.
 // Never exposed here: merge, release, settings, machine credentials (policies/autonomy.md hard gates).
+import { gradeOf } from "../../app/grading";
 
 export type Ev = { id: string; ts: string; from: string; kind: string; text: string; ref?: string; [k: string]: unknown };
 export type FileRow = { path: string; text: string; updated: string };
@@ -113,7 +114,8 @@ const historyRow = (f: FileRow, folder: string) => {
   const { meta: m } = parseDoc(f.text);
   const state = folder === "waiting" && m.wake_at ? "parked" : folder === "inbox" && m.parked && m.requires ? "nohost" : folder === "rejected" ? "cancelled" : folder;
   return { id: m.id || f.path.split("/").pop()!.replace(/\.md$/, ""), title: m.title ?? "", agent: m.agent, host: m.claimed_by, state, needs: state === "nohost" ? m.requires : undefined,
-    started: m.started, created: m.created, finished: m.finished ?? m.cancelled, updated: m.finished ?? m.cancelled ?? m.started ?? m.created ?? f.updated, attempt: m.attempt, cli: m.cli_used, model: m.model };
+    started: m.started, created: m.created, finished: m.finished ?? m.cancelled, updated: m.finished ?? m.cancelled ?? m.started ?? m.created ?? f.updated, attempt: m.attempt, cli: m.cli_used, model: m.model,
+    grade: gradeOf(m, false) };
 };
 
 /** Every task the fleet has, newest first, a page at a time. */
@@ -137,7 +139,8 @@ export function taskInfo(st: ToolStore, id: string) {
     if (!f) continue;
     // the cards it asked: they belong to its conversation
     const decisions = ["open", "closed"].flatMap((w) => st.list(`decisions/${w}/`)).map((d) => parseDoc(d.text).meta).filter((m) => m.task === id && m.id).map((m) => String(m.id));
-    return { ...historyRow(f, s), ...parseTaskBody(parseDoc(f.text).meta.title, parseDoc(f.text).body), decisions };
+    const { meta, body } = parseDoc(f.text);
+    return { ...historyRow(f, s), ...parseTaskBody(meta.title, body), grade: gradeOf(meta), decisions };
   }
   return null;
 }

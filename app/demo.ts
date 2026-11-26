@@ -71,8 +71,24 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
       t("T-0116", L("Fix the flaky login test", "修复不稳定的登录测试"), "dev", "done", 40, {
         request: L("The login test fails one run in ten on CI. Find out why and fix it.", "登录测试在 CI 上十次挂一次，查清原因并修好。"),
         runs: [{ ts: iso(40), host: "linux-box", cli: "claude", status: "done", summary: L("Fixed: the test raced the session cookie. PR #42 waits for it; 50 CI runs passed.", "修好了：测试和 session cookie 有竞争。PR #42 改为等待 cookie，CI 连跑 50 次全过。") }],
+        grade: { grades: "DDCDD", fit: "right", notes: [
+          L("Only the login test's wait changed, as asked.", "只改了登录测试的等待，正是要求的。"),
+          L("6 lines in one test helper.", "测试辅助函数里改了 6 行。"),
+          L("Test code only; a revert undoes it.", "只动测试代码，回滚即可撤销。"),
+          L("50 CI runs in a row passed.", "CI 连跑 50 次全过。"),
+          L("Obvious: a failing test.", "显而易见：测试挂了。"),
+          L("The smallest change that removes the race.", "消除竞争的最小改动。"),
+        ] },
       }),
-      t("T-0115", L("Compress the website images", "压缩网站图片"), "lead", "done", 180, { channel: "website" }),
+      t("T-0115", L("Compress the website images", "压缩网站图片"), "lead", "done", 180, { channel: "website",
+        grade: { grades: "BABCB", fit: "over", notes: [
+          L("Also added a build-time image pipeline nobody asked for.", "顺带加了一条没人要求的构建期图片流水线。"),
+          L("~210 lines across the build script and 3 pages.", "构建脚本和 3 个页面共约 210 行。"),
+          L("Every page's images now go through the new step.", "所有页面的图片都经过新步骤。"),
+          L("Built locally; the pages were not opened.", "本地构建通过，没打开页面看。"),
+          L("Picked WebP over AVIF without asking.", "没问就选了 WebP 而不是 AVIF。"),
+          L("Re-encoding the 12 large images would have been enough.", "其实重新压缩那 12 张大图就够了。"),
+        ] } }),
       t("T-0114", L("Summarise this week's issues", "汇总本周 issue"), "lead", "done", 60 * 26),
       t("T-0113", L("Translate the docs into Chinese", "把文档翻译成中文"), "lead", "inbox", 3),
     );

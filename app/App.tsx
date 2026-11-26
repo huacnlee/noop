@@ -200,6 +200,7 @@ import {
   type TaskInfo,
 } from "./hub";
 import { notificationFor, type NotifyRules } from "./notify";
+import { GradeCard, GradeChip, GradeLine } from "./grade-view";
 import { type McpServer, mcpServers, mcpProblem, mcpVars, formatPairs, parsePairs, splitCommand, joinCommand } from "./mcp-servers";
 import { DEMO_CODE, DEMO_EMAIL, DEMO_TOKEN, DEMO_TOTP, DEMO_URL, hubFetch, isDemo, openSocket, type Socket } from "./demo";
 // Email sign-in code length (cloud/src/index.ts CODE_LEN): letters and digits, case-insensitive.
@@ -1418,9 +1419,16 @@ function Message(props: {
     const task = [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref);
     return [...(e.options ?? []), task?.title ?? "", ...props.hub.events().filter((x) => x.ref === e.ref && x.id !== e.id).map((x) => x.text)].join("\n");
   };
+  // an agent's result about a task it graded: the grade at a glance, under the words
+  const graded = () => {
+    if (ask || e.kind !== "notice" || !e.ref || isHub(e.from)) return undefined;
+    const s = props.hub.status();
+    return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref)?.grade;
+  };
   const body = (
     <View style={{ gap: 10 }}>
       <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
+      <If when={graded()}>{(g) => <GradeLine testID={`msg-grade-${e.id}`} grade={g()} />}</If>
       <If when={e.attachments?.length}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 10 }}>
           <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
@@ -1772,6 +1780,7 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
                 <Indicator status={TONE[t().state ?? ""] ?? "idle"} />
                 <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{t().id}</Text>
                 <Text style={{ flex: 1, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{t().title}</Text>
+                <If when={t().grade}>{(g) => <GradeChip testID={`task-grade-${t().id}`} grade={g()} />}</If>
                 <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{`${STATE_OF()[t().state ?? ""]?.[0] ?? ""} · ${clock(t().updated ?? "")}`}</Text>
               </View>
             )}
@@ -1974,6 +1983,10 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
             {(a) => (
               <Text testID="task-activity" style={{ marginTop: 10, fontSize: 13.5, lineHeight: 19, color: a().quiet ? colors.warn : colors.muted }}>{a().text}</Text>
             )}
+          </If>
+          {/* the agent's self-grade: how hard to look at this before trusting it (notes come with the task's own read) */}
+          <If when={older()?.grade ?? t()!.grade}>
+            {(g) => <View style={{ marginTop: 16 }}><GradeCard grade={g()} wide={props.wide} /></View>}
           </If>
           <If when={t()!.state === "nohost"}>
             <View testID="task-nohost" style={{ marginTop: 16, paddingHorizontal: 14, paddingVertical: 11, borderRadius: radius.inset, backgroundColor: tints.warn }}>
@@ -2392,6 +2405,7 @@ function Sidebar(props: {
                 <SidebarRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`}>
                   <Indicator status={TONE[a().state ?? ""] ?? "idle"} />
                   <Text style={{ ...rowText(), color: colors.muted }}>{a().title}</Text>
+                  <If when={a().grade}>{(g) => <GradeChip grade={g()} />}</If>
                   <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{since(a().updated)}</Text>
                 </SidebarRow>
               )}

@@ -11,6 +11,7 @@ import { channelPrompt } from "./channels";
 import { claudeMcpConfig, codexMcpLaunch, mcpServers, usableMcp, withOAuth } from "../app/mcp-servers";
 import { claudeAuthArgs } from "./accounts";
 import { sharedSecrets } from "./secrets";
+import { GRADE_SPEC } from "../app/grading";
 
 export type Result = {
   status: "done" | "needs_decision" | "failed" | "delegated" | "waiting";
@@ -27,6 +28,10 @@ export type Result = {
   attachments?: string[];
   channels?: unknown[];
   followups?: { title: string; body?: string; agent?: string; priority?: string; repo?: string; requires?: string; host?: string }[];
+  /** The agent's self-grade of this run's work (see GRADE_SPEC); parse it with `parseGrades`. */
+  grades?: unknown;
+  /** PRs / MRs this run opened or updated: their descriptions get the grade block. */
+  prs?: unknown;
 };
 
 export type RunLimits = {
@@ -73,9 +78,12 @@ const RESULT_SPEC = () => `Finish the work, then end your final reply with EXACT
   "lessons": ["durable lesson for your own memory (optional)"],
   "attachments": ["/abs/path/screenshot.png", "/abs/path/recording.mp4", "/abs/path/report.md"],   // optional: shown to the owner with the message; a long report goes as a .md file the owner opens in the chat, never as "see file"
   "channels": ["existing-slug", {"name": "New topic", "goal": "what it is for"}],   // see # Channels; [] when none fits
-  "followups": [{"title": "...", "body": "...", "agent": "<agent id>", "priority": "normal", "difficulty": "hard if it needs deep engineering/design work", "requires": "os:macos when it needs macOS/iOS/Xcode (os:windows for Windows); omit otherwise"}]
+  "followups": [{"title": "...", "body": "...", "agent": "<agent id>", "priority": "normal", "difficulty": "hard if it needs deep engineering/design work", "requires": "os:macos when it needs macOS/iOS/Xcode (os:windows for Windows); omit otherwise"}],
+  "grades": {"drift": "D: ...", "size": "C: ...", "risk": "B: ...", "proof": "C: ...", "calls": "D: ...", "fit": "right: ..."},   // see # Self-grade
+  "prs": ["https://github.com/o/r/pull/123"]   // every PR / MR this run opened or updated
 }
-Write summary, question and options in the owner's language (${L("English", "Simplified Chinese")} unless the owner writes otherwise), plain text, no emoji; keep identifiers, links and code as they are.
+${GRADE_SPEC}
+Write summary, question, options and the grades' evidence in the owner's language (${L("English", "Simplified Chinese")} unless the owner writes otherwise), plain text, no emoji; keep identifiers, links and code as they are.
 Only use needs_decision after doing all preparation that does not depend on the answer.
 Never sit idle waiting on something slow (GitHub Actions/CI, a release, a review, a deploy): if the next step needs it, return "waiting" with waiting_on, wait_minutes and wait_check. If the PR's workflow runs are held for "Approve and run" (gh run list shows status waiting / action_required, gh pr checks shows nothing), CI will never start by itself: return wait_kind "human" and say in waiting_on that the owner must approve the run, with the PR link. Once the PR this task exists for is merged, never return waiting for extra verification (screenshots, local renders, device checks): record it as a verification gap in the summary and return done.
 Before returning "waiting", do every part of the task that does not depend on the condition (other platforms, docs, tests, screenshots, the next PR): implement and let CI verify rather than wait for a host. Waiting on another PR to merge is not a reason to stop: build on its branch or merge it locally, and note the dependency.

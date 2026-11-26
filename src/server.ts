@@ -12,6 +12,7 @@
 //   GET  /media/<file>                    → attachment
 //   GET  /api/files/list?prefix=  · GET /api/files/read?path=   → read-only rules & memory (same shape as the Worker)
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { gradeOf } from "../app/grading";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { ServerWebSocket } from "bun";
@@ -186,7 +187,7 @@ export function taskView(path: string, state: string, log: string[]) {
   const needs = state === "inbox" && m.parked && m.requires ? String(m.requires) : undefined;
   if (needs) state = "nohost";
   return { id: m.id, title: m.title, agent: m.agent, host: m.claimed_by, state, needs, waiting_on: m.waiting_on, wake_at: m.wake_at, started: m.started, created: m.created, cli: m.cli_used, model: m.model,
-    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, request, runs, steps };
+    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, grade: gradeOf(m, false), request, runs, steps };
 }
 
 type TaskView = ReturnType<typeof taskView>;
