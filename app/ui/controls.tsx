@@ -281,13 +281,14 @@ function Glyph(props: { name: IconName; size: number; tint: string }) {
 export type BadgeVariant = "neutral" | "accent" | "info" | "warn" | "danger";
 
 /** A short tag: a tone's tint behind its color. Most badges stay neutral. */
-export function Badge(props: { label: string; variant?: BadgeVariant }) {
+export function Badge(props: { label: string; variant?: BadgeVariant; size?: "sm" }) {
+  const sm = () => props.size === "sm";
   const v = () => props.variant ?? "neutral";
   const fg = () => (v() === "neutral" ? colors.muted : v() === "accent" ? colors.text : colors[v() as "info" | "warn" | "danger"]);
   const bg = () => (v() === "neutral" ? alpha(colors.text, fill.rest) : tints[v() as "accent" | "info" | "warn" | "danger"]);
   return (
-    <View style={{ height: 20, paddingHorizontal: space.sm, justifyContent: "center", borderRadius: corner.badge, borderCurve: "continuous", backgroundColor: bg() }}>
-      <Text style={{ fontSize: font.badge, lineHeight: leading.badge, fontWeight: "500", color: fg() }}>{props.label}</Text>
+    <View style={{ height: sm() ? 16 : 20, paddingHorizontal: sm() ? 5 : space.sm, justifyContent: "center", borderRadius: corner.badge, borderCurve: "continuous", backgroundColor: bg() }}>
+      <Text style={{ fontSize: sm() ? 11 : font.badge, lineHeight: sm() ? 14 : leading.badge, fontWeight: "500", color: fg() }}>{props.label}</Text>
     </View>
   );
 }

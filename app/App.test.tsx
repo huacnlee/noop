@@ -956,7 +956,7 @@ describe("channel", () => {
     expect(app.shows("c1cc085")).toBe(true);
     await app.waitFor("id:lan-linux-box");
     expect(app.shows("192.168.1.20")).toBe(true);
-    expect(app.count("id:primary-linux-box")).toBe(2); // the primary is marked in the sidebar and on its page
+    expect(app.count("id:primary-linux-box")).toBe(1); // marked on its page, not in the sidebar
     await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-version");

@@ -2461,7 +2461,6 @@ function Sidebar(props: {
               <SidebarRow onPress={() => props.onMachine(h().host)} selected={props.machine() === h().host} title={L(`Load ${loadOf(h())}% · Disk ${h().stats?.diskFreeGB ?? "?"} GB free · ${h().busy ?? 0} running`, `负载 ${loadOf(h())}% · 磁盘 ${h().stats?.diskFreeGB ?? "?"}GB · ${h().busy ?? 0} 个运行中`)}>
                 <Indicator status="online" />
                 <Text style={rowText()}>{h().host}</Text>
-                <If when={h().primary}><PrimaryBadge host={h().host} /></If>
                 <If when={(h().busy ?? 0) > 0}>
                   <Text style={{ fontSize: 13, color: colors.muted, fontVariant: ["tabular-nums"] }}>{L(`${h().busy} running`, `${h().busy} 运行中`)}</Text>
                 </If>
@@ -2803,7 +2802,7 @@ function PriorityInput(props: { host: string; value: number; onChange: (value: n
 function PrimaryBadge(props: { host: string }) {
   return (
     <View testID={`primary-${props.host}`} accessibilityLabel={L(`${props.host} is the primary`, `${props.host} 是主控机`)}>
-      <Badge label={L("Primary", "主控机")} variant="info" />
+      <Badge label={L("Primary", "主控机")} variant="info" size="sm" />
     </View>
   );
 }
