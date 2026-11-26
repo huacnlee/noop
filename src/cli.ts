@@ -996,7 +996,9 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
 async function foreground(cfg: Cfg) {
   if (process.stdin.isTTY) {
     const svc = await serviceState();
-    if (svc.running && svc.pid !== process.pid && svc.pid !== process.ppid) {
+    // Only a known pid tells another copy apart from this one: a Windows Scheduled Task has a console (so a TTY) and
+    // schtasks reports no pid, so the task would otherwise see itself as "already running" and exit 1 at every start.
+    if (svc.running && svc.pid && svc.pid !== process.pid && svc.pid !== process.ppid) {
       process.exitCode = 1;
       return void console.log(`✗ noop is already running as a service${svc.pid ? ` (pid ${svc.pid})` : ""}. Stop it first (noop stop), or watch it with noop status.`);
     }
