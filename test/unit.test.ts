@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit, validEvery } from "../src/cli";
+import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit, validEvery, waitProgressIsNew } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
 import { dirtyPaths } from "../src/setup";
 import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
@@ -869,4 +869,12 @@ test("pasted long text attachments are inlined for the chat brain", async () => 
   expect(text).toContain("第二点：改图标");
   expect(text).toContain(`- ${md}`);
   rmSync(root, { recursive: true, force: true });
+});
+
+test("a parked run reports progress to the chat once per new summary", () => {
+  expect(waitProgressIsNew({}, { summary: "Fixed the click; PR #514 pushed", waiting_on: "CI" })).toBe(true);
+  expect(waitProgressIsNew({ wait_note: "Fixed the click; PR #514 pushed" }, { summary: "Fixed the click; PR #514 pushed ", waiting_on: "CI" })).toBe(false);
+  expect(waitProgressIsNew({ wait_note: "old" }, { summary: "CI green, merge card next", waiting_on: "owner" })).toBe(true);
+  expect(waitProgressIsNew({}, { summary: "", waiting_on: "CI" })).toBe(false);
+  expect(waitProgressIsNew({}, checkpointFallback("T-1", "/tmp/r.log"))).toBe(false);
 });
