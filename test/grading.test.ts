@@ -150,6 +150,6 @@ test("a PR's and an MR's files are read for the measurement", async () => {
   expect(await measuredGrade(parseGrades(result)!, ["https://github.com/o/r/pull/1"], false, async () => ({ code: 1, out: "" }))).toEqual(parseGrades(result)!);
 });
 
-test("the rubric the agents get carries the steps, the tie-break rules, the fit and an example", () => {
-  for (const s of ["## Steps", "## Rules for ambiguous cases", "## Fit", "Example:", "Noop measures your size grade"]) expect(GRADE_SPEC).toContain(s);
+test("the rubric the agents get carries the bars, the tie-breaks, the fit and an example", () => {
+  for (const s of ["first bar met", "Tie-breaks:", "\"fit\"", "Format:", "Noop measures size"]) expect(GRADE_SPEC).toContain(s);
 });
