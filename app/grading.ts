@@ -157,9 +157,11 @@ export function webColor(l: Letter | null): string {
   return l === "S" || l === "?" ? "#e5534b" : l === "A" ? "#db6d28" : l === "B" ? "#4184e4" : "#8b949e";
 }
 
-/** A square in `color` before a grade, in GitHub / GitLab markdown: the hosts strip `style`, but render math with `\color`.
- *  The letter stays in the page's own font: colored math letters come out in a serif italic that is hard to read. */
-const swatch = (color: string) => `$\\color{${color}}\\blacksquare$`;
+/** A colored badge in GitHub / GitLab markdown: the hosts strip `style`, and the GitHub mobile app shows math source as raw
+ *  text, so the color travels as an image every client renders. The alt text keeps the score readable without images. */
+const shield = (s: string) => encodeURIComponent(s.replace(/-/g, "--").replace(/_/g, "__"));
+const badge = (color: string, label: string, value?: string) =>
+  `![${value ? `${label} ${value}` : label}](https://img.shields.io/badge/${shield(label)}${value ? `-${shield(value)}` : ""}-${color.slice(1)})`;
 
 /** Whether a PR / MR description is written in Chinese: the grade follows the language the project's PRs use. */
 export const isChineseText = (text: string): boolean => /[\u4e00-\u9fff]/.test(text.replace(/<!--[\s\S]*?-->/g, ""));
@@ -188,16 +190,15 @@ export function gradeMarkdown(g: Grade, zh: boolean, opts: { kind?: GradeKind; h
   const kind = opts.kind ?? "self";
   const l = letters(g.grades);
   const score = attention(g.grades);
-  const mark = (x: Letter, text: string = x) => `${swatch(webColor(x))} ${text}`;
+  const mark = (x: Letter, label: string, value?: string) => badge(webColor(x), label, value);
   const title = kind === "review" ? t.review : t.title;
   const head = [
     `**${title}**${opts.head ? ` \`${opts.head.slice(0, 7)}\`` : ""}`,
-    score === null ? `${t.score} —` : mark(tier(score)!, `${t.score} **${score} ${tier(score)}**`),
+    score === null ? `${t.score} —` : mark(tier(score)!, t.score, `${score} ${tier(score)}`),
     ...(g.fit ? [t.fit[g.fit]] : []),
-    ...l.map((x, i) => mark(x, `${t.dims[i]} **${x === "?" ? t.pending : x}**`)),
+    ...l.map((x, i) => mark(x, t.dims[i], x === "?" ? t.pending : x)),
   ].join(" · ");
-  // at full size: inside <sub> the squares sit on the baseline below the raised letters
-  const legend = `${(["S", "A", "B"] as Letter[]).map((x) => mark(x)).join(" ")} ${mark("C", "C D")}${zh ? "：" : ": "}${t.legend}`;
+  const legend = `${(["S", "A", "B"] as Letter[]).map((x) => mark(x, x)).join(" ")} ${mark("C", "C D")}${zh ? "：" : ": "}${t.legend}`;
   return [gradeMarker(kind, g, opts.head), head, legend, ...(opts.signature ? ["", opts.signature] : [])].join("\n");
 }
 

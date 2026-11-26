@@ -45,19 +45,20 @@ test("a grade survives the task file's frontmatter, and list views leave the not
 test("the PR comment is one colored line of scores and a legend", () => {
   const g = parseGrades(result)!;
   const en = gradeMarkdown(g, false, { head: "f0edbe11e6434c", signature: "sig" });
-  const m = (color: string, text: string) => `$\\color{${color}}\\blacksquare$ ${text}`;
+  const m = (color: string, label: string, value?: string) =>
+    `![${value ? `${label} ${value}` : label}](https://img.shields.io/badge/${encodeURIComponent(label)}${value ? `-${encodeURIComponent(value)}` : ""}-${color.slice(1)})`;
   const lines = en.split("\n");
   expect(lines).toHaveLength(5);
   expect(lines[0]).toBe("<!-- noop-grade:self DCBCD right f0edbe1 -->");
   expect(lines[1]).toBe(
-    `**Noop self-grade** \`f0edbe1\` · ${m("#8b949e", "Attention **36 C**")} · Right-sized · ${m("#8b949e", "Drift **D**")} · ${m("#8b949e", "Size **C**")} · ${m("#4184e4", "Risk **B**")} · ${m("#8b949e", "Proof gap **C**")} · ${m("#8b949e", "Own calls **D**")}`,
+    `**Noop self-grade** \`f0edbe1\` · ${m("#8b949e", "Attention", "36 C")} · Right-sized · ${m("#8b949e", "Drift", "D")} · ${m("#8b949e", "Size", "C")} · ${m("#4184e4", "Risk", "B")} · ${m("#8b949e", "Proof gap", "C")} · ${m("#8b949e", "Own calls", "D")}`,
   );
   expect(lines[2]).toBe(`${m("#e5534b", "S")} ${m("#db6d28", "A")} ${m("#4184e4", "B")} ${m("#8b949e", "C D")}: higher means look harder, S highest, D lowest; attention = sum of the five × 4`);
   expect(lines[4]).toBe("sig");
   // the evidence stays in the app: none of it reaches the PR
   expect(en).not.toContain("changes how one page sorts");
-  expect(gradeMarkdown({ grades: "SA?CD" }, false)).toContain(m("#e5534b", "Risk **?**"));
-  expect(gradeMarkdown(g, true).split("\n")[1].startsWith(`**Noop 自评** · ${m("#8b949e", "关注分 **36 C**")} · 恰当 · ${m("#8b949e", "偏题 **D**")}`)).toBe(true);
+  expect(gradeMarkdown({ grades: "SA?CD" }, false)).toContain(m("#e5534b", "Risk", "?"));
+  expect(gradeMarkdown(g, true).split("\n")[1].startsWith(`**Noop 自评** · ${m("#8b949e", "关注分", "36 C")} · 恰当 · ${m("#8b949e", "偏题", "D")}`)).toBe(true);
   expect(gradeMarkdown(g, false, { kind: "review" })).toMatch(/^<!-- noop-grade:review DCBCD right - -->\n\*\*Noop review grade\*\* · /);
 });
 
