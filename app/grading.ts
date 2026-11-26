@@ -147,107 +147,6 @@ export function withMeasuredSize(g: Grade, m: { lines: number; modules: number; 
   return { ...g, grades: l.join(""), notes };
 }
 
-/** The block earlier versions put on top of a PR / MR description; stripped when the grade moves to a comment. */
-const START = "<!-- noop-grade -->";
-const END = "<!-- /noop-grade -->";
-
-/** A grade's or a tier's color on a PR / MR page: an HTML color that reads on both GitHub's light and dark themes.
- *  The higher, the louder, as in the app: S red, A orange, B blue, C and D gray; "?" is red (evidence missing). */
-export function webColor(l: Letter | null): string {
-  return l === "S" || l === "?" ? "#e5534b" : l === "A" ? "#db6d28" : l === "B" ? "#4184e4" : "#8b949e";
-}
-
-/** Whose grade a comment carries: the agent's own work ("self"), or a PR Noop reviewed ("review"). */
-export type GradeKind = "self" | "review";
-
-/** The hidden first line of a grade comment: which kind, and what it said, so an unchanged grade is not posted twice. */
-export const gradeMarker = (kind: GradeKind, g: Grade, head = ""): string =>
-  `<!-- noop-grade:${kind} ${letters(g.grades).join("")} ${g.fit ?? "-"} ${head.slice(0, 7) || "-"} -->`;
-
-/** The marker of the latest grade comment of `kind` among a PR's / MR's comments (oldest first), if any. */
-export function lastGradeMarker(comments: string[], kind: GradeKind): string | null {
-  for (let i = comments.length - 1; i >= 0; i--) {
-    const m = comments[i].match(new RegExp(`<!-- noop-grade:${kind} [^>]*-->`));
-    if (m) return m[0];
-  }
-  return null;
-}
-
-/** What a grade comment says: the owner's language (Chinese), as the app's grade card does. A comment is a note to
- *  the owner, not project text, so it does not follow the project's English rule. */
-const WEB = { ...labels(true), review: "Noop 审查评分" };
-
-/** The chart's ink on a transparent background, per GitHub theme: "auto" is a mid gray for clients that ignore `<picture>`. */
-const INK = { light: "#1f2328", dark: "#e6edf3", auto: "#8b949e" } as const;
-const EMPTY = { light: "#d0d7de", dark: "#3d444d", auto: "rgba(139,148,158,0.35)" } as const;
-export type ChartTheme = keyof typeof INK;
-
-/** Rendered size of each of the two charts on the page, in CSS pixels; the PNGs are twice that for sharp text. */
-export const CHART_WIDTH = 220;
-const RADAR_H = 190, BARS_W = 220, BARS_H = 150;
-
-const chartUrl = (c: unknown, w: number, h: number) =>
-  `https://quickchart.io/chart?w=${w}&h=${h}&devicePixelRatio=2&bkg=transparent&c=${encodeURIComponent(JSON.stringify(c))}`;
-
-/** The five grades on a radar, as the app's card draws it (quickchart.io renders Chart.js to PNG: GitHub comments run
- *  no scripts and drop inline SVG and data: images, and an image is what every client, the mobile apps too, shows). */
-export function radarUrl(g: Grade, theme: ChartTheme = "auto"): string {
-  const l = letters(g.grades);
-  const line = webColor(tier(attention(g.grades)) ?? "?");
-  const grid = EMPTY[theme];
-  return chartUrl({
-    type: "radar",
-    data: { labels: WEB.dims, datasets: [{ data: l.map((x) => POINTS[x]), backgroundColor: `${line}33`, borderColor: line, pointBackgroundColor: line, pointBorderColor: line, pointRadius: 3 }] },
-    options: { legend: { display: false }, layout: { padding: 2 },
-      scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { fontSize: 12, fontColor: INK[theme] }, gridLines: { color: grid }, angleLines: { color: grid } } },
-  }, CHART_WIDTH, RADAR_H);
-}
-
-/** Each dimension's name and letter, and five segments filled up to its grade in the grade's color: the color key. */
-export function barsUrl(g: Grade, theme: ChartTheme = "auto"): string {
-  const l = letters(g.grades);
-  return chartUrl({
-    type: "horizontalBar",
-    data: { labels: WEB.dims.map((d, i) => `${d}  ${l[i]}`),
-      // five segments with a transparent gap between each
-      datasets: [0, 1, 2, 3, 4].flatMap((k) => [
-        ...(k ? [{ data: l.map(() => 0.2), backgroundColor: "rgba(0,0,0,0)", barPercentage: 0.6 }] : []),
-        { data: l.map(() => 1), backgroundColor: l.map((x) => (k < POINTS[x] ? webColor(x) : EMPTY[theme])), barPercentage: 0.6 }]) },
-    options: { legend: { display: false }, layout: { padding: 2 },
-      scales: { xAxes: [{ stacked: true, display: false, ticks: { min: 0, max: 5.8 } }], yAxes: [{ stacked: true, gridLines: { display: false, drawBorder: false }, ticks: { fontSize: 13, fontColor: INK[theme] } }] } },
-  }, BARS_W, BARS_H);
-}
-
-const picture = (url: (t: ChartTheme) => string, w: number, alt: string) =>
-  `<picture><source media="(prefers-color-scheme: dark)" srcset="${url("dark")}">`
-  + `<source media="(prefers-color-scheme: light)" srcset="${url("light")}">`
-  + `<img alt="${alt}" width="${w}" src="${url("auto")}"></picture>`;
-
-/** A grade comment on a PR / MR, laid out like the app's grade card: a short title line (title, fit, attention score),
- *  then the radar and the graded bars side by side, each drawn for GitHub's light or dark theme through `<picture>`.
- *  The evidence stays in the app. A comment, not the description: the merge commit stays free of it. */
-export function gradeMarkdown(g: Grade, opts: { kind?: GradeKind; head?: string; signature?: string } = {}): string {
-  const kind = opts.kind ?? "self";
-  const l = letters(g.grades);
-  const score = attention(g.grades);
-  const head = [
-    `**${kind === "review" ? WEB.review : WEB.title}**`,
-    ...(g.fit ? [`**${WEB.fit[g.fit]}**`] : []),
-    `${WEB.score} ${score === null ? WEB.pending : `${score} ${tier(score)}`}`,
-    ...(opts.head ? [`\`${opts.head.slice(0, 7)}\``] : []),
-  ].join(" · ");
-  const alt = WEB.dims.map((d, i) => `${d} ${l[i]}`).join("，");
-  const charts = `<table><tr><td>${picture((t) => radarUrl(g, t), CHART_WIDTH, alt)}</td><td>${picture((t) => barsUrl(g, t), BARS_W, alt)}</td></tr></table>`;
-  return [gradeMarker(kind, g, opts.head), head, "", charts, ...(opts.signature ? ["", opts.signature] : [])].join("\n");
-}
-
-/** `body` without the grade block earlier versions put on top of it; unchanged when it has none. */
-export function withoutGradeBlock(body: string): string {
-  const s = body.indexOf(START), e = body.indexOf(END);
-  if (s < 0 || e < s) return body;
-  return `${body.slice(0, s)}${body.slice(e + END.length)}`.trim() + "\n";
-}
-
 /** PR / MR links in a text: GitHub pull requests and GitLab merge requests, each once. */
 export function reviewLinks(text: string): string[] {
   const re = /https?:\/\/[^\s)\]>"'`]+?\/(?:pull\/\d+|-\/merge_requests\/\d+)(?=[^\d]|$)/g;
@@ -267,5 +166,4 @@ The owner reviews by your grade, so make it checkable: a flattering grade the di
 Tie-breaks: lines vs modules → the higher. Doing unasked things is drift; choosing how is calls. Risk is the worst plausible outcome. Proof counts only what ran in this run.
 "fit" against the smallest change that fully meets the request: "over" (extra layers, options, features), "right", or "under" (requested cases, errors, platforms or tests missing), with what is extra or missing.
 Format: "grades": {"drift": "C: also renamed two helpers in the file", "size": "C: 34 product lines in src/", "risk": "B: changes the task list order; revertible", "proof": "C: sort.test.ts added, 12 pass; CI running", "calls": "B: order unspecified, newest-first like the chat list", "fit": "right: one comparator and its test"}, plus "prs": ["<every PR / MR this run opened or updated>"].
-Noop posts the scores as a comment on those PRs / MRs itself, in the owner's language, and adds a new one when a later run regrades; do not write them into descriptions or comments. Omit "grades" for lookups, reviews of others' work, no-change routine runs and delegated runs.
-Reviewing someone else's PR / MR: grade it by the same rubric in "reviewed" (one entry per PR / MR you reviewed this run, the author's work in place of yours: drift from its stated goal or issue, proof gap = what its tests and CI did not cover, calls = choices it leaves to the maintainer). Noop posts it as a review-grade comment; do not repeat the scores in your review text.`;
+The grades stay inside Noop: never write them into PR / MR descriptions, comments or reviews. Omit "grades" for lookups, reviews of others' work, no-change routine runs and delegated runs.`;

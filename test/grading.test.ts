@@ -1,7 +1,7 @@
 // A task's self-grade: the rubric's scoring, the PR / MR block, the task views and the runner's result block.
 import { expect, test } from "bun:test";
-import { attention, CHART_WIDTH, GRADE_SPEC, gradeMarker, gradeMarkdown, gradeMeta, gradeOf, isProductPath, lastGradeMarker, letters, measureSize, parseGrades, reviewLinks, tier, withoutGradeBlock, withMeasuredSize } from "../app/grading";
-import { gitlabMr, measuredGrade, reviewedGrades, reviewFiles, runReviews, stampReview, stampReviews } from "../src/review-grade";
+import { attention, GRADE_SPEC, gradeMeta, gradeOf, isProductPath, letters, measureSize, parseGrades, reviewLinks, tier, withMeasuredSize } from "../app/grading";
+import { gitlabMr, measuredGrade, reviewFiles, runReviews } from "../src/review-grade";
 import { parseResult } from "../src/runner";
 import { taskHistory, taskInfo } from "../cloud/src/tools";
 
@@ -42,41 +42,6 @@ test("a grade survives the task file's frontmatter, and list views leave the not
   expect(gradeOf({ grade: "nope" })).toBeUndefined();
 });
 
-test("the PR comment is a short Chinese title line and the app card's radar and graded bars, per GitHub theme", () => {
-  const g = parseGrades(result)!;
-  const md = gradeMarkdown(g, { head: "f0edbe11e6434c", signature: "sig" });
-  const lines = md.split("\n");
-  expect(lines[0]).toBe("<!-- noop-grade:self DCBCD right f0edbe1 -->");
-  expect(lines[1]).toBe("**Noop 自评** · **恰当** · 关注分 36 C · `f0edbe1`");
-  expect(lines).toHaveLength(6);
-  expect(lines.at(-1)).toBe("sig");
-  expect(md).not.toContain("changes how one page sorts");
-  expect(lines[3]).toStartWith("<table><tr><td><picture>");
-  expect(lines[3]).toContain('alt="偏题 D，体量 C，风险 B，验证缺口 C，自主决定 D"');
-  expect(CHART_WIDTH * 2).toBeLessThanOrEqual(500);
-  const urls = [...lines[3].matchAll(/(?:srcset|src)="([^"]+)"/g)].map((m) => m[1]);
-  expect(urls).toHaveLength(6);
-  const charts = urls.map((u) => ({ u, c: JSON.parse(decodeURIComponent(u.split("&c=")[1])) }));
-  for (const { u } of charts) expect(u).toContain("bkg=transparent");
-  const [radar, bars] = [charts.filter(({ c }) => c.type === "radar"), charts.filter(({ c }) => c.type === "horizontalBar")];
-  expect(radar.map(({ c }) => c.options.scale.pointLabels.fontColor)).toEqual(["#e6edf3", "#1f2328", "#8b949e"]);
-  expect(radar[0].c.data.datasets[0].data).toEqual([1, 2, 3, 2, 1]);
-  expect(bars[0].c.data.labels).toEqual(["偏题  D", "体量  C", "风险  B", "验证缺口  C", "自主决定  D"]);
-  // risk B: three of five segments in blue
-  const filled = bars[1].c.data.datasets.filter((d: { data: number[] }) => d.data[0] === 1).map((d: { backgroundColor: string[] }) => d.backgroundColor[2]);
-  expect(filled).toEqual(["#4184e4", "#4184e4", "#4184e4", "#d0d7de", "#d0d7de"]);
-  expect(gradeMarkdown(g, { kind: "review" })).toMatch(/^<!-- noop-grade:review DCBCD right - -->\n\*\*Noop 审查评分\*\* · /);
-});
-
-test("the block earlier versions put in the description comes out; the latest grade comment of a kind is found", () => {
-  const old = "<!-- noop-grade -->\n**Noop 自评** · x\nlegend\n<!-- /noop-grade -->\n\nFixes #12.\n\nNoop signature\n";
-  expect(withoutGradeBlock(old)).toBe("Fixes #12.\n\nNoop signature\n");
-  expect(withoutGradeBlock("Fixes #12.")).toBe("Fixes #12.");
-  const a = gradeMarker("self", { grades: "DDDDD" }, "aaaaaaa1"), b = gradeMarker("self", { grades: "CDDDD" }, "bbbbbbb2");
-  expect(lastGradeMarker(["hi", `${a}\nx`, gradeMarker("review", { grades: "SSSSS" }), `${b}\ny`, "later"], "self")).toBe(b);
-  expect(lastGradeMarker(["hi"], "self")).toBeNull();
-});
-
 test("a run's PRs and MRs come from its prs field, else from its summary", () => {
   expect(reviewLinks("PR https://github.com/o/r/pull/12, and https://gitlab.example.com/g/sub/p/-/merge_requests/7.")).toEqual([
     "https://github.com/o/r/pull/12", "https://gitlab.example.com/g/sub/p/-/merge_requests/7",
@@ -84,53 +49,6 @@ test("a run's PRs and MRs come from its prs field, else from its summary", () =>
   expect(runReviews(["https://github.com/o/r/pull/3"], "see https://github.com/o/r/pull/4")).toEqual(["https://github.com/o/r/pull/3"]);
   expect(runReviews(undefined, "see https://github.com/o/r/pull/4 and https://github.com/o/r/pull/4")).toEqual(["https://github.com/o/r/pull/4"]);
   expect(gitlabMr("https://gitlab.example.com/g/sub/p/-/merge_requests/7")).toEqual({ host: "gitlab.example.com", repo: "g/sub/p", iid: "7" });
-});
-
-test("grading a PR comments on it in the owner's language, cleans an old description block, and skips an unchanged grade", async () => {
-  const calls: { cmd: string[]; input?: string; env?: Record<string, string> }[] = [];
-  let comments: { body: string }[] = [{ body: "LGTM" }];
-  const body = "<!-- noop-grade -->\nold\n<!-- /noop-grade -->\n\nOriginal body\n";
-  const exec = async (cmd: string[], input?: string, env?: Record<string, string>) => {
-    calls.push({ cmd, input, env });
-    if (cmd[0] === "gh" && cmd[2] === "view") return { code: 0, out: JSON.stringify({ body, comments, headRefOid: "abcdef0123" }) };
-    if (cmd[0] === "gh" && cmd[2] === "comment") comments = [...comments, { body: input! }];
-    if (cmd[0] === "glab" && cmd[2] === "view") return { code: 0, out: JSON.stringify({ description: "MR 描述", sha: "1234567890" }) };
-    if (cmd[0] === "glab" && cmd[1] === "api") return { code: 0, out: "[]" };
-    return { code: 0, out: "" };
-  };
-  const g = { grades: "DCBCD" };
-  expect(await stampReviews(["https://github.com/o/r/pull/12", "https://gitlab.example.com/g/p/-/merge_requests/7"], g, exec, { signature: "sig" }))
-    .toEqual(["https://github.com/o/r/pull/12", "https://gitlab.example.com/g/p/-/merge_requests/7"]);
-  const edit = calls.find((c) => c.cmd[0] === "gh" && c.cmd[2] === "edit")!;
-  expect(edit.input).toBe("Original body\n");
-  const post = calls.find((c) => c.cmd[0] === "gh" && c.cmd[2] === "comment")!;
-  expect(post.cmd).toEqual(["gh", "pr", "comment", "https://github.com/o/r/pull/12", "--body-file", "-"]);
-  expect(post.input!.startsWith("<!-- noop-grade:self DCBCD - abcdef0 -->\n**Noop 自评** · 关注分 36 C · `abcdef0`")).toBe(true);
-  expect(post.input!.endsWith("\n\nsig")).toBe(true);
-  const note = calls.find((c) => c.cmd[0] === "glab" && c.cmd[2] === "note")!;
-  expect(note.cmd.slice(0, 5)).toEqual(["glab", "mr", "note", "7", "-R"]);
-  expect(note.env).toEqual({ GITLAB_HOST: "gitlab.example.com" });
-  // every project gets the same comment, in the owner's language
-  expect(note.cmd.at(-1)).toContain("**Noop 自评**");
-  // the same grade on the same commit again: nothing new is posted
-  calls.length = 0;
-  expect(await stampReview("https://github.com/o/r/pull/12", g, exec)).toBe(true);
-  expect(calls.filter((c) => c.cmd[2] === "comment")).toHaveLength(0);
-  // a regrade adds a comment below the earlier one
-  expect(await stampReview("https://github.com/o/r/pull/12", { grades: "CCBCD" }, exec)).toBe(true);
-  expect(comments).toHaveLength(3);
-  // a PR the CLI cannot read is left alone
-  expect(await stampReview("https://github.com/o/r/pull/9", { grades: "DDDDD" }, async () => ({ code: 1, out: "" }))).toBe(false);
-});
-
-test("a review run's grades of the PRs it reviewed are read per PR", () => {
-  expect(reviewedGrades([
-    { pr: "https://github.com/o/r/pull/45", grades: result },
-    { pr: "https://github.com/o/r/pull/45", grades: result },
-    { pr: "not a link", grades: result },
-    { pr: "https://github.com/o/r/pull/46" },
-  ])).toEqual([{ url: "https://github.com/o/r/pull/45", grade: parseGrades(result)! }]);
-  expect(reviewedGrades(undefined)).toEqual([]);
 });
 
 test("the runner asks for the self-grade and keeps it in the result", () => {
@@ -193,5 +111,7 @@ test("a PR's and an MR's files are read for the measurement", async () => {
 });
 
 test("the rubric the agents get carries the bars, the tie-breaks, the fit and an example", () => {
-  for (const s of ["first bar met", "Tie-breaks:", "\"fit\"", "Format:", "Noop measures size"]) expect(GRADE_SPEC).toContain(s);
+  for (const s of ["first bar met", "Tie-breaks:", "\"fit\"", "Format:", "Noop measures size", "The grades stay inside Noop"]) expect(GRADE_SPEC).toContain(s);
+  // the grades never go out to a PR / MR, so the agents are not asked to grade the PRs they review
+  expect(GRADE_SPEC).not.toContain("\"reviewed\"");
 });
