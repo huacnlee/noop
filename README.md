@@ -11,7 +11,7 @@ Noop runs a small team of Claude Code and Codex agents on your own computers. Th
 - **Works for you, not with you** — give it a goal in one sentence; it breaks the work down, runs it in parallel and comes back with results.
 - **Learns how you decide** — starts cautious, asks more early on, and takes over more as it proves it decides like you.
 - **Quiet** — no noise, no raw errors. You hear about results and decisions, nothing else.
-- **Yours** — runs on your machines and your own free Cloudflare account. No shared service, no one else's server.
+- **Yours** — runs on your machines and your own free Cloudflare account. No shared service, no one else's server; the only outbound call is an anonymous daily heartbeat you can turn off ([details](#usage-statistics)).
 
 **If this helps you, please [sponsor me](https://github.com/sponsors/huacnlee).**
 
@@ -63,6 +63,22 @@ From v0.1.5 the desktop apps update themselves: when a new version has downloade
 Open your Noop address on any device and sign in with a code sent to your email. On your phone, add it to the home screen and turn on notifications.
 
 Then just talk to it. When it needs you, you'll get a notification with the choices; answer right there.
+
+## Usage statistics
+
+To know how many people run Noop, the primary machine sends one anonymous heartbeat a day to the author's own [Edgemetry](https://github.com/hayaran/Edgemetry) instance on Cloudflare. It carries only the Noop build date and the OS family. No email, Noop URL, machine name, repository or task content is sent, and Edgemetry keeps no IP address. The client apps send nothing.
+
+Turn it off with any of these:
+
+```toml
+# config.toml
+[telemetry]
+enabled = false
+```
+
+```sh
+export NOOP_TELEMETRY=0   # or DO_NOT_TRACK=1
+```
 
 ## License
 

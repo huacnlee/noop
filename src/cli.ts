@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // hub — CLI + daemon for the agent fleet.
+import { usageHeartbeat } from "./telemetry";
 import { guestCmd } from "./guest";
 import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
@@ -1174,6 +1175,7 @@ async function daemon(cfg: Cfg) {
     }
     if (!draining) await ownerUpdate(c, host);
     await locked(() => guardMemory(host)); // damage sync reported since the last tick; the daily memory snapshot
+    if (!draining) void usageHeartbeat(c).catch(() => null);
     try { await tick(c, true); failures = 0; } catch (e) {
       console.error("tick failed", e);
       if (++failures >= 3) void medic(`noop daemon: ${failures} consecutive tick failures on ${host}.\n${(e as Error)?.stack ?? e}`, c, { auto: true, kind: "daemon" });
