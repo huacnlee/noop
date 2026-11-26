@@ -372,9 +372,7 @@ export async function startLogin(a: Account, cfg: Cfg) {
     pending.delete(id);
     const st = load();
     const ok = code === 0;
-    // A login that dies before printing a link is a broken login command, not an expired link: count it so the
-    // retry backs off instead of journaling and notifying every 30 minutes forever (L-0001…L-0019 overnight).
-    const fails = ok || sent ? 0 : (st.accounts[k]?.login_fails ?? 0) + 1;
+    const fails = nextLoginFails(st.accounts[k]?.login_fails ?? 0, ok);
     st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined, login_fails: fails || undefined };
     save(st);
     const next = fails ? ` → next try in ${Math.round(loginBackoffMs(fails) / 60_000)}m` : "";
@@ -398,7 +396,14 @@ export function submitLoginCode(id: string, code: string): boolean {
   return true;
 }
 
-/** Retry delay after `fails` consecutive logins that exited without a link: 30m, 1h, 2h … capped at 12h. */
+/** Consecutive logins that did not finish. Both kinds back off: a command that dies before printing a link
+ * (L-0001…L-0019 overnight), and a link that expires unanswered — once the link could be sent, a fresh one every
+ * 30 minutes meant two owner notifications per half hour while nobody was at the machine (L-0009…L-0022 overnight). */
+export function nextLoginFails(prev: number, ok: boolean): number {
+  return ok ? 0 : prev + 1;
+}
+
+/** Retry delay after `fails` consecutive logins that did not finish: 30m, 1h, 2h … capped at 12h. */
 export function loginBackoffMs(fails: number): number {
   return Math.min(30 * 60_000 * 2 ** Math.max(0, fails - 1), 12 * 3600_000);
 }

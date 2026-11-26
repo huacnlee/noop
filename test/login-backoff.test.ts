@@ -1,7 +1,7 @@
 // A login command that exits before printing a link (e.g. BSD `script` failing under a pipe) used to be retried
 // every 30 minutes forever, journaling and notifying the owner each time (L-0001…L-0019 in one night).
 import { expect, test } from "bun:test";
-import { loginBackoffMs } from "../src/accounts";
+import { loginBackoffMs, nextLoginFails } from "../src/accounts";
 
 const m = 60_000;
 
@@ -19,4 +19,15 @@ test("consecutive silent failures double the delay", () => {
 test("the delay is capped at 12 hours", () => {
   expect(loginBackoffMs(6)).toBe(720 * m);
   expect(loginBackoffMs(50)).toBe(720 * m);
+});
+
+test("an unanswered link counts as a failure too, so the next link waits longer", () => {
+  let fails = 0;
+  const delays: number[] = [];
+  for (let i = 0; i < 4; i++) { fails = nextLoginFails(fails, false); delays.push(loginBackoffMs(fails) / m); }
+  expect(delays).toEqual([30, 60, 120, 240]);
+});
+
+test("a finished login resets the count", () => {
+  expect(nextLoginFails(5, true)).toBe(0);
 });
