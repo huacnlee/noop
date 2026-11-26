@@ -106,7 +106,25 @@ function usesGateway(a: Account): boolean {
 function credStamp(a: Account): number {
   const dir = a.default ? join(homedir(), a.cli === "claude" ? ".claude" : ".codex") : a.dir;
   const f = join(dir, a.cli === "claude" ? ".credentials.json" : "auth.json");
-  try { return statSync(f).mtimeMs; } catch { return 0; }
+  try { return statSync(f).mtimeMs; } catch {}
+  // On macOS Claude Code keeps the default login in the Keychain, not .credentials.json: without this the stamp is
+  // always 0, a stale needs_login never clears after the owner logs in again, and the fleet stays paused for good.
+  if (a.cli === "claude" && a.default && process.platform === "darwin") return keychainStamp("Claude Code-credentials");
+  return 0;
+}
+
+/** Modification time of a macOS Keychain generic password (no secret is read), 0 if missing. */
+function keychainStamp(service: string): number {
+  try {
+    const r = Bun.spawnSync(["security", "find-generic-password", "-s", service], { stdout: "pipe", stderr: "pipe" });
+    return r.exitCode === 0 ? parseKeychainMdat(r.stdout.toString()) : 0;
+  } catch { return 0; }
+}
+
+/** `"mdat"<timedate>=0x… "20261126020914Z\000"` → epoch ms, 0 if absent. */
+export function parseKeychainMdat(out: string): number {
+  const m = out.match(/"mdat"<timedate>=\S*\s+"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z/);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0;
 }
 
 export function usable(a: Account): boolean {
@@ -118,7 +136,7 @@ export function usable(a: Account): boolean {
     save(all);
     return true;
   }
-  if ((s.needs_login || s.cooldown_until) && s.cred && credStamp(a) > s.cred) {
+  if ((s.needs_login || s.cooldown_until) && s.cred !== undefined && credStamp(a) > s.cred) {
     // the owner logged in again (maybe another account): try it right away instead of waiting out the old limit
     all.accounts[key(a)] = { ...s, needs_login: false, cooldown_until: undefined, cred: undefined, told: undefined };
     save(all);
