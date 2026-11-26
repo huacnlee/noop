@@ -54,17 +54,16 @@ export async function strayWorkspaces(cfg: Cfg, home = homedir()): Promise<Stray
   const managed = (p: string) => keep.some((k) => p === k || p.startsWith(k + "/"));
   const roots: string[] = (cfg.resources?.work_dirs ?? ["~/work"]).map((d: string) => expand(d, home)).filter(existsSync);
   const out = new Map<string, Stray>();
-  for (const root of roots) for (const name of readdirSync(root)) {
-    const dir = join(root, name);
-    if (!existsSync(join(dir, ".git"))) continue;
-    const isMain = lstatSync(join(dir, ".git")).isDirectory();
-    if (!isMain) {
-      if (/(^|[-_])t-?[a-z]?\d{3,}|agent/i.test(name)) out.set(dir, { path: dir, kind: "task-dir" });
-      continue;
-    }
+  const dirs = roots.flatMap((root) => readdirSync(root).map((name) => ({ name, dir: join(root, name) })))
+    .filter(({ dir }) => existsSync(join(dir, ".git")));
+  // task-named linked worktrees next to the repos first, so the repo pass below does not relabel them
+  for (const { name, dir } of dirs)
+    if (!lstatSync(join(dir, ".git")).isDirectory() && /(^|[-_])t-?[a-z]?\d{3,}|agent/i.test(name)) out.set(dir, { path: dir, kind: "task-dir" });
+  for (const { dir } of dirs) {
+    if (!lstatSync(join(dir, ".git")).isDirectory()) continue;
     const list = await $`git -C ${dir} worktree list --porcelain`.quiet().nothrow();
     const paths = list.stdout.toString().split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9).trim());
-    for (const p of paths.slice(1)) if (!managed(p) && existsSync(p))
+    for (const p of paths.slice(1)) if (!managed(p) && !out.has(p) && existsSync(p))
       out.set(p, { path: p, kind: p.includes("/.claude/worktrees/") ? "claude-worktree" : "worktree", repo: dir });
     const cw = join(dir, ".claude", "worktrees");
     if (existsSync(cw)) for (const w of readdirSync(cw)) {
@@ -72,5 +71,5 @@ export async function strayWorkspaces(cfg: Cfg, home = homedir()): Promise<Stray
       if (!out.has(p)) out.set(p, { path: p, kind: "claude-worktree", repo: dir });
     }
   }
-  return [...out.values()].sort((a, b) => a.path.localeCompare(b.path));
+  return [...out.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }

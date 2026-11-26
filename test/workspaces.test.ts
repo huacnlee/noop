@@ -53,11 +53,12 @@ test("strayWorkspaces lists worktrees and task folders left next to or inside th
   await $`git -C ${repo} worktree add -q --detach ${join(repo, ".claude", "worktrees", "agent-a1")}`.quiet();
   await $`git -C ${repo} worktree add -q --detach ${join(home, "elsewhere")}`.quiet();
   const stray = await strayWorkspaces(cfg, home);
-  expect(stray.map((s) => [s.kind, s.path])).toEqual([
-    ["worktree", join(home, "elsewhere")],
-    ["task-dir", join(home, "work", "nsh-T-11040")],
-    ["claude-worktree", join(repo, ".claude", "worktrees", "agent-a1")],
-  ]);
+  const kinds = Object.fromEntries(stray.map((s) => [s.path, s.kind]));
+  expect(kinds).toEqual({
+    [join(home, "elsewhere")]: "worktree",
+    [join(home, "work", "nsh-T-11040")]: "task-dir",
+    [join(repo, ".claude", "worktrees", "agent-a1")]: "claude-worktree",
+  });
   // listing removes nothing
   expect(existsSync(join(home, "work", "nsh-T-11040"))).toBe(true);
 });
