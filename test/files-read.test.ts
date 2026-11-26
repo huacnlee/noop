@@ -61,6 +61,40 @@ test("worker list/read: files table only, whitelist enforced", async () => {
   expect(handleReadFiles(sql, new URL("http://x/api/files/read?path=memory/none.md"))!.status).toBe(404);
 });
 
+test("directory listings walk live rows only, never the tombstones every task move leaves behind", async () => {
+  // 2026-11-26: tasks/inbox/ and tasks/active/ held a tombstone for each of ~11k tasks; the MCP resource list (after
+  // every commit) and /api/channels listed them on the primary key and read 6.9M rows in a day, 138% of the free plan.
+  const db = new Database(":memory:");
+  const plans: string[] = [];
+  const sql: FilesSql = {
+    exec(q: string, ...raw: any[]) {
+      const b = raw.map((v) => (v instanceof ArrayBuffer ? new Uint8Array(v) : v));
+      let rows: any[] = [];
+      for (const part of q.split(";").map((s) => s.trim()).filter(Boolean)) {
+        if (/^SELECT/i.test(part) && /path >= \? AND path < \?/.test(part))
+          plans.push((db.query(`EXPLAIN QUERY PLAN ${part}`).all(...b) as { detail: string }[]).map((r) => r.detail).join(" | "));
+        const st = db.query(part);
+        if (/^SELECT/i.test(part)) rows = st.all(...b) as any[]; else st.run(...b);
+      }
+      return { toArray: () => rows };
+    },
+  };
+  initFilesSchema(sql);
+  const { Mcp } = await import("../cloud/src/mcp");
+  const { listTasks } = await import("../cloud/src/tools");
+  let rev = 0;
+  const row = (path: string, deleted: boolean) => sql.exec("INSERT INTO files (path, content, hash, version, updated, by, deleted, rev) VALUES (?, ?, '', 1, '', 'x', ?, ?)",
+    path, deleted ? null : new TextEncoder().encode(`---\nid: ${path.split("/").pop()!.slice(0, -3)}\ntitle: t\n---\n`), deleted ? 1 : 0, ++rev);
+  for (let i = 0; i < 300; i++) { row(`tasks/inbox/T-${1000 + i}.md`, true); row(`policies/old-${i}.md`, true); }
+  row("tasks/inbox/T-2000.md", false); row("policies/a.md", false);
+  const open = listTasks(new Mcp({ sql } as never).store(), "open");
+  expect(open.map((t) => t.id)).toEqual(["T-2000"]);
+  const list = await handleReadFiles(sql, new URL("http://x/api/files/list?prefix=policies/"))!.json() as { files: { path: string }[] };
+  expect(list.files.map((f) => f.path)).toEqual(["policies/a.md"]);
+  expect(plans.length).toBeGreaterThan(1);
+  for (const p of plans) expect(p).toContain("files_live");
+});
+
 test("local server list/read", () => {
   const root = mkdtempSync(join(tmpdir(), "hub-read-"));
   mkdirSync(join(root, "agents/lead"), { recursive: true });
