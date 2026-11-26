@@ -90,9 +90,9 @@ export function locked<T>(fn: () => Promise<T> | T): Promise<T> {
 
 export const hasRemote = async () => (await sync.syncMode()) === "remote";
 
-export const pull = (opts?: { force?: boolean }) => locked(() => _pull(opts));
+export const pull = (opts?: Parameters<typeof sync.pull>[0]) => locked(() => _pull(opts));
 /** Apply remote changes to DATA (remote wins on paths edited on both sides, except mergeable appends). */
-export const _pull = (opts?: { force?: boolean }): Promise<boolean> => sync.pull(opts);
+export const _pull = (opts?: Parameters<typeof sync.pull>[0]): Promise<boolean> => sync.pull(opts);
 
 /** Commit every local change via the Worker's compare-and-swap; false if we lost a race (or are offline). */
 export const commitPush = (msg: string, opts?: { force?: boolean }) => locked(() => _commitPush(msg, opts));

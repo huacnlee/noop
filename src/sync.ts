@@ -331,8 +331,12 @@ function applyRemote(st: State, f: Remote): "ok" | "merged" | "lost" {
   return outcome;
 }
 
-async function _pull(st: State, t: Transport): Promise<{ ok: boolean; lost: Set<string>; seen: Set<string> }> {
+/** Progress after each page of a pull: files and (decoded) bytes received so far. */
+export type PullProgress = (files: number, bytes: number) => void;
+
+async function _pull(st: State, t: Transport, progress?: PullProgress): Promise<{ ok: boolean; lost: Set<string>; seen: Set<string> }> {
   const lost = new Set<string>(), seen = new Set<string>();
+  let files = 0, bytes = 0;
   for (let page = 0; page < 10_000; page++) {
     const r = await t(`/api/files/changes?since=${st.rev}`);
     if (!r || r.status !== 200) { if (r) console.error(`sync: pull failed ${r.status} ${JSON.stringify(r.json).slice(0, 200)}`); return { ok: false, lost, seen }; }
@@ -340,17 +344,22 @@ async function _pull(st: State, t: Transport): Promise<{ ok: boolean; lost: Set<
     for (const f of r.json.files as Remote[]) { seen.add(f.path); if (applyRemote(st, f) === "lost") lost.add(f.path); }
     st.rev = r.json.rev;
     saveState(st);
+    if (progress) {
+      files += r.json.files.length;
+      for (const f of r.json.files as Remote[]) bytes += Math.floor((f.content?.length ?? 0) * 3 / 4);
+      progress(files, bytes);
+    }
     if (!r.json.more) break;
   }
   return { ok: true, lost, seen };
 }
 
-export async function pull(opts: { force?: boolean } = {}): Promise<boolean> {
+export async function pull(opts: { force?: boolean; progress?: PullProgress } = {}): Promise<boolean> {
   const t = await getTransport();
   if (!t) return true;
   if (!opts.force && syncTiming.now() - (lastPull.get(HOME()) ?? -Infinity) < syncTiming.pullMinMs) return true;
   return withLock(async () => {
-    const ok = (await _pull(loadState(), t)).ok;
+    const ok = (await _pull(loadState(), t, opts.progress)).ok;
     if (ok) lastPull.set(HOME(), syncTiming.now());
     return ok;
   });

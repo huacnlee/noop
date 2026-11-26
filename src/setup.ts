@@ -61,7 +61,15 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
     const token = opts.token ?? (url === joined ? readHubToml().server?.token : undefined) ?? await joinViaLogin(url, me);
     if (!token) { process.exitCode = 1; return; }
     writeHubToml({ cloud: { url }, server: { token } });
-    if (!(await pull())) { console.error(`could not sync from ${url} (check the URL / token)`); process.exitCode = 1; return; }
+    // The first pull mirrors all of the data and can take minutes: show it moving instead of a silent terminal.
+    let shown = false;
+    const progress = (files: number, bytes: number) => {
+      shown = true;
+      process.stdout.write(`\r  syncing from ${url}: ${files.toLocaleString("en-US")} files, ${(bytes / 1e6).toFixed(1)} MB`);
+    };
+    const synced = await pull({ progress });
+    if (shown) process.stdout.write("\n");
+    if (!synced) { console.error(`could not sync from ${url} (check the URL / token)`); process.exitCode = 1; return; }
     writeLocalConfig(me);
     console.log(`✔ joined ${url}; data mirrored to ${DATA}\n  next: hub install   (runs the daemon as a service)`);
     return;
