@@ -11,5 +11,5 @@ test("telemetry is on by default and every opt-out turns it off", () => {
 
 test("the heartbeat carries only the build date", () => {
   const b = heartbeatBody("2026-11-26");
-  expect(b).toEqual({ n: "heartbeat", d: "noop-daemon", u: "https://noop-daemon/v/2026-11-26", r: "", w: 0 });
+  expect(b).toEqual({ n: "heartbeat", d: "noop.madomd.com", u: "https://noop.madomd.com/daemon/v/2026-11-26", r: "", w: 0 });
 });

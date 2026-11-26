@@ -12,7 +12,8 @@ import { type Cfg, CODE, HOME_DIR, isPrimary } from "./core";
  * Off with `[telemetry] enabled = false` in config.toml, `NOOP_TELEMETRY=0` or `DO_NOT_TRACK=1`.
  */
 export const TELEMETRY_URL = "https://metry.huacnlee-account.workers.dev/api/event";
-const SITE = "noop-daemon";
+// Same Edgemetry site as the website; the /daemon/ path keeps heartbeats apart from page views in the dashboard.
+const SITE = "noop.madomd.com";
 const STAMP = () => join(HOME_DIR, "telemetry-last"); // machine-local, outside the synced data folder
 
 export function telemetryEnabled(cfg: Cfg, env = process.env): boolean {
@@ -29,7 +30,7 @@ async function build(): Promise<string> {
 }
 
 export function heartbeatBody(version: string) {
-  return { n: "heartbeat", d: SITE, u: `https://${SITE}/v/${encodeURIComponent(version)}`, r: "", w: 0 };
+  return { n: "heartbeat", d: SITE, u: `https://${SITE}/daemon/v/${encodeURIComponent(version)}`, r: "", w: 0 };
 }
 
 /** Called every daemon tick; does nothing unless enabled, primary, and not sent yet today (UTC). */

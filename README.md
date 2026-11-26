@@ -66,7 +66,7 @@ Then just talk to it. When it needs you, you'll get a notification with the choi
 
 ## Usage statistics
 
-To know how many people run Noop, the primary machine sends one anonymous heartbeat a day to the author's own [Edgemetry](https://github.com/hayaran/Edgemetry) instance on Cloudflare. It carries only the Noop build date and the OS family. No email, Noop URL, machine name, repository or task content is sent, and Edgemetry keeps no IP address. The client apps send nothing.
+To know how many people run Noop, the primary machine sends one anonymous heartbeat a day to the author's own [Edgemetry](https://github.com/hayaran/Edgemetry) instance on Cloudflare. It carries only the Noop build date and the OS family. No email, Noop URL, machine name, repository or task content is sent, and Edgemetry keeps no IP address. The client apps send nothing. The website counts page views with the same Edgemetry instance, without cookies.
 
 Turn it off with any of these:
 
