@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit } from "../src/cli";
+import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit, validEvery } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
 import { dirtyPaths } from "../src/setup";
 import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
@@ -24,6 +24,25 @@ test("routine schedule", () => {  const t = new Date("2026-11-02T19:05:00"); // 
   expect(due("weekly FRI 17:00", undefined, t)).toBe(false);
   expect(due("daily 20:00", undefined, t)).toBe(false);
   expect(due("daily 02:30", undefined, t)).toBe(false); // first run long after slot → wait for next slot
+});
+
+test("routine schedule accepts hour and day intervals", () => {
+  const t = new Date("2026-11-26T14:00:00");
+  // "1h" / "1d" came from settings and were read as a clock time, so these routines never ran (T-11413).
+  expect(due("1h", undefined, t)).toBe(true);
+  expect(due("1h", "2026-11-26T13:30:00", t)).toBe(false);
+  expect(due("1h", "2026-11-26T12:59:00", t)).toBe(true);
+  expect(due("1d", "2026-11-25T15:00:00", t)).toBe(false);
+  expect(due("1d", "2026-11-25T13:59:00", t)).toBe(true);
+  expect(due("2h", "2026-11-26T12:30:00", t)).toBe(false);
+});
+
+test("routine schedule validation", () => {
+  for (const ok of ["15m", "60m", "1h", "1d", "hourly", "daily 09:00", "weekdays 19:00", "weekly MON 10:30", "weekly sun 9:05"])
+    expect(validEvery(ok)).toBe(true);
+  for (const bad of [undefined, "", "1hr", "daily", "daily 25:00", "weekly 10:30", "weekly XYZ 10:30", "every 1h"])
+    expect(validEvery(bad)).toBe(false);
+  expect(due("1hr", undefined, new Date())).toBe(false);
 });
 
 test("routine schedule catches up a slot missed while the machine slept", () => {

@@ -41,14 +41,34 @@ import { strayWorkspaces, taskWorkspace, workspaceRoot } from "./workspaces";
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
 
-/** every: "15m" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
+/** Interval schedules in minutes: "15m", "2h", "1d", "hourly"; undefined for clock schedules. */
+function intervalMinutes(every: string): number | undefined {
+  const s = every.trim();
+  if (s === "hourly") return 60;
+  const m = s.match(/^(\d+)(m|h|d)$/);
+  return m ? parseInt(m[1]) * { m: 1, h: 60, d: 1440 }[m[2] as "m" | "h" | "d"] : undefined;
+}
+
+/** True when `due` understands the schedule. An unknown one (say "1hr") is never due, so the routine would stop
+ *  silently; the scheduler reports it instead. "1h" and "1d" were set from settings on 2026-11-10 and were read
+ *  as clock times, which stopped issue-triage, triage-inbound and focus-check for over two weeks. */
+export function validEvery(every: string | undefined): boolean {
+  if (!every) return false;
+  if (intervalMinutes(every) !== undefined) return true;
+  const parts = every.trim().split(/\s+/);
+  const clock = /^([01]?\d|2[0-3]):[0-5]\d$/.test(parts.at(-1)!);
+  if (parts.length === 2) return clock && (parts[0] === "daily" || parts[0] === "weekdays");
+  if (parts.length === 3) return clock && parts[0] === "weekly" && /^(SUN|MON|TUE|WED|THU|FRI|SAT)/i.test(parts[1]);
+  return false;
+}
+
+/** every: "15m" | "2h" | "1d" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
 export function due(every: string, last: string | undefined, t = new Date()): boolean {
   const parts = every.trim().split(/\s+/);
   const lastT = last ? new Date(last) : null;
-  if (parts[0] === "hourly" || /^\d+m$/.test(parts[0])) {
-    const mins = parts[0] === "hourly" ? 60 : parseInt(parts[0]);
-    return !lastT || +t - +lastT >= mins * 60_000;
-  }
+  const mins = intervalMinutes(every);
+  if (mins !== undefined) return !lastT || +t - +lastT >= mins * 60_000;
+  if (!validEvery(every)) return false;
   const [h, m] = parts.at(-1)!.split(":").map(Number);
   // Most recent slot at or before t, stepping back over days the schedule excludes.
   // A machine asleep at 19:00 used to skip that day's routine entirely: `target` was
@@ -95,6 +115,15 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
     if (r.enabled === false) continue;
     const owner = r.scheduler ?? (r.kind === "learn" ? "each" : "primary"); // which host generates the task
     if (owner === "primary" ? !primary : owner !== "each" && owner !== host) continue;
+    if (!validEvery(r.every)) { // never due; say so once per bad value instead of staying silent
+      const key = `${r.name}#invalid`;
+      if (state[key] !== r.every) {
+        state[key] = r.every;
+        journal(host, `⚠️ routine \`${r.name}\` has an unknown schedule "${r.every}" and will not run; use 15m, 2h, 1d, hourly, daily HH:MM, weekdays HH:MM or weekly MON HH:MM`);
+      }
+      continue;
+    }
+    delete state[`${r.name}#invalid`];
     if (!due(r.every, state[r.name])) continue;
     if (r.kind === "learn") { // local session history → digest → task pinned to this host
       state[r.name] = new Date().toISOString();
