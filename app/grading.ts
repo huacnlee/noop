@@ -93,13 +93,15 @@ export function gradeOf(meta: Record<string, string | undefined>, withNotes = tr
   return { grades: meta.grade, fit: asFit(meta.grade_fit), ...(notes ? { notes } : {}) };
 }
 
-type Labels = { dims: string[]; short: string[]; fit: Record<Fit, string>; score: string; pending: string; title: string; review: string; legend: string };
+type Labels = { dims: string[]; short: string[]; fit: Record<Fit, string>; score: string; pending: string; title: string; review: string; legend: string; key: [Letter, string][] };
 export function labels(zh: boolean): Labels {
   return zh
     ? { dims: ["偏题", "体量", "风险", "验证缺口", "自主决定"], short: ["偏", "量", "险", "验", "决"], fit: { over: "过度", right: "恰当", under: "偏简" },
-        score: "关注分", pending: "待", title: "Noop 自评", review: "Noop 审查评分", legend: "越高越需要你看，S 最高，D 最低；关注分 = 五项之和 × 4" }
+        score: "关注分", pending: "待", title: "Noop 自评", review: "Noop 审查评分", legend: "越高越需要你看，S 最高，D 最低；关注分 = 五项之和 × 4",
+        key: [["S", "必须细看"], ["A", "重点看"], ["B", "看一眼"], ["C", "基本放心"]] }
     : { dims: ["Drift", "Size", "Risk", "Proof gap", "Own calls"], short: ["Dr", "Sz", "Rk", "Pf", "Cl"], fit: { over: "Over-built", right: "Right-sized", under: "Too thin" },
-        score: "Attention", pending: "?", title: "Noop self-grade", review: "Noop review grade", legend: "higher means look harder, S highest, D lowest; attention = sum of the five × 4" };
+        score: "Attention", pending: "?", title: "Noop self-grade", review: "Noop review grade", legend: "higher means look harder, S highest, D lowest; attention = sum of the five × 4",
+        key: [["S", "look closely"], ["A", "check"], ["B", "glance"], ["C", "fine"]] };
 }
 
 /** A changed file as a PR lists it. */
@@ -182,24 +184,42 @@ export function lastGradeMarker(comments: string[], kind: GradeKind): string | n
   return null;
 }
 
-/** A grade comment on a PR / MR: one line of scores, each marked with its color, and a one-line legend.
- *  The evidence stays in the app: a reviewer of the PR needs the scores at a glance, not the agent's reasoning.
+/** A radar chart of the five grades as an image URL (quickchart.io renders Chart.js to PNG): GitHub / GitLab comments
+ *  cannot run scripts or keep inline SVG, and an image is the one form every client, the mobile apps included, shows. */
+export function radarUrl(g: Grade, dims: string[]): string {
+  const l = letters(g.grades);
+  const score = attention(g.grades);
+  const line = webColor(score === null ? "?" : tier(score));
+  const c = {
+    type: "radar",
+    data: {
+      labels: dims.map((d, i) => `${d} ${l[i]}`),
+      datasets: [{ data: l.map((x) => POINTS[x]), backgroundColor: `${line}40`, borderColor: line, pointBackgroundColor: l.map((x) => webColor(x)), pointBorderColor: l.map((x) => webColor(x)), pointRadius: 6 }],
+    },
+    options: { legend: { display: false }, scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { fontSize: 14 } } },
+  };
+  return `https://quickchart.io/chart?w=360&h=280&bkg=white&c=${encodeURIComponent(JSON.stringify(c))}`;
+}
+
+/** A grade comment on a PR / MR: a one-line verdict, a radar chart of the five dimensions, the five grades as colored
+ *  cells, and a one-line color key. The evidence stays in the app: a reviewer needs the scores at a glance.
  *  A comment, not the description: the merge commit stays free of it, and each later run adds its own. */
 export function gradeMarkdown(g: Grade, zh: boolean, opts: { kind?: GradeKind; head?: string; signature?: string } = {}): string {
   const t = labels(zh);
   const kind = opts.kind ?? "self";
   const l = letters(g.grades);
   const score = attention(g.grades);
-  const mark = (x: Letter, label: string, value?: string) => badge(webColor(x), label, value);
   const title = kind === "review" ? t.review : t.title;
   const head = [
     `**${title}**${opts.head ? ` \`${opts.head.slice(0, 7)}\`` : ""}`,
-    score === null ? `${t.score} —` : mark(tier(score)!, t.score, `${score} ${tier(score)}`),
+    score === null ? `${t.score} —` : `${t.score} **${score}/100 ${tier(score)}**`,
     ...(g.fit ? [t.fit[g.fit]] : []),
-    ...l.map((x, i) => mark(x, t.dims[i], x === "?" ? t.pending : x)),
   ].join(" · ");
-  const legend = `${(["S", "A", "B"] as Letter[]).map((x) => mark(x, x)).join(" ")} ${mark("C", "C D")}${zh ? "：" : ": "}${t.legend}`;
-  return [gradeMarker(kind, g, opts.head), head, legend, ...(opts.signature ? ["", opts.signature] : [])].join("\n");
+  const cell = (x: Letter) => badge(webColor(x), x === "?" ? t.pending : x);
+  const table = [`| ${t.dims.join(" | ")} |`, `|${t.dims.map(() => ":-:").join("|")}|`, `| ${l.map(cell).join(" | ")} |`];
+  const key = t.key.map(([x, text]) => badge(webColor(x), x === "C" ? "C D" : x, text)).join(" ");
+  return [gradeMarker(kind, g, opts.head), head, "", `![${t.dims.map((d, i) => `${d} ${l[i]}`).join(", ")}](${radarUrl(g, t.dims)})`, "", ...table, "", key,
+    ...(opts.signature ? ["", opts.signature] : [])].join("\n");
 }
 
 /** `body` without the grade block earlier versions put on top of it; unchanged when it has none. */
