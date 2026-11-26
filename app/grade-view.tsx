@@ -30,10 +30,10 @@ export function gradeSummary(g: Grade): string {
 
 /** The radar: five axes, five rings (D to S), the grades as one polygon in the score's tier color. `axes` labels the axes. */
 export function GradeRadar(props: { grade: Grade; size: number; axes?: boolean; testID?: string }) {
-  // labels need room around the rings
+  // labels need room around the rings; the side labels still reach past the box, so the box keeps a margin for them
   const pad = () => (props.axes ? 30 : 1.5);
   return (
-    <View testID={props.testID} accessibilityLabel={gradeSummary(props.grade)} style={{ width: props.size, height: props.size, position: "relative" }}>
+    <View testID={props.testID} accessibilityLabel={gradeSummary(props.grade)} style={{ width: props.size, height: props.size, position: "relative", marginHorizontal: props.axes ? 24 : 0 }}>
       <Canvas
         style={{ width: props.size, height: props.size }}
         draw={(cx, s) => {
@@ -156,7 +156,7 @@ export function GradeCard(props: { grade: Grade; wide: boolean }) {
   const t = () => labels(zh());
   const notes = () => props.grade.notes ?? [];
   return (
-    <View testID="task-grade" style={{ gap: 12, padding: 14, borderRadius: 12, borderWidth: 1, borderColor: colors.line }}>
+    <View testID="task-grade" style={{ gap: 12, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: colors.line }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{t().title}</Text>
         <FitBadge fit={props.grade.fit} />
