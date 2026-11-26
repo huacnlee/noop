@@ -2405,7 +2405,6 @@ function Sidebar(props: {
                 <SidebarRow onPress={() => props.onTask(a().id)} selected={props.task() === a().id} title={`${a().id} · ${STATE_OF()[a().state ?? ""]?.[0] ?? ""}`}>
                   <Indicator status={TONE[a().state ?? ""] ?? "idle"} />
                   <Text style={{ ...rowText(), color: colors.muted }}>{a().title}</Text>
-                  <If when={a().grade}>{(g) => <GradeChip grade={g()} />}</If>
                   <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{since(a().updated)}</Text>
                 </SidebarRow>
               )}
