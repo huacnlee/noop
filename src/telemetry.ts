@@ -13,7 +13,7 @@ import { type Cfg, CODE, HOME_DIR, isPrimary } from "./core";
  */
 export const TELEMETRY_URL = "https://metry.huacnlee-account.workers.dev/api/event";
 // Edgemetry site shared with the website; the /daemon/ path keeps heartbeats apart from page views in the dashboard.
-const SITE = "noop.agent";
+const SITE = "noop";
 const STAMP = () => join(HOME_DIR, "telemetry-last"); // machine-local, outside the synced data folder
 
 export function telemetryEnabled(cfg: Cfg, env = process.env): boolean {
