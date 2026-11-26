@@ -6,6 +6,7 @@ import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit, validE
 import { matches, signature, type Cfg } from "../src/core";
 import { dirtyPaths } from "../src/setup";
 import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
+import { shellBash } from "../src/shell";
 import { tooManyWakes } from "../src/waits";
 
 test("dirtyPaths keeps every path intact, including the first line", () => {
@@ -422,7 +423,7 @@ test("a result block survives a later turn from a background task notification",
     { type: "result", result: '```json\n{"status":"done","summary":"tested"}\n```' },
     { type: "result", result: "that notification changes nothing" },
   ].map((l) => JSON.stringify(l)).join("\n");
-  const cfg = { clis: { fake: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "stream-json", lines] } } } as unknown as Cfg;
+  const cfg = { clis: { fake: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"', "stream-json", lines] } } } as unknown as Cfg;
   const log = `${tmpdir()}/noop-run-${process.pid}.log`;
   const res = parseResult(await runAgent("fake", "", tmpdir(), cfg, log));
   rmSync(log, { force: true });
@@ -718,7 +719,7 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
     { type: "item.completed", item: { type: "agent_message", text: "" } },
     { type: "turn.completed" },
   ].map((e) => JSON.stringify(e)).join("\n");
-  const cfg = { clis: { codex: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
+  const cfg = { clis: { codex: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
   const log = `${tmpdir()}/noop-codex-${process.pid}.log`;
   try {
     expect(parseResult(await runAgent("codex", "", tmpdir(), cfg, log))).toMatchObject({ status: "done", summary: "captured" });
@@ -740,7 +741,7 @@ test("a Codex workspace credit error reaches classify instead of looking like a 
     { type: "turn.failed", error: { message } },
   ].map((e) => JSON.stringify(e)).join("\n");
   const stderr = "2026-11-26T12:36:11.380112Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out";
-  const cfg = { clis: { codex: { command: ["sh", "-c", 'printf "%s\\n" "$1"; printf "%s\\n" "$2" >&2; exit 1', "--json", lines, stderr] } } } as unknown as Cfg;
+  const cfg = { clis: { codex: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"; printf "%s\\n" "$2" >&2; exit 1', "--json", lines, stderr] } } } as unknown as Cfg;
   const log = `${tmpdir()}/noop-codex-credits-${process.pid}.log`;
   try {
     const out = await runAgent("codex", "", tmpdir(), cfg, log);

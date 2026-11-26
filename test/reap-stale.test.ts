@@ -2,9 +2,7 @@
 // copy from the stale claim and reset its attempt/stall counters, so a task could retry forever.
 // 2026-11-25: 69 "requeued (host … offline)" lines for three tasks, all on the host that was writing them.
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { DATA, HOME_DIR, P, claim, readDoc, writeDoc } from "../src/core";
 import { reapStale } from "../src/cli";
 import * as sync from "../src/sync";
@@ -44,8 +42,7 @@ test("an own-host orphan with no queued copy is still requeued", () => {
 
 test("a failed claim does not restore a stale active copy of a task that is queued again", async () => {
   sync.setSyncData(DATA, HOME_DIR);
-  const W = mkdtempSync(join(tmpdir(), "hub-reap-"));
-  const t = await sync.fakeTransport(join(W, "worker.sqlite"), "test");
+  const t = await sync.fakeTransport(":memory:", "test"); // in memory: Windows cannot remove a database file still open
   sync.syncTiming.pullMinMs = 0; sync.syncTiming.lazyPushMs = 0;
   const id = "T-9403";
   const inbox = P("tasks", "inbox", `${id}.md`), active = P("tasks", "active", `${id}.md`);
@@ -66,6 +63,5 @@ test("a failed claim does not restore a stale active copy of a task that is queu
     expect(existsSync(inbox)).toBe(true); // the task stays queued
   } finally {
     sync.setTransport(null);
-    rmSync(W, { recursive: true, force: true });
   }
 });

@@ -37,3 +37,13 @@ test("pickBash: NOOP_BASH wins when the file exists, and is ignored when it does
 test("pickBash: with only the WSL launcher on PATH it falls back to plain bash (unchanged behaviour)", () => {
   expect(win("C:\\Windows\\System32", [WSL])).toBe("bash");
 });
+
+test("pickBash: Git for Windows' default PATH (Git\\cmd only) still finds Git\\bin\\bash.exe", () => {
+  const bin = "D:\\tools\\Git\\bin\\bash.exe";
+  expect(win("C:\\Windows\\System32;D:\\tools\\Git\\cmd", [WSL, "D:\\tools\\Git\\cmd\\git.exe", bin])).toBe(bin);
+  // a cmd folder without git.exe is not Git
+  expect(win("C:\\Windows\\System32;D:\\other\\cmd", [WSL, "D:\\other\\bin\\bash.exe"])).toBe("bash");
+  // nothing on PATH: the standard install folder
+  const pf = "C:\\Program Files\\Git\\bin\\bash.exe";
+  expect(win("C:\\Windows\\System32", [WSL, pf], { ProgramFiles: "C:\\Program Files" })).toBe(pf);
+});

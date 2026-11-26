@@ -6,11 +6,13 @@
 
 import { existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { $ } from "bun";
 import type { Cfg } from "./core";
 
 const expand = (p: string, home = homedir()) => resolve(p.replace(/^~(?=$|\/)/, home));
+// path.sep, not "/": on Windows resolved paths use backslashes
+const within = (p: string, root: string) => p === root || p.startsWith(root + sep);
 
 /** The one folder that holds every Noop working copy: `[resources].workspace_dir`, default ~/.noop/work. */
 export const workspaceRoot = (cfg: Cfg, home = homedir()): string =>
@@ -28,7 +30,7 @@ export async function taskWorkspace(meta: { id: string; repo?: string } | Record
   if (!meta.repo) return fallback;
   const repo = expand(meta.repo);
   const root = workspaceRoot(cfg);
-  if (repo === root || repo.startsWith(root + "/")) return repo; // already a Noop workspace
+  if (within(repo, root)) return repo; // already a Noop workspace
   const dir = join(root, workspaceName(repo, meta.id));
   if (existsSync(dir)) return dir;
   mkdirSync(root, { recursive: true });
@@ -51,7 +53,7 @@ export type Stray = { path: string; kind: "worktree" | "claude-worktree" | "task
  *  Read-only: it lists them for the owner to confirm; nothing is removed. */
 export async function strayWorkspaces(cfg: Cfg, home = homedir()): Promise<Stray[]> {
   const keep = [workspaceRoot(cfg, home), ...(cfg.resources?.scratch_dirs ?? ["~/.agent-hub/work"]).map((d: string) => expand(d, home))];
-  const managed = (p: string) => keep.some((k) => p === k || p.startsWith(k + "/"));
+  const managed = (p: string) => keep.some((k) => within(p, k));
   const roots: string[] = (cfg.resources?.work_dirs ?? ["~/work"]).map((d: string) => expand(d, home)).filter(existsSync);
   const out = new Map<string, Stray>();
   const dirs = roots.flatMap((root) => readdirSync(root).map((name) => ({ name, dir: join(root, name) })))
@@ -62,9 +64,9 @@ export async function strayWorkspaces(cfg: Cfg, home = homedir()): Promise<Stray
   for (const { dir } of dirs) {
     if (!lstatSync(join(dir, ".git")).isDirectory()) continue;
     const list = await $`git -C ${dir} worktree list --porcelain`.quiet().nothrow();
-    const paths = list.stdout.toString().split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9).trim());
+    const paths = list.stdout.toString().split("\n").filter((l) => l.startsWith("worktree ")).map((l) => resolve(l.slice(9).trim())); // git prints C:/... on Windows
     for (const p of paths.slice(1)) if (!managed(p) && !out.has(p) && existsSync(p))
-      out.set(p, { path: p, kind: p.includes("/.claude/worktrees/") ? "claude-worktree" : "worktree", repo: dir });
+      out.set(p, { path: p, kind: p.includes(join(sep, ".claude", "worktrees", sep)) ? "claude-worktree" : "worktree", repo: dir });
     const cw = join(dir, ".claude", "worktrees");
     if (existsSync(cw)) for (const w of readdirSync(cw)) {
       const p = join(cw, w);

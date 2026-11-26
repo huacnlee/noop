@@ -4,7 +4,8 @@ import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import { writeMacAgent } from "../src/setup";
 
-test("fresh macOS service directories and XML-safe paths", () => {
+// the folder name "<test>" is not a valid Windows path, and the plist is a macOS service
+test.skipIf(process.platform === "win32")("fresh macOS service directories and XML-safe paths", () => {
   const root = mkdtempSync(join(tmpdir(), "noop-mac-service-"));
   try {
     const home = join(root, "Mac & Work <test>");
