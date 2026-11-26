@@ -4864,14 +4864,30 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (!d) return null;
     return <DocPane doc={d} wide={!touch} expanded={readerWide()} onExpand={() => { if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut")); readerWide.set(!readerWide()); }} onClose={() => reading.set(null)} />;
   };
-  const visibleMessages = signal<HubEvent[]>([]);
+  /** The messages on screen, as the list last reported them, and the view they were in. */
+  const visibleMessages = signal<{ scope: string | null; events: HubEvent[] }>({ scope: null, events: [] });
+  let readTimer: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(readTimer));
   effect(() => {
+    clearTimeout(readTimer);
     if (!reads.loaded() || lifecycle() !== "active") return;
     const route = top();
     if (onChannel()) {
+      const slug = scope();
+      // At the end the newest row is on screen: the whole view is read once it stayed there a moment (after the
+      // entry's "new messages" divider is placed). The list reports its viewable rows by index only, so a channel
+      // with as many rows as the view before reports nothing new; this doesn't wait for that report.
+      if (atEnd()) {
+        shown();
+        readTimer = setTimeout(() => {
+          if (untracked(atEnd) && untracked(onChannel) && untracked(scope) === slug && untracked(lifecycle) === "active") reads.read(untracked(shown) as HubEvent[]);
+        }, 300);
+        return;
+      }
       // Reading is top-down: everything at or above the newest row on screen counts as read, so rows the
-      // reader scrolled past (or jumped over to the bottom) don't pop back as unread later.
-      const seen = visibleMessages();
+      // reader scrolled past don't pop back as unread later. Rows reported in another view say nothing about this one.
+      const v = visibleMessages();
+      const seen = v.scope === slug ? v.events : [];
       const newest = seen.reduce((ts, e) => (e.ts > ts ? e.ts : ts), "");
       reads.read(newest ? untracked(shown).filter((e) => e.ts <= newest) as HubEvent[] : seen);
     }
@@ -5514,7 +5530,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               onViewableItemsChange={({ viewableItems }) => {
                 firstVisibleRow = viewableItems.reduce((m, t) => Math.min(m, t.index ?? Infinity), Infinity);
                 lastVisibleRow = viewableItems.reduce((m, t) => Math.max(m, t.index ?? -1), -1);
-                visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : []));
+                visibleMessages.set({ scope: untracked(scope), events: viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : []) });
               }}
               alignment="bottom"
               maintainVisibleContentPosition={{ autoscrollToBottomThreshold: AT_END }}

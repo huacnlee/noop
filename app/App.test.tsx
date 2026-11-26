@@ -2379,6 +2379,29 @@ test("channels share per-message read state with main chat, and Menu can mark al
   expect(app.shows("id:menu-unread-count")).toBe(false);
 });
 
+test("switching to a channel with as many rows reads its newest message, not the last view's rows", async () => {
+  // The list reports viewable rows by index; a channel with the same rows as the one before reports nothing new.
+  const room = (slug: string, name: string, at: string) => ({ slug, name, goal: name, status: "active", created: ts(-900), last_activity: at, stale: false, count: 1, refs: [], items: [] });
+  const a = { id: "room-a", ts: ts(40), from: "agent", kind: "notice", text: "Room A update", channel: "room-a" };
+  const b = { id: "room-b", ts: ts(50), from: "agent", kind: "notice", text: "Room B update", channel: "room-b" };
+  const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+    ...hub([], [a, b]),
+    [`GET ${URL}/api/channels`]: { body: { channels: [room("room-a", "Room A", a.ts), room("room-b", "Room B", b.ts)] } },
+    [`GET ${URL}/api/channels/feed?*`]: (r: { url: string }) => ({ body: { events: r.url.includes("room-a") ? [a] : [b] } }),
+  } });
+  const readIds = () => { const raw = app.storage()[`hub.read:${URL}`]; return raw ? (JSON.parse(raw).ids as string[]) : []; };
+  await app.waitFor("id:side-channel-unread-room-a");
+  await app.waitFor("id:side-channel-unread-room-b");
+  await app.press("id:side-channel-room-a");
+  await app.waitFor("text:Room A update");
+  await app.waitUntil(() => readIds().includes("room-a"), { timeout: 10000 });
+  await app.press("id:side-channel-room-b");
+  await app.waitFor("text:Room B update");
+  await app.waitUntil(() => readIds().includes("room-b"), { timeout: 10000 });
+  await app.waitUntil(() => !app.shows("id:side-channel-unread-room-b"));
+  expect(app.shows("id:unread-dot-room-b")).toBe(false);
+});
+
 describe("folding page heads", () => {
   const omamail = { slug: "omamail", name: "Omamail", goal: "Mail quality and releases", status: "active", created: ts(-900), last_activity: ts(5), stale: false, count: 0, refs: [], items: [] };
   const quiet = { ...omamail, slug: "quiet", name: "Quiet room", goal: "Nothing much" };
