@@ -236,7 +236,7 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
         delete t.activity;
         const summary = resultOf(text, title);
         t.runs = [{ ts: iso(), host: "studio", cli: "claude", status: "done", summary }];
-        say({ from: "lead@studio", kind: "notice", ref: t.id, ...(owner.channel ? { channel: owner.channel } : {}), text: summary });
+        say({ from: "lead@studio", kind: "notice", ref: t.id, text: summary }); // results show in the main chat too
         pushStatus();
       });
     });

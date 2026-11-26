@@ -88,18 +88,6 @@ test("channelDigest: the channel's own talk (incl. the team's replies) plus main
   expect(digest2(evs, ["T-0001"], "b").map((e) => e.id)).toEqual(["3", "4"]);
 });
 
-import { originChannel } from "../src/channels";
-test("originChannel: a task started in a channel, and cards about it, route back there", () => {
-  reset();
-  writeDoc(P("tasks", "done", "T-0901.md"), { id: "T-0901", title: "x", origin_channel: "nsh-i18n" }, "x");
-  writeDoc(P("tasks", "inbox", "T-0902.md"), { id: "T-0902", title: "y" }, "y");
-  writeDoc(P("decisions", "open", "D-0901.md"), { id: "D-0901", task: "T-0901" }, "q");
-  expect(originChannel("T-0901")).toBe("nsh-i18n");
-  expect(originChannel("D-0901")).toBe("nsh-i18n");
-  expect(originChannel("T-0902")).toBeUndefined();
-  expect(originChannel("T-9999")).toBeUndefined();
-});
-
 test("brain context: a message said in a channel names the channel and its goal", () => {
   reset();
   const c = context(store(), { text: "进度？", channel: { slug: "nsh-i18n", name: "NSH i18n", goal: "translations" } });

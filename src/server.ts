@@ -23,7 +23,7 @@ import { mediaResponse, ownerAttachments, sniffImage, uploadId, uploadProblem } 
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
 import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
-import { channels, originChannel, updateChannel } from "./channels";
+import { channels, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
 import { localSecretList, localSecretPut } from "./secrets";
@@ -84,8 +84,8 @@ export const setMirror = (fn: (e: Event) => void) => { mirror = fn; };
 export function appendEvent(e: Omit<Event, "id" | "ts"> & Partial<Pick<Event, "id" | "ts">>, opts: { mirror?: boolean } = {}): Event {
   mkdirSync(FEED_DIR, { recursive: true });
   const ev: Event = { id: crypto.randomUUID(), ts: new Date().toISOString(), ...e };
-  // results and cards of work started in a channel stay in that channel
-  if (!ev.channel && ev.ref) { const c = originChannel(ev.ref); if (c) ev.channel = c; }
+  // results and cards of work started in a channel are not tagged with it: they show in the main chat, and the
+  // channel's digest picks them up through its task refs (the owner reads conclusions in the main chat, 2026-11-26)
   if (opts.mirror !== false) mirror?.(ev);
   appendFileSync(join(FEED_DIR, `${today()}.jsonl`), JSON.stringify(ev) + "\n");
   for (const ws of sockets) ws.send(JSON.stringify(ev));
