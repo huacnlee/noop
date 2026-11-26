@@ -42,34 +42,36 @@ test("a grade survives the task file's frontmatter, and list views leave the not
   expect(gradeOf({ grade: "nope" })).toBeUndefined();
 });
 
-test("the PR comment is a short Chinese title line and the app card's radar and graded bars, per GitHub theme", () => {
+test("the PR comment is an English title line and the radar and graded bars with English names over small Chinese", () => {
   const g = parseGrades(result)!;
   const md = gradeMarkdown(g, { head: "f0edbe11e6434c", signature: "sig" });
   const lines = md.split("\n");
   expect(lines[0]).toBe("<!-- noop-grade:self DCBCD right f0edbe1 -->");
-  expect(lines[1]).toBe("**Noop 自评** · **恰当** · 关注分 36 C · `f0edbe1`");
+  expect(lines[1]).toBe("**Self-grade** · `f0edbe1`");
   expect(lines).toHaveLength(6);
   expect(lines.at(-1)).toBe("sig");
   expect(md).not.toContain("changes how one page sorts");
   expect(lines[3]).toStartWith("<table><tr><td><picture>");
-  expect(lines[3]).toContain('alt="偏题 D，体量 C，风险 B，验证缺口 C，自主决定 D"');
+  expect(lines[3]).toContain('alt="恰当，偏题 D，体量 C，风险 B，验证缺口 C，自主决定 D"');
   expect(CHART_WIDTH * 2).toBeLessThanOrEqual(500);
-  const urls = [...lines[3].matchAll(/(?:srcset|src)="([^"]+)"/g)].map((m) => m[1]);
+  const urls = [...lines[3].matchAll(/(?:srcset|src)="([^"]+)"/g)].map((m) => m[1].split("&c=")[1]);
   expect(urls).toHaveLength(6);
-  const charts = urls.map((u) => ({ u, c: JSON.parse(decodeURIComponent(u.split("&c=")[1])) }));
-  for (const { u } of charts) expect(u).toContain("bkg=transparent");
-  const [radar, bars] = [charts.filter(({ c }) => c.type === "radar"), charts.filter(({ c }) => c.type === "horizontalBar")];
-  expect(radar.map(({ c }) => c.options.scale.pointLabels.fontColor)).toEqual(["#e6edf3", "#1f2328", "#8b949e"]);
-  expect(radar[0].c.data.datasets[0].data).toEqual([1, 2, 3, 2, 1]);
-  expect(bars[0].c.data.labels).toEqual(["偏题  D", "体量  C", "风险  B", "验证缺口  C", "自主决定  D"]);
-  // risk B: three of five segments in blue
-  const filled = bars[1].c.data.datasets.filter((d: { data: number[] }) => d.data[0] === 1).map((d: { backgroundColor: string[] }) => d.backgroundColor[2]);
-  expect(filled).toEqual(["#4184e4", "#4184e4", "#4184e4", "#d0d7de", "#d0d7de"]);
-  expect(gradeMarkdown(g, { kind: "review" })).toMatch(/^<!-- noop-grade:review DCBCD right - -->\n\*\*Noop 审查评分\*\* · /);
+  for (const c of urls) expect(c).not.toContain(","); // <source srcset> splits on commas
+  const decoded = urls.map(decodeURIComponent);
+  const [radar, bars] = [decoded.filter((c) => c.includes("type:'radar'")), decoded.filter((c) => c.includes("type:'horizontalBar'"))];
+  // labels are functions, so the config is JavaScript, not JSON
+  expect(radar[0]).toContain("function(v,c){return ['Drift','Size','Risk','Proof gap','Own calls'][c.dataIndex]}");
+  expect(radar[0]).toContain("function(v,c){return ['偏题','体量','风险','验证缺口','自主决定'][c.dataIndex]}");
+  expect(radar[0]).toContain("color:'#e6edf3'");
+  expect(bars[0]).toContain("['Right-sized','Drift  D','Size  C','Risk  B','Proof gap  C','Own calls  D']");
+  expect(bars[0]).toContain("['恰当','偏题','体量','风险','验证缺口','自主决定']");
+  expect(bars[1]).toContain("'#4184e4'");
+  for (const u of lines[3].matchAll(/(?:srcset|src)="([^"]+)"/g)) expect(u[1].length).toBeLessThan(2600); // GitHub's proxy fails on long URLs
+  expect(gradeMarkdown(g, { kind: "review" })).toMatch(/^<!-- noop-grade:review DCBCD right - -->\n\*\*Review grade\*\*$/m);
 });
 
 test("the block earlier versions put in the description comes out; the latest grade comment of a kind is found", () => {
-  const old = "<!-- noop-grade -->\n**Noop 自评** · x\nlegend\n<!-- /noop-grade -->\n\nFixes #12.\n\nNoop signature\n";
+  const old = "<!-- noop-grade -->\n**Self-grade** · x\nlegend\n<!-- /noop-grade -->\n\nFixes #12.\n\nNoop signature\n";
   expect(withoutGradeBlock(old)).toBe("Fixes #12.\n\nNoop signature\n");
   expect(withoutGradeBlock("Fixes #12.")).toBe("Fixes #12.");
   const a = gradeMarker("self", { grades: "DDDDD" }, "aaaaaaa1"), b = gradeMarker("self", { grades: "CDDDD" }, "bbbbbbb2");
@@ -86,7 +88,7 @@ test("a run's PRs and MRs come from its prs field, else from its summary", () =>
   expect(gitlabMr("https://gitlab.example.com/g/sub/p/-/merge_requests/7")).toEqual({ host: "gitlab.example.com", repo: "g/sub/p", iid: "7" });
 });
 
-test("grading a PR comments on it in the owner's language, cleans an old description block, and skips an unchanged grade", async () => {
+test("grading a PR comments on it, cleans an old description block, and skips an unchanged grade", async () => {
   const calls: { cmd: string[]; input?: string; env?: Record<string, string> }[] = [];
   let comments: { body: string }[] = [{ body: "LGTM" }];
   const body = "<!-- noop-grade -->\nold\n<!-- /noop-grade -->\n\nOriginal body\n";
@@ -105,13 +107,13 @@ test("grading a PR comments on it in the owner's language, cleans an old descrip
   expect(edit.input).toBe("Original body\n");
   const post = calls.find((c) => c.cmd[0] === "gh" && c.cmd[2] === "comment")!;
   expect(post.cmd).toEqual(["gh", "pr", "comment", "https://github.com/o/r/pull/12", "--body-file", "-"]);
-  expect(post.input!.startsWith("<!-- noop-grade:self DCBCD - abcdef0 -->\n**Noop 自评** · 关注分 36 C · `abcdef0`")).toBe(true);
+  expect(post.input!.startsWith("<!-- noop-grade:self DCBCD - abcdef0 -->\n**Self-grade** · `abcdef0`\n")).toBe(true);
   expect(post.input!.endsWith("\n\nsig")).toBe(true);
   const note = calls.find((c) => c.cmd[0] === "glab" && c.cmd[2] === "note")!;
   expect(note.cmd.slice(0, 5)).toEqual(["glab", "mr", "note", "7", "-R"]);
   expect(note.env).toEqual({ GITLAB_HOST: "gitlab.example.com" });
   // every project gets the same comment, in the owner's language
-  expect(note.cmd.at(-1)).toContain("**Noop 自评**");
+  expect(note.cmd.at(-1)).toContain("**Self-grade**");
   // the same grade on the same commit again: nothing new is posted
   calls.length = 0;
   expect(await stampReview("https://github.com/o/r/pull/12", g, exec)).toBe(true);

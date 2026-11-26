@@ -173,21 +173,45 @@ export function lastGradeMarker(comments: string[], kind: GradeKind): string | n
   return null;
 }
 
-/** What a grade comment says: the owner's language (Chinese), as the app's grade card does. A comment is a note to
- *  the owner, not project text, so it does not follow the project's English rule. */
-const WEB = { ...labels(true), review: "Noop 审查评分" };
+/** What a grade comment says. The title and each dimension's name are English, with the Chinese name in small muted
+ *  type under it (the owner's layout, 2026-11-26); the alt text stays Chinese. */
+const EN = labels(false), ZH = labels(true); // EN: Drift, Size, Risk, Proof gap, Own calls
+const TITLE = { self: "Self-grade", review: "Review grade" } as const;
 
 /** The chart's ink on a transparent background, per GitHub theme: "auto" is a mid gray for clients that ignore `<picture>`. */
 const INK = { light: "#1f2328", dark: "#e6edf3", auto: "#8b949e" } as const;
-const EMPTY = { light: "#d0d7de", dark: "#3d444d", auto: "rgba(139,148,158,0.35)" } as const;
+const MUTED = { light: "#6e7781", dark: "#8b949e", auto: "#8b949e" } as const;
+const EMPTY = { light: "#d0d7de", dark: "#3d444d", auto: "#8b949e59" } as const;
 export type ChartTheme = keyof typeof INK;
 
 /** Rendered size of each of the two charts on the page, in CSS pixels; the PNGs are twice that for sharp text. */
 export const CHART_WIDTH = 220;
-const RADAR_H = 190, BARS_W = 220, BARS_H = 150;
+const RADAR_H = 200, BARS_W = 220, BARS_H = 200;
 
+/** The chart config as terse JavaScript (quickchart.io evaluates it): unquoted keys, single-quoted strings, and
+ *  functions (Chart.js wants one to label each point) as `Fn` values. Kept short because GitHub's image proxy drops
+ *  images whose URL is too long. Commas are escaped: `<source srcset>` splits on them. */
+class Fn { constructor(readonly src: string) {} }
+const pick = (texts: string[]) => new Fn(`function(v,c){return ${js(texts)}[c.dataIndex]}`);
+function js(v: unknown): string {
+  if (v instanceof Fn) return v.src;
+  if (Array.isArray(v)) return `[${v.map(js).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.entries(v).map(([k, x]) => `${k}:${js(x)}`).join(",")}}`;
+  if (typeof v === "string") return `'${v.replace(/[\\']/g, "\\$&")}'`;
+  return String(v);
+}
 const chartUrl = (c: unknown, w: number, h: number) =>
-  `https://quickchart.io/chart?w=${w}&h=${h}&devicePixelRatio=2&bkg=transparent&c=${encodeURIComponent(JSON.stringify(c))}`;
+  `https://quickchart.io/chart?w=${w}&h=${h}&devicePixelRatio=2&bkg=transparent&c=${encodeURI(js(c)).replace(/[#&+?=,]/g, encodeURIComponent)}`;
+
+/** Two-line labels (English, then smaller muted Chinese) drawn by the datalabels plugin: Chart.js axis labels take
+ *  one color and size. `at` places each label; the padding nudges the two lines apart around that point. */
+function twoLine(theme: ChartTheme, en: string[], zh: string[], data: number[], at: [Record<string, unknown>, Record<string, unknown>], extra = {}) {
+  const base = { ...extra, data, backgroundColor: "#0000" };
+  return [
+    { ...base, datalabels: { ...at[0], display: true, color: INK[theme], font: { size: 12 }, formatter: pick(en) } },
+    { ...base, datalabels: { ...at[1], display: true, color: MUTED[theme], font: { size: 9 }, formatter: pick(zh) } },
+  ];
+}
 
 /** The five grades on a radar, as the app's card draws it (quickchart.io renders Chart.js to PNG: GitHub comments run
  *  no scripts and drop inline SVG and data: images, and an image is what every client, the mobile apps too, shows). */
@@ -195,26 +219,38 @@ export function radarUrl(g: Grade, theme: ChartTheme = "auto"): string {
   const l = letters(g.grades);
   const line = webColor(tier(attention(g.grades)) ?? "?");
   const grid = EMPTY[theme];
+  // each label sits outside its corner: English above the point, Chinese below; side corners sit farther out
+  const at = [{ anchor: "center", align: "top", offset: -1 }, { anchor: "center", align: "bottom", offset: 0 }];
   return chartUrl({
     type: "radar",
-    data: { labels: WEB.dims, datasets: [{ data: l.map((x) => POINTS[x]), backgroundColor: `${line}33`, borderColor: line, pointBackgroundColor: line, pointBorderColor: line, pointRadius: 3 }] },
-    options: { legend: { display: false }, layout: { padding: 2 },
-      scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { fontSize: 12, fontColor: INK[theme] }, gridLines: { color: grid }, angleLines: { color: grid } } },
+    data: { labels: EN.dims.map(() => ""), datasets: [
+      { data: l.map((x) => POINTS[x]), backgroundColor: `${line}33`, borderColor: line, pointBackgroundColor: line, pointBorderColor: line, pointRadius: 3 },
+      ...twoLine(theme, EN.dims, ZH.dims, [5.9, 6.9, 6.7, 6.7, 6.9], at, { fill: false, borderColor: "#0000", pointRadius: 0 })] },
+    options: { legend: { display: false }, plugins: { datalabels: { display: false, padding: 0 } }, layout: { padding: { top: 40, bottom: 36, left: 30, right: 30 } },
+      scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { display: false }, gridLines: { color: grid }, angleLines: { color: grid } } },
   }, CHART_WIDTH, RADAR_H);
 }
 
-/** Each dimension's name and letter, and five segments filled up to its grade in the grade's color: the color key. */
+/** The fit on top, then each dimension's name and letter with five segments filled up to its grade in the grade's
+ *  color: the color key. */
 export function barsUrl(g: Grade, theme: ChartTheme = "auto"): string {
   const l = letters(g.grades);
+  const rows: Letter[] = ["?", ...l]; // row 0 holds the fit, no bars
+  const en = [g.fit ? EN.fit[g.fit] : "", ...EN.dims.map((d, i) => `${d}  ${l[i]}`)];
+  const zh = [g.fit ? ZH.fit[g.fit] : "", ...ZH.dims];
+  // left of the bars, right-aligned: English up, Chinese down
+  const at = [{ anchor: "start", align: 208, offset: 3 }, { anchor: "start", align: 148, offset: 3 }];
   return chartUrl({
     type: "horizontalBar",
-    data: { labels: WEB.dims.map((d, i) => `${d}  ${l[i]}`),
-      // five segments with a transparent gap between each
-      datasets: [0, 1, 2, 3, 4].flatMap((k) => [
-        ...(k ? [{ data: l.map(() => 0.2), backgroundColor: "rgba(0,0,0,0)", barPercentage: 0.6 }] : []),
-        { data: l.map(() => 1), backgroundColor: l.map((x) => (k < POINTS[x] ? webColor(x) : EMPTY[theme])), barPercentage: 0.6 }]) },
-    options: { legend: { display: false }, layout: { padding: 2 },
-      scales: { xAxes: [{ stacked: true, display: false, ticks: { min: 0, max: 5.8 } }], yAxes: [{ stacked: true, gridLines: { display: false, drawBorder: false }, ticks: { fontSize: 13, fontColor: INK[theme] } }] } },
+    data: { labels: rows.map(() => ""),
+      datasets: [
+        ...twoLine(theme, en, zh, rows.map(() => 0), at),
+        // five segments with a transparent gap between each; kept terse, GitHub drops images whose URL is too long
+        ...[0, 1, 2, 3, 4].flatMap((k) => [
+          ...(k ? [{ data: rows.map((_, r) => (r ? 0.2 : 0)), backgroundColor: "#0000" }] : []),
+          { data: rows.map((_, r) => (r ? 1 : 0)), backgroundColor: rows.map((x, r) => (r && k < POINTS[x] ? webColor(x) : EMPTY[theme])) }])] },
+    options: { legend: { display: false }, plugins: { datalabels: { display: false, padding: 0 } }, layout: { padding: { left: 88, right: 2, top: 2, bottom: 2 } },
+      scales: { xAxes: [{ stacked: true, display: false, ticks: { min: 0, max: 5.8 } }], yAxes: [{ stacked: true, barPercentage: 0.6, gridLines: { display: false, drawBorder: false }, ticks: { display: false } }] } },
   }, BARS_W, BARS_H);
 }
 
@@ -223,20 +259,14 @@ const picture = (url: (t: ChartTheme) => string, w: number, alt: string) =>
   + `<source media="(prefers-color-scheme: light)" srcset="${url("light")}">`
   + `<img alt="${alt}" width="${w}" src="${url("auto")}"></picture>`;
 
-/** A grade comment on a PR / MR, laid out like the app's grade card: a short title line (title, fit, attention score),
- *  then the radar and the graded bars side by side, each drawn for GitHub's light or dark theme through `<picture>`.
+/** A grade comment on a PR / MR, laid out like the app's grade card: a short English title line, then the radar and
+ *  the graded bars (with the fit on top) side by side, each drawn for GitHub's light or dark theme through `<picture>`.
  *  The evidence stays in the app. A comment, not the description: the merge commit stays free of it. */
 export function gradeMarkdown(g: Grade, opts: { kind?: GradeKind; head?: string; signature?: string } = {}): string {
   const kind = opts.kind ?? "self";
   const l = letters(g.grades);
-  const score = attention(g.grades);
-  const head = [
-    `**${kind === "review" ? WEB.review : WEB.title}**`,
-    ...(g.fit ? [`**${WEB.fit[g.fit]}**`] : []),
-    `${WEB.score} ${score === null ? WEB.pending : `${score} ${tier(score)}`}`,
-    ...(opts.head ? [`\`${opts.head.slice(0, 7)}\``] : []),
-  ].join(" · ");
-  const alt = WEB.dims.map((d, i) => `${d} ${l[i]}`).join("，");
+  const head = [`**${TITLE[kind]}**`, ...(opts.head ? [`\`${opts.head.slice(0, 7)}\``] : [])].join(" · ");
+  const alt = [...(g.fit ? [ZH.fit[g.fit]] : []), ...ZH.dims.map((d, i) => `${d} ${l[i]}`)].join("，");
   const charts = `<table><tr><td>${picture((t) => radarUrl(g, t), CHART_WIDTH, alt)}</td><td>${picture((t) => barsUrl(g, t), BARS_W, alt)}</td></tr></table>`;
   return [gradeMarker(kind, g, opts.head), head, "", charts, ...(opts.signature ? ["", opts.signature] : [])].join("\n");
 }
