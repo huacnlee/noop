@@ -3430,6 +3430,9 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
             </View>
           </View>
         </Group>
+        <Group title={L("IP allow-list", "IP 白名单")} hint={ALLOW_HINT()}>
+          <AllowIpRows hub={props.hub} />
+        </Group>
         </If>
       </View>
     </Scroll>
@@ -3687,6 +3690,140 @@ const SECRETS_HINT = () => L(
   "Entered once here, used by every machine. Stored encrypted in your own cloud, never in the team's data; this app can replace or delete a key but never show it again. A machine's own environment variable is used when no key here has that name.",
   "在这里填一次，所有机器都能用。加密保存在你自己的云端，不进团队数据；客户端只能替换或删除，无法再查看。这里没有的名字，才使用机器自己的同名环境变量。",
 );
+
+const ALLOW_HINT = () => L(
+  "Only these networks can open Noop (the app, the web page and the machines). Edit, then Save: the primary updates the server within a minute. A range such as 1.2.3.0/24 covers a whole network; phones on mobile data often change IPv6 addresses, so add their /64.",
+  "只有这些网络能打开 Noop（客户端、网页和各台机器）。编辑后点保存，主控机会在一分钟内更新线上。可以写网段，如 1.2.3.0/24；手机流量的 IPv6 地址常变，写它的 /64 网段。",
+);
+
+type AllowView = { entries: { value: string; mine: boolean }[]; on: boolean; ip: string; machines: string[]; pending: { value: string; at: number; error?: string } | null };
+/** Loose shape check before an entry goes into the draft; the Worker parses it for real on Save. */
+const ALLOW_ENTRY = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]*:[0-9a-f:.]*)(\/\d{1,3})?$/i;
+
+/** The Worker's IP allow-list (HUB_ALLOW_IPS): edit the rows, then Save once. */
+function AllowIpRows(props: { hub: Hub }) {
+  const view = signal<AllowView | null>(null);
+  const draft = signal<string[] | null>(null); // null: no edits
+  const busy = signal(false), note = signal("");
+  const adding = signal(false), entry = signal(""), entryNote = signal("");
+  let alive = true, polling = false;
+  cleanup(() => { alive = false; });
+  const load = async () => {
+    const r = await props.hub.api("GET", "/api/allow-ips").catch(() => null);
+    if (r?.ok && Array.isArray(r.data.entries)) view.set(r.data as unknown as AllowView);
+  };
+  // after a save, look until the primary has set the secret (the Worker then reports the new list) or reports an error
+  const watch = async () => {
+    if (polling) return;
+    polling = true;
+    for (let i = 0; alive && i < 45 && view()?.pending && !view()!.pending!.error; i++) {
+      await new Promise((ok) => setTimeout(ok, 4000));
+      await load();
+    }
+    polling = false;
+  };
+  void load().then(() => { if (view()?.pending) void watch(); });
+  const live = () => (view()?.entries ?? []).map((e) => e.value);
+  const list = () => draft() ?? live();
+  const mine = (v: string) => (view()?.entries ?? []).some((e) => e.value === v && e.mine);
+  const dirty = () => draft() !== null && draft()!.join(",") !== live().join(",");
+  const remove = (v: string) => { draft.set(list().filter((x) => x !== v)); note.set(""); };
+  const openAdd = () => { entry.set(view()?.ip && !list().length ? view()!.ip : ""); entryNote.set(""); adding.set(true); };
+  const add = () => {
+    const v = entry().trim().toLowerCase();
+    if (!ALLOW_ENTRY.test(v)) return entryNote.set(L("Enter an IPv4 or IPv6 address, optionally with /prefix", "请输入 IPv4 或 IPv6 地址，可带 /网段长度"));
+    if (list().includes(v)) return entryNote.set(L(`${v} is already on the list`, `${v} 已经在名单里`));
+    draft.set([...list(), v]); note.set(""); adding.set(false);
+  };
+  const save = async (force = false): Promise<void> => {
+    busy.set(true); note.set("");
+    const r = await props.hub.api("PUT", "/api/allow-ips", { entries: list(), force }).catch(() => null);
+    busy.set(false);
+    if (r?.ok) { view.set(r.data as unknown as AllowView); draft.set(null); void watch(); return; }
+    const msg = String(r?.data.error ?? L(`Couldn’t save (${r?.status ?? "offline"})`, `保存失败（${r?.status ?? "离线"}）`));
+    if (r?.data.code === "machines") {
+      const a = await AlertDialog.show({
+        title: L("Shut out a machine?", "要挡住机器吗？"), description: msg,
+        actions: [{ id: "cancel", label: L("Cancel", "取消"), role: "cancel" }, { id: "save", label: L("Save anyway", "仍然保存"), role: "destructive" }],
+      });
+      if (a.action === "save") return save(true);
+      return;
+    }
+    note.set(msg);
+  };
+  const pending = () => view()?.pending;
+  return (
+    <>
+      <If when={view() && !list().length}>
+        <SetRow first label={L("Off", "未开启")} detail={L("Any network can open the login page. Add an entry to turn it on.", "任何网络都能打开登录页。添加一项即开启。")} testID="allow-off" />
+      </If>
+      <Each of={list()} key={(v) => v}>
+        {(v, i) => (
+          <SettingsItem first={i() === 0} testID={`allow-row-${v()}`} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <Text style={{ flex: 1, minWidth: 0, fontFamily: MONO, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{v()}</Text>
+            <If when={mine(v())}>
+              <Badge label={L("This device", "本设备")} variant="info" />
+            </If>
+            <IconButton testID={`allow-remove-${v()}`} icon="close" label={L(`Remove ${v()}`, `移除 ${v()}`)} size="sm" disabled={busy()} onPress={() => remove(v())} />
+          </SettingsItem>
+        )}
+      </Each>
+      <SetRow first={!view()} label={L("Add IP or range", "添加 IP 或网段")} tone="accent" leading={<Icon name="plus" size={16} tint={colors.info} />} disabled={busy()} onPress={openAdd} testID="allow-add" />
+      <If when={pending()}>
+        <SetRow
+          label={pending()?.error ? L("Not applied", "没有生效") : L("Applying…", "正在生效…")}
+          detail={pending()?.error ?? L("Waiting for the primary to update the server", "等主控机更新线上")}
+          tone={pending()?.error ? "danger" : undefined}
+          leading={pending()?.error ? undefined : <Spinner size={14} tint={colors.muted} />}
+          testID="allow-pending"
+        />
+      </If>
+      <If when={dirty() || note()}>
+        <View style={{ gap: 8, paddingHorizontal: 16, paddingVertical: 12 }}>
+          <Separator top />
+          <If when={note()}>
+            <Text testID="allow-note" style={{ fontSize: 13, color: colors.danger, userSelect: "text" }}>{note()}</Text>
+          </If>
+          <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <Button label={L("Discard", "放弃修改")} variant="ghost" disabled={busy() || !dirty()} onPress={() => { draft.set(null); note.set(""); }} testID="allow-discard" />
+            <Button label={busy() ? L("Saving…", "正在保存…") : L("Save", "保存")} variant="primary" disabled={busy() || !dirty()} onPress={() => void save()} testID="allow-save" />
+          </View>
+        </View>
+      </If>
+      <FormDialog
+        testID="allow-editor"
+        open={adding()}
+        onClose={() => adding.set(false)}
+        title={L("Add IP or range", "添加 IP 或网段")}
+        subtitle={view()?.ip ? L(`This device's IP: ${view()!.ip}`, `这台设备的 IP：${view()!.ip}`) : undefined}
+        footer={
+          <>
+            <If when={view()?.ip && !list().includes(view()!.ip)}>
+              <Button label={L("Use this device's IP", "填入本机 IP")} variant="ghost" onPress={() => { entry.set(view()!.ip); entryNote.set(""); }} testID="allow-use-mine" />
+            </If>
+            <View style={{ flex: 1 }} />
+            <Button label={L("Cancel", "取消")} variant="ghost" onPress={() => adding.set(false)} testID="allow-cancel" />
+            <Button label={L("Add", "添加")} variant="primary" disabled={!entry().trim()} onPress={add} testID="allow-confirm" />
+          </>
+        }
+      >
+        <Field
+          label={L("IP or range", "IP 或网段")}
+          value={entry()}
+          onChange={(v) => { entry.set(v); entryNote.set(""); }}
+          placeholder="203.0.113.7 · 203.0.113.0/24 · 2001:db8::/64"
+          testID="allow-entry"
+          autoFocus
+          hint={L("Added to the list below; nothing changes until you Save.", "加到下方名单里，点保存后才生效。")}
+          onSubmit={add}
+        />
+        <If when={entryNote()}>
+          <Text testID="allow-entry-note" style={{ fontSize: 13, color: colors.danger }}>{entryNote()}</Text>
+        </If>
+      </FormDialog>
+    </>
+  );
+}
 
 /** The shared MCP servers: one row each (its command or address, an on/off switch), then "Add". */
 function McpRows(props: { settings: Settings }) {
@@ -4208,6 +4345,9 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       </Section>
       <Section title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
         <SecretRows settings={props.settings} />
+      </Section>
+      <Section title={L("IP allow-list", "IP 白名单")} hint={ALLOW_HINT()}>
+        <AllowIpRows hub={props.hub} />
       </Section>
       <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />
@@ -5559,8 +5699,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               <If when={hub.conn() === "blocked"}>
                 <View style={{ gap: 6, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.inset, backgroundColor: colors.surface, backgroundImage: `linear-gradient(${tints.danger}, ${tints.danger})` }}>
                   <Text style={{ fontSize: 14, color: colors.danger }}>
-                    {L(`This device's public IP ${hub.blockedIp()} isn't on the Worker's allow-list (HUB_ALLOW_IPS). Add it on the host; Noop reconnects by itself.`,
-                      `这台设备的出口 IP ${hub.blockedIp()} 不在允许名单（HUB_ALLOW_IPS）里。在主机上把它加进去，Noop 会自动重连。`)}
+                    {L(`This device's public IP ${hub.blockedIp()} isn't on the Worker's allow-list (HUB_ALLOW_IPS). Add it under Settings › IP allow-list on a device that can connect (or on the host); Noop reconnects by itself.`,
+                      `这台设备的出口 IP ${hub.blockedIp()} 不在允许名单（HUB_ALLOW_IPS）里。在能连上的设备的 设置 › IP 白名单 里把它加进去（或在主机上加），Noop 会自动重连。`)}
                   </Text>
                   <View style={{ flexDirection: "row" }}>
                     <Button label={L("Copy IP", "复制 IP")} onPress={() => void Clipboard.writeText(hub.blockedIp())} />
@@ -6249,7 +6389,7 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
       const r = await postJson(`${server()}/api/auth/start`, { email: e });
       if (r.status === 429) throw new Error(String(r.data.error ?? L("Too many requests. Try again later.", "请求太频繁，请稍后再试")));
       const ip = ipBlocked(r.status, r.data);
-      if (ip) throw new Error(L(`This device's public IP ${ip} isn't on the allow-list (HUB_ALLOW_IPS). Add it on the host, then try again.`, `这台设备的出口 IP ${ip} 不在允许名单（HUB_ALLOW_IPS）里，在主机上加进去后再试。`));
+      if (ip) throw new Error(L(`This device's public IP ${ip} isn't on the allow-list (HUB_ALLOW_IPS). Add it under Settings › IP allow-list on a device that can connect, then try again.`, `这台设备的出口 IP ${ip} 不在允许名单（HUB_ALLOW_IPS）里，在能连上的设备的 设置 › IP 白名单 里加进去后再试。`));
       if (r.data.error === "totp_not_setup") throw new Error(L("Two-step verification isn’t set up yet, so nobody can sign in. Run noop 2fa setup on your host first.", "还没有绑定两步验证，任何人都无法登录：先在你的主机上运行 noop 2fa setup"));
       if (r.status === 403) throw new Error(L("This email isn’t allowed to sign in", "这个邮箱不允许登录"));
       if (r.status === 503) throw new Error(L("The server can’t send email yet, so email sign-in isn’t available", "服务器还没有配置发信，暂时无法用邮箱登录"));

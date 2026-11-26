@@ -41,7 +41,7 @@ async function cfMail(binding: SendEmail, from: string, to: string, subject: str
 import { sendPush, type PushSub, type Vapid } from "./push";
 import { CORS, Mcp } from "./mcp";
 import { L, setLang } from "./i18n";
-import { ipAllowed, parseAllowList } from "./ipallow";
+import { checkAllowEdit, ipAllowed, normalizeAllowList, parseAllowList } from "./ipallow";
 import { notificationFor, type NotifyRules } from "../../app/notify";
 
 interface Env {
@@ -158,7 +158,7 @@ function ipBlocked(req: Request, ip: string): Response {
 <title>${L("Noop: IP not allowed", "Noop：IP 未放行")}</title><style>:root{color-scheme:light dark}body{margin:0;font:16px/1.6 -apple-system,system-ui,sans-serif;background:Canvas;color:CanvasText}
 main{max-width:420px;margin:18vh auto;padding:0 16px}h1{font-size:20px;margin:0 0 12px}.ip{font:600 24px/1.3 ui-monospace,Menlo,monospace;user-select:all;padding:12px 14px;border:1px solid #8884;border-radius:8px;word-break:break-all}
 p{color:GrayText;font-size:14px}</style></head><body><main><h1>${L("This network is not allowed yet", "这个网络还没放行")}</h1><div class="ip">${esc(ip || L("unknown", "未知"))}</div>
-<p>${L("This is your current network's public IP. To use Noop from here, add it to the Worker's HUB_ALLOW_IPS (ranges work, e.g. 1.2.3.0/24; mobile data often uses changing IPv6, so add its /64).", "这是你当前网络的出口 IP。要从这里使用 Noop，把它加到 Worker 的 HUB_ALLOW_IPS 里（可以写网段，如 1.2.3.0/24；手机流量常用 IPv6，地址会变，写它的 /64 网段）。")}</p></main></body></html>`,
+<p>${L("This is your current network's public IP. To use Noop from here, add it under Settings › IP allow-list in the Noop app on a device that can connect (ranges work, e.g. 1.2.3.0/24; mobile data often uses changing IPv6, so add its /64).", "这是你当前网络的出口 IP。要从这里使用 Noop，在能连上的设备上打开 Noop 的 设置 › IP 白名单，把它加进去（可以写网段，如 1.2.3.0/24；手机流量常用 IPv6，地址会变，写它的 /64 网段）。")}</p></main></body></html>`,
     { status: 403, headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" } });
 }
 
@@ -319,6 +319,8 @@ export class Hub extends DurableObject<Env> {
   // meters itself (requests, and the rows each query really read and wrote) and gets frugal well before the cap:
   // "lean" persists hot state rarely, "shed" refuses fleet chatter (heartbeats, journals, routine notices).
   mem = new Map<string, string>();
+  /** Public IPs machines called from lately (memory only, never billed): an allow-list edit that would shut one out asks twice. */
+  machineIps = new Map<string, number>();
   flushed = new Map<string, number>();
   today() {
     const day = new Date().toISOString().slice(0, 10);
@@ -374,6 +376,27 @@ export class Hub extends DurableObject<Env> {
     this.sql.exec("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)", k, s);
   }
   touchHost() { this.set("host_seen", Date.now()); }
+  recentMachineIps(): string[] {
+    const since = Date.now() - 24 * 3600_000;
+    for (const [ip, at] of this.machineIps) if (at < since) this.machineIps.delete(ip);
+    return [...this.machineIps.keys()];
+  }
+  /** The live allow-list (this deployment's HUB_ALLOW_IPS), the caller's IP, and an edit still on its way. An edit is
+   *  done once the primary has set the secret: Cloudflare then restarts this object with the new value in env. */
+  allowView(req: Request) {
+    const live = normalizeAllowList(this.env.HUB_ALLOW_IPS);
+    const { nets } = parseAllowList(live);
+    const ip = req.headers.get("cf-connecting-ip") ?? "";
+    let pending = this.get("allow_pending") as { value: string; at: number; error?: string } | null;
+    if (pending && pending.value === live) { this.sql.exec("DELETE FROM kv WHERE k = 'allow_pending'"); this.mem.delete("allow_pending"); pending = null; }
+    const entries = live ? live.split(",") : [];
+    return {
+      entries: entries.map((e) => ({ value: e, mine: ipAllowed(ip, parseAllowList(e).nets) })),
+      on: entries.length > 0, ip, allowed: !entries.length || ipAllowed(ip, nets),
+      machines: this.recentMachineIps(),
+      pending,
+    };
+  }
 
   append(e: Partial<Ev>): Ev {
     const ev = { id: crypto.randomUUID(), ts: new Date().toISOString(), ...e } as Ev;
@@ -674,6 +697,7 @@ export class Hub extends DurableObject<Env> {
     if (isMcpPath(p)) return this.mcp.fetch(req, await this.who(req, url));
     const who = await this.who(req, url);
     if (!who) return json({ error: "unauthorized" }, 401);
+    if (who === "machine") { const ip = req.headers.get("cf-connecting-ip"); if (ip) this.machineIps.set(ip, Date.now()); }
     // a connector's OAuth token is for /mcp only: never the owner API (settings, machine key via /api/host/join, …)
     if (who !== "machine" && who.scope === "mcp") return json({ error: "forbidden" }, 403);
     if (p.startsWith("/api/push/")) return this.push(p, req, who);
@@ -837,6 +861,36 @@ export class Hub extends DurableObject<Env> {
     }
 
     if (p === "/api/status") return json(this.statusView());
+
+    // IP allow-list (HUB_ALLOW_IPS) from the app: the owner edits, the primary writes [cloud] allow_ips and the secret
+    if (p === "/api/allow-ips" && m === "GET") return json(this.allowView(req));
+    if (p === "/api/allow-ips" && m === "PUT") {
+      if (who === "machine") return json({ error: "forbidden" }, 403);
+      const { entries, force } = (await req.json().catch(() => ({}))) as { entries?: unknown; force?: unknown };
+      if (!Array.isArray(entries) || entries.some((e) => typeof e !== "string")) return json({ error: "entries required" }, 400);
+      const requester = req.headers.get("cf-connecting-ip") ?? "";
+      const r = checkAllowEdit(entries as string[], { requester, machines: this.recentMachineIps(), force: force === true });
+      if (!r.ok) {
+        const msg = r.code === "bad" ? L(`Not an IP address or range: ${r.ips.join(" ")}`, `不是有效的 IP 或网段：${r.ips.join(" ")}`)
+          : r.code === "self" ? L(`This device's IP ${requester || "unknown"} would no longer be allowed: you would lock yourself out. Keep an entry that covers it.`, `这台设备的 IP ${requester || "未知"} 将不在名单里，保存后你会被挡在外面。请保留覆盖它的一项。`)
+          : r.code === "machines" ? L(`Machines connected from ${r.ips.join(", ")} recently; they could no longer reach Noop.`, `最近有机器从 ${r.ips.join("、")} 连接，保存后它们会连不上 Noop。`)
+          : L("Too many entries (200 at most)", "条目太多（最多 200 项）");
+        return json({ error: msg, code: r.code, ips: r.ips }, r.code === "machines" ? 409 : 400);
+      }
+      if (r.value === normalizeAllowList(this.env.HUB_ALLOW_IPS)) { this.sql.exec("DELETE FROM kv WHERE k = 'allow_pending'"); this.mem.delete("allow_pending"); return json(this.allowView(req)); }
+      this.set("allow_pending", { value: r.value, at: Date.now() });
+      this.toInbox({ type: "allow_ips", value: r.value });
+      const n = r.value ? r.value.split(",").length : 0;
+      this.alert(L("IP allow-list changed", "IP 白名单已修改"), [r.value ? L(`New list (${n}): ${r.value.split(",").join(", ")}`, `新名单（${n} 项）：${r.value.split(",").join("、")}`) : L("The allow-list was turned off: any network can reach the login page.", "白名单已关闭：任何网络都能访问登录页。"), ...this.origin(req)]);
+      return json(this.allowView(req));
+    }
+    if (p === "/api/host/allow-ips" && m === "POST") { // the primary reports how applying the owner's edit went
+      if (who !== "machine") return json({ error: "forbidden" }, 403);
+      const { value, error } = (await req.json().catch(() => ({}))) as { value?: unknown; error?: unknown };
+      const pend = this.get("allow_pending");
+      if (pend && pend.value === value && typeof error === "string" && error) this.set("allow_pending", { ...pend, error: error.slice(0, 500) });
+      return json({ ok: true });
+    }
 
     // shared secrets (cloud/src/secrets.ts): the owner writes, only machines read values back
     if (p === "/api/secrets" && m === "GET") {

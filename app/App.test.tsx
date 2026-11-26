@@ -2283,6 +2283,48 @@ describe("commands", () => {
     await app.press("id:claude-key-ANTHROPIC_API_KEY");
     await app.waitFor("text:Replace API Key");
   });
+
+  test("settings edits the IP allow-list as a draft and saves it once", async () => {
+    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
+    const sent: any[] = [];
+    let live = ["203.0.113.7", "198.51.100.0/24"];
+    const view = () => ({ entries: live.map((value) => ({ value, mine: value === "203.0.113.7" })), on: true, ip: "203.0.113.7", machines: [], pending: null });
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+      ...server(posts, puts, updates),
+      [`GET ${URL}/api/allow-ips`]: () => ({ body: view() }),
+      [`PUT ${URL}/api/allow-ips`]: (r: { body?: string | null }) => {
+        const b = JSON.parse(r.body!); sent.push(b);
+        if (!b.entries.includes("203.0.113.7")) return { status: 400, body: { error: "would lock you out", code: "self", ips: ["203.0.113.7"] } };
+        live = b.entries;
+        return { body: view() };
+      },
+    } });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-account");
+    await app.waitFor("id:allow-row-198.51.100.0/24");
+    await app.waitFor("text:This device");
+    // nothing goes out until Save
+    await app.press("id:allow-remove-198.51.100.0/24");
+    await app.press("id:allow-add");
+    await app.waitFor("id:allow-editor");
+    await app.type("id:allow-entry", "not-an-ip");
+    await app.press("id:allow-confirm");
+    await app.waitFor("id:allow-entry-note");
+    await app.type("id:allow-entry", "192.220.47.149");
+    await app.press("id:allow-confirm");
+    await app.waitFor("id:allow-row-192.220.47.149");
+    expect(sent.length).toBe(0);
+    await app.press("id:allow-save");
+    await app.waitUntil(() => sent.length === 1);
+    expect(sent[0]).toEqual({ entries: ["203.0.113.7", "192.220.47.149"], force: false });
+    await app.waitUntil(() => app.count("id:allow-row-198.51.100.0/24") === 0);
+    // removing this device's own entry is refused by the server, and the reason stays on screen
+    await app.press("id:allow-remove-203.0.113.7");
+    await app.press("id:allow-save");
+    await app.waitFor("id:allow-note");
+    expect(app.shows("text:would lock you out")).toBe(true);
+  });
 });
 
 

@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { type Jwk, newVapidKeys } from "../cloud/src/push";
-import { ipAllowed, parseAllowList } from "../cloud/src/ipallow";
+import { ipAllowed, normalizeAllowList, parseAllowList } from "../cloud/src/ipallow";
 import { type Cfg, CODE, L, P, _commitPush, _pull, hostName, journal, locked, HOME_DIR } from "./core";
 import { updateChannel } from "./channels";
 import { writeHubToml } from "./sync";
@@ -117,6 +117,9 @@ export function startCloudBridge(cfg: Cfg) {
       await cancelTask(it.id, it.done === true);
     } else if (it.type === "channel" && typeof it.slug === "string") {
       await locked(async () => { if (typeof updateChannel(it.slug, it) !== "string") await _commitPush(`channel ${it.slug}`); });
+    } else if (it.type === "allow_ips" && typeof it.value === "string") {
+      const error = await applyAllowIps(cfg, it.value);
+      if (error) await call(cfg, "/api/host/allow-ips", { method: "POST", body: JSON.stringify({ value: it.value, error }) });
     } else if (it.type === "update") {
       await updateFleet();
     } else if (it.type === "settings") {
@@ -188,6 +191,52 @@ export function allowIps(cfg: Cfg): string | undefined {
   if (!cfg.cloud || !("allow_ips" in cfg.cloud)) return undefined;
   const v = cfg.cloud?.allow_ips;
   return (Array.isArray(v) ? v.map(String) : String(v ?? "").split(/[\s,]+/)).map((x) => x.trim()).filter(Boolean).join(",");
+}
+
+/** config.toml text with `[cloud] allow_ips` set to `value` (the line replaced in place, else added to the block). */
+export function withAllowIps(toml: string, value: string): string {
+  const line = `allow_ips = ${JSON.stringify(value)}`;
+  const m = /^\[cloud\][ \t]*\r?\n?/m.exec(toml);
+  if (!m) return `${toml.trimEnd()}\n\n[cloud]\n${line}\n`;
+  const start = m.index + m[0].length;
+  const next = toml.slice(start).search(/^\s*\[/m);
+  const end = next < 0 ? toml.length : start + next;
+  const block = toml.slice(start, end);
+  if (/^allow_ips\s*=.*$/m.test(block)) return toml.slice(0, start) + block.replace(/^allow_ips\s*=.*$/m, line) + toml.slice(end);
+  const body = block.replace(/\s*$/, "");
+  return toml.slice(0, start) + (body ? `${body}\n` : "") + `${line}\n` + (end < toml.length ? "\n" : "") + toml.slice(end).replace(/^\s*\n/, "");
+}
+
+/** The owner edited the allow-list in the app (the Worker already checked it): set the Worker's HUB_ALLOW_IPS secret,
+ *  then record it in the shared config.toml so the next deploy keeps it. Returns "" when done, else why not. */
+export async function applyAllowIps(cfg: Cfg, raw: string): Promise<string> {
+  const host = hostName(cfg);
+  const fail = (why: string) => { journal(host, `🛡️ IP allow-list not updated: ${why.replace(/\s+/g, " ").slice(-300)}`); return why; };
+  const value = normalizeAllowList(raw);
+  const { nets, bad } = parseAllowList(value);
+  if (bad.length) return fail(L(`Entries that cannot be parsed: ${bad.join(" ")}`, `有无法识别的项：${bad.join(" ")}`));
+  if (value) { // this machine must still reach the Worker afterwards, or nothing it does would arrive any more
+    const mine = (await fetch(`${base(cfg)}/cdn-cgi/trace`, { signal: AbortSignal.timeout(15_000) }).then((r) => r.text()).catch(() => "")).match(/^ip=(.+)$/m)?.[1]?.trim();
+    if (mine && !ipAllowed(mine, nets)) return fail(L(`The primary's public IP ${mine} is not in the new list: it could not reach the Worker any more.`, `主控机 ${host} 的出口 IP ${mine} 不在新名单里，保存后它会连不上 Worker。`));
+  }
+  const dir = join(CODE, "cloud");
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID || cfg.cloud?.account;
+  const env = { ...process.env, ...(account ? { CLOUDFLARE_ACCOUNT_ID: account } : {}) };
+  const name = cfg.cloud?.name ?? "noop";
+  // `secret bulk` reads JSON from stdin, as cloudDeploy does
+  const sec = Bun.spawn(["bunx", "wrangler", "secret", "bulk", "--name", name], { cwd: dir, env, stdin: new Blob([JSON.stringify({ HUB_ALLOW_IPS: value })]), stdout: "pipe", stderr: "pipe" });
+  if ((await sec.exited) !== 0) {
+    const err = (await new Response(sec.stderr).text()) + (await new Response(sec.stdout).text());
+    return fail(L(`Setting HUB_ALLOW_IPS on ${host} failed (is wrangler logged in there?): `, `在 ${host} 上设置 HUB_ALLOW_IPS 失败（这台机器的 wrangler 登录了吗？）：`) + err.slice(-400));
+  }
+  await locked(async () => {
+    await _pull();
+    const f = P("config.toml");
+    writeFileSync(f, withAllowIps(existsSync(f) ? readFileSync(f, "utf8") : "", value));
+    journal(host, `🛡️ IP allow-list set from the app: ${value ? `${value.split(",").length} entries` : "off"}`);
+    await _commitPush("cloud allow_ips from the app");
+  });
+  return "";
 }
 
 /** Why the last cloudDeploy returned false (for the journal: a daemon's console is out of the owner's sight). */

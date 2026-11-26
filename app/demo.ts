@@ -38,6 +38,9 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
   const files = new Map<string, { content: string; updated: string }>();
   const docs = new Map<string, string>();
   let demoSecrets: { name: string; updated: string }[] = [];
+  const DEMO_IP = "203.0.113.7";
+  let demoAllowList: string[] = [];
+  const demoAllow = () => ({ entries: demoAllowList.map((value) => ({ value, mine: value === DEMO_IP || value === "203.0.113.0/24" })), on: demoAllowList.length > 0, ip: DEMO_IP, machines: [], pending: null });
   let settingsView: SettingsView;
 
   function emit(e: Omit<HubEvent, "id" | "ts"> & { ts?: string }): HubEvent {
@@ -266,6 +269,14 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
         demoSecrets = demoSecrets.filter((k) => k.name !== name);
         if (b.value) demoSecrets = [...demoSecrets, { name, updated: new Date().toISOString() }].sort((x, y) => x.name.localeCompare(y.name));
         return ok({ secrets: demoSecrets });
+      }
+      // demo: the list applies at once (no primary to wait for); this device is 203.0.113.7
+      case "GET /api/allow-ips": return ok(demoAllow());
+      case "PUT /api/allow-ips": {
+        const list = [...new Set((Array.isArray(b.entries) ? b.entries : []).map((e) => String(e).trim()).filter(Boolean))];
+        if (list.length && !list.some((e) => e === DEMO_IP || e === "203.0.113.0/24")) return { status: 400, data: { error: `这台设备的 IP ${DEMO_IP} 将不在名单里，保存后你会被挡在外面。`, code: "self", ips: [DEMO_IP] } };
+        demoAllowList = list;
+        return ok(demoAllow());
       }
       case "PUT /api/settings": {
         const deep = (a: Record<string, unknown>, c: Record<string, unknown>): Record<string, unknown> => {

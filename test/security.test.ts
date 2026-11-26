@@ -1,6 +1,7 @@
 // Worker hardening: IP allow-list, login code format, OAuth redirect hosts, media served from the app origin.
 import { expect, test } from "bun:test";
-import { ipAllowed, parseAllowList } from "../cloud/src/ipallow";
+import { checkAllowEdit, ipAllowed, normalizeAllowList, parseAllowList } from "../cloud/src/ipallow";
+import { withAllowIps } from "../src/cloud";
 import { CODE_ALPHABET, CODE_LEN, CODE_RE, newCode, normCode } from "../cloud/src/authcode";
 import { okRedirect } from "../cloud/src/mcp";
 import { mediaHeaders } from "../cloud/src/uploads";
@@ -99,4 +100,25 @@ test("security check bounds every Worker call with a timeout signal", async () =
   } finally {
     globalThis.fetch = real;
   }
+});
+
+test("IP allow-list edits from the app: parse, never lock out the editor, ask before shutting out a machine", () => {
+  expect(normalizeAllowList(" 1.2.3.4, 1.2.3.4\n5.6.7.0/24 ")).toBe("1.2.3.4,5.6.7.0/24");
+  const ctx = { requester: "203.0.113.7", machines: ["198.51.100.9"] };
+  expect(checkAllowEdit(["203.0.113.7", "198.51.100.0/24"], ctx)).toEqual({ ok: true, value: "203.0.113.7,198.51.100.0/24" });
+  expect(checkAllowEdit(["203.0.113.7", "bogus"], ctx)).toMatchObject({ ok: false, code: "bad", ips: ["bogus"] });
+  expect(checkAllowEdit(["198.51.100.0/24"], ctx)).toMatchObject({ ok: false, code: "self" });
+  expect(checkAllowEdit(["203.0.113.0/24"], ctx)).toMatchObject({ ok: false, code: "machines", ips: ["198.51.100.9"] });
+  expect(checkAllowEdit(["203.0.113.0/24"], { ...ctx, force: true })).toEqual({ ok: true, value: "203.0.113.0/24" });
+  expect(checkAllowEdit([], ctx)).toEqual({ ok: true, value: "" }); // empty: the allow-list is off
+});
+
+test("IP allow-list edits land in config.toml's [cloud] block", () => {
+  const toml = '[fleet]\nprimary = "a"\n\n[cloud]\nurl = "https://x"\nallow_ips = "1.1.1.1"\n\n[[routine]]\nname = "r"\n';
+  expect(withAllowIps(toml, "1.1.1.1,2.2.2.2")).toBe(toml.replace('allow_ips = "1.1.1.1"', 'allow_ips = "1.1.1.1,2.2.2.2"'));
+  const noLine = '[cloud]\nurl = "https://x"\nname = "noop"\n\n[[routine]]\nname = "r"\n';
+  expect(withAllowIps(noLine, "2.2.2.2")).toBe('[cloud]\nurl = "https://x"\nname = "noop"\nallow_ips = "2.2.2.2"\n\n[[routine]]\nname = "r"\n');
+  expect(withAllowIps('[cloud]\nurl = "https://x"\n', "")).toBe('[cloud]\nurl = "https://x"\nallow_ips = ""\n');
+  expect(withAllowIps('[fleet]\nprimary = "a"\n', "2.2.2.2")).toBe('[fleet]\nprimary = "a"\n\n[cloud]\nallow_ips = "2.2.2.2"\n');
+  expect(Bun.TOML.parse(withAllowIps(noLine, "2.2.2.2"))).toMatchObject({ cloud: { allow_ips: "2.2.2.2" } });
 });
