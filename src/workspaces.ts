@@ -23,7 +23,7 @@ export const workspaceName = (repo: string, id: string): string => `${basename(e
  *  remote's default branch (or the checkout's HEAD when there is no remote), so the agent starts clean and makes its
  *  own branch. A task that resumes finds the worktree it already had. When no worktree can be made, the task still runs
  *  under the workspace root, never in the owner's checkout. Tasks without a repo keep `fallback` (the hub). */
-export async function taskWorkspace(meta: { id: string; repo?: string }, cfg: Cfg, fallback: string,
+export async function taskWorkspace(meta: { id: string; repo?: string } | Record<string, string>, cfg: Cfg, fallback: string,
   log: (line: string) => void = () => {}): Promise<string> {
   if (!meta.repo) return fallback;
   const repo = expand(meta.repo);
