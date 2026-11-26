@@ -1,6 +1,6 @@
 // Builds the prompt for an agent, runs Claude Code / Codex headless, parses the structured result.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { codexMessage } from "./codex-output";
+import { codexMessage, codexTurnError } from "./codex-output";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -289,7 +289,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const json = cmd.includes("stream-json") || codexJson;
   const act = { at: Date.now(), step: undefined as string | undefined, steps: 0, model: startModel(cli, cmd, extraEnv.CODEX_HOME) };
   const inFlight = new Map<string, string>(); // tool_use id → tool name, until its result comes back
-  let resultText: string | undefined, assistantText = "";
+  let resultText: string | undefined, assistantText = "", turnErrors = "", seenTurnError = "";
   const touch = () => {
     act.at = Date.now();
     if (tid) agentActivity.set(tid, { at: new Date(act.at).toISOString(), step: act.step, steps: act.steps, model: act.model });
@@ -301,6 +301,10 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
     if (codexJson) {
       const text = codexMessage(e);
       if (text !== undefined) assistantText += text + "\n\n";
+      // quota/auth walls arrive here, not as assistant text. Keep them out of assistantText so an
+      // empty run can still be retried, but put them in the text classify reads.
+      const failure = codexTurnError(e);
+      if (failure && failure !== seenTurnError) { seenTurnError = failure; turnErrors += `ERROR: ${failure}\n`; }
       return;
     }
     if (e.type === "system" && e.subtype === "init" && e.model) act.model = String(e.model);
@@ -359,7 +363,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   if (tid) agentActivity.delete(tid);
   const logged = json ? raw.split("\n").map(stripImages).join("\n") : raw;
   writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${logged}\n\n[stderr]\n${err}`);
-  const out = json ? (resultText ?? assistantText) : raw;
+  const out = json ? `${resultText ?? assistantText}${turnErrors}` : raw;
   if (timedOut) return `${out}${RUN_LIMIT} hit the ${Math.round(timeoutMs / 60_000)}-minute work limit${act.step ? `; last step: ${act.step}` : ""}`;
   if (stalled) return `${out}${STALLED} no output for ${Math.round(stallMs / 60_000)} minutes${act.step ? `; last step: ${act.step}` : ""}`;
   // A provider occasionally answers with an empty completion (no text, no tool call, exit 0) and Claude Code's own

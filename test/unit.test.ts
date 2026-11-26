@@ -726,6 +726,35 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
   } finally { rmSync(log, { force: true }); }
 });
 
+test("a Codex workspace credit error reaches classify instead of looking like a missing result", async () => {
+  // T-0455: stdout was error/turn.failed ("out of credits") and stderr was only models-manager timeouts.
+  // Assistant-text-only extraction left classify with the timeouts, so the account was not cooled down,
+  // the run was "no result block", and the medic was woken.
+  const { classify } = await import("../src/accounts");
+  const { codexMessages } = await import("../src/codex-output");
+  const message = "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.";
+  const lines = [
+    { type: "thread.started", thread_id: "01a217db-206d-7400-9887-b0254ecf4d52" },
+    { type: "turn.started" },
+    { type: "error", message },
+    { type: "turn.failed", error: { message } },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const stderr = "2026-11-26T12:36:11.380112Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out";
+  const cfg = { clis: { codex: { command: ["sh", "-c", 'printf "%s\\n" "$1"; printf "%s\\n" "$2" >&2; exit 1', "--json", lines, stderr] } } } as unknown as Cfg;
+  const log = `${tmpdir()}/noop-codex-credits-${process.pid}.log`;
+  try {
+    const out = await runAgent("codex", "", tmpdir(), cfg, log);
+    expect(out).toContain(`ERROR: ${message}`);
+    expect(out.match(/out of credits/g)?.length).toBe(1); // error and turn.failed are one wall
+    expect(out).toContain("failed to refresh available models");
+    expect(classify(out)).toBe("quota");
+    expect(parseResult(out).summary).toContain("agent returned no result block");
+    expect(codexMessages(lines)).toBe(`ERROR: ${message}`);
+    // a real reply still wins when a turn error is absent, and tool output stays ignored
+    expect(classify("tests failed: 3 of 40\n" + stderr)).toBeNull();
+  } finally { rmSync(log, { force: true }); }
+});
+
 test("gate_override relaxes only the approvable gates", () => {
   const cfg = { gates: { extra: ["Bash(kubectl delete:*)"] } } as unknown as Cfg;
   const full = cliCommand("claude", cfg);
