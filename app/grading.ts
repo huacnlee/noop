@@ -159,12 +159,6 @@ export function webColor(l: Letter | null): string {
   return l === "S" || l === "?" ? "#e5534b" : l === "A" ? "#db6d28" : l === "B" ? "#4184e4" : "#8b949e";
 }
 
-/** A colored badge in GitHub / GitLab markdown: the hosts strip `style`, and the GitHub mobile app shows math source as raw
- *  text, so the color travels as an image every client renders. The alt text keeps the score readable without images. */
-const shield = (s: string) => encodeURIComponent(s.replace(/-/g, "--").replace(/_/g, "__"));
-const badge = (color: string, label: string, value?: string) =>
-  `![${value ? `${label} ${value}` : label}](https://img.shields.io/badge/${shield(label)}${value ? `-${shield(value)}` : ""}-${color.slice(1)})`;
-
 /** Whether a PR / MR description is written in Chinese: the grade follows the language the project's PRs use. */
 export const isChineseText = (text: string): boolean => /[\u4e00-\u9fff]/.test(text.replace(/<!--[\s\S]*?-->/g, ""));
 
@@ -186,7 +180,7 @@ export function lastGradeMarker(comments: string[], kind: GradeKind): string | n
 
 /** A radar chart of the five grades as an image URL (quickchart.io renders Chart.js to PNG): GitHub / GitLab comments
  *  cannot run scripts or keep inline SVG, and an image is the one form every client, the mobile apps included, shows. */
-export function radarUrl(g: Grade, dims: string[]): string {
+export function radarUrl(g: Grade, dims: string[], key: [Letter, string][] = []): string {
   const l = letters(g.grades);
   const score = attention(g.grades);
   const line = webColor(score === null ? "?" : tier(score));
@@ -194,15 +188,18 @@ export function radarUrl(g: Grade, dims: string[]): string {
     type: "radar",
     data: {
       labels: dims.map((d, i) => `${d} ${l[i]}`),
-      datasets: [{ data: l.map((x) => POINTS[x]), backgroundColor: `${line}40`, borderColor: line, pointBackgroundColor: l.map((x) => webColor(x)), pointBorderColor: l.map((x) => webColor(x)), pointRadius: 6 }],
+      datasets: [{ label: score === null ? "?" : `${score}/100`, data: l.map((x) => POINTS[x]), backgroundColor: `${line}40`, borderColor: line, pointBackgroundColor: l.map((x) => webColor(x)), pointBorderColor: l.map((x) => webColor(x)), pointRadius: 5 },
+        // The color key lives in the chart's own legend: empty series, one per color, so the comment holds one image.
+        ...key.map(([x, text]) => ({ label: `${x === "C" ? "C/D" : x} ${text}`, data: [], backgroundColor: webColor(x), borderColor: webColor(x) }))],
     },
-    options: { legend: { display: false }, scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { fontSize: 14 } } },
+    options: { legend: { position: "bottom", labels: { boxWidth: 10, fontSize: 11, padding: 8 } }, layout: { padding: 2 },
+      scale: { ticks: { min: 0, max: 5, stepSize: 1, display: false }, pointLabels: { fontSize: 12 } } },
   };
-  return `https://quickchart.io/chart?w=360&h=280&bkg=white&c=${encodeURIComponent(JSON.stringify(c))}`;
+  return `https://quickchart.io/chart?w=380&h=250&bkg=white&f=svg&c=${encodeURIComponent(JSON.stringify(c))}`;
 }
 
-/** A grade comment on a PR / MR: a one-line verdict, a radar chart of the five dimensions, the five grades as colored
- *  cells, and a one-line color key. The evidence stays in the app: a reviewer needs the scores at a glance.
+/** A grade comment on a PR / MR: a one-line verdict, and one compact radar chart whose legend
+ *  is the color key. The evidence stays in the app: a reviewer needs the scores at a glance.
  *  A comment, not the description: the merge commit stays free of it, and each later run adds its own. */
 export function gradeMarkdown(g: Grade, zh: boolean, opts: { kind?: GradeKind; head?: string; signature?: string } = {}): string {
   const t = labels(zh);
@@ -215,10 +212,7 @@ export function gradeMarkdown(g: Grade, zh: boolean, opts: { kind?: GradeKind; h
     score === null ? `${t.score} —` : `${t.score} **${score}/100 ${tier(score)}**`,
     ...(g.fit ? [t.fit[g.fit]] : []),
   ].join(" · ");
-  const cell = (x: Letter) => badge(webColor(x), x === "?" ? t.pending : x);
-  const table = [`| ${t.dims.join(" | ")} |`, `|${t.dims.map(() => ":-:").join("|")}|`, `| ${l.map(cell).join(" | ")} |`];
-  const key = t.key.map(([x, text]) => badge(webColor(x), x === "C" ? "C D" : x, text)).join(" ");
-  return [gradeMarker(kind, g, opts.head), head, "", `![${t.dims.map((d, i) => `${d} ${l[i]}`).join(", ")}](${radarUrl(g, t.dims)})`, "", ...table, "", key,
+  return [gradeMarker(kind, g, opts.head), head, "", `![${t.dims.map((d, i) => `${d} ${l[i]}`).join(", ")}](${radarUrl(g, t.dims, t.key)})`,
     ...(opts.signature ? ["", opts.signature] : [])].join("\n");
 }
 

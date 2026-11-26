@@ -42,24 +42,22 @@ test("a grade survives the task file's frontmatter, and list views leave the not
   expect(gradeOf({ grade: "nope" })).toBeUndefined();
 });
 
-test("the PR comment is a one-line verdict, a radar chart, colored grades and a color key", () => {
+test("the PR comment is a one-line verdict and one radar chart whose legend is the color key", () => {
   const g = parseGrades(result)!;
   const en = gradeMarkdown(g, false, { head: "f0edbe11e6434c", signature: "sig" });
-  const m = (color: string, label: string, value?: string) =>
-    `![${value ? `${label} ${value}` : label}](https://img.shields.io/badge/${encodeURIComponent(label)}${value ? `-${encodeURIComponent(value)}` : ""}-${color.slice(1)})`;
   const lines = en.split("\n");
   expect(lines[0]).toBe("<!-- noop-grade:self DCBCD right f0edbe1 -->");
   expect(lines[1]).toBe("**Noop self-grade** `f0edbe1` · Attention **36/100 C** · Right-sized");
   expect(lines[3]).toStartWith("![Drift D, Size C, Risk B, Proof gap C, Own calls D](https://quickchart.io/chart?");
+  expect(lines).toHaveLength(6);
+  expect(en).not.toContain("shields.io");
   const chart = JSON.parse(decodeURIComponent(lines[3].split("&c=")[1].slice(0, -1)));
   expect(chart.data.datasets[0].data).toEqual([1, 2, 3, 2, 1]);
-  expect(lines[5]).toBe("| Drift | Size | Risk | Proof gap | Own calls |");
-  expect(lines[7]).toBe(`| ${m("#8b949e", "D")} | ${m("#8b949e", "C")} | ${m("#4184e4", "B")} | ${m("#8b949e", "C")} | ${m("#8b949e", "D")} |`);
-  expect(lines[9]).toBe(`${m("#e5534b", "S", "look closely")} ${m("#db6d28", "A", "check")} ${m("#4184e4", "B", "glance")} ${m("#8b949e", "C D", "fine")}`);
+  expect(chart.data.datasets.slice(1).map((d: { label: string; borderColor: string }) => [d.label, d.borderColor])).toEqual([
+    ["S look closely", "#e5534b"], ["A check", "#db6d28"], ["B glance", "#4184e4"], ["C/D fine", "#8b949e"]]);
   expect(lines.at(-1)).toBe("sig");
   expect(en).not.toContain("changes how one page sorts");
-  expect(gradeMarkdown({ grades: "SA?CD" }, false)).toContain(m("#e5534b", "?"));
-  expect(gradeMarkdown(g, true)).toContain("| 偏题 | 体量 | 风险 | 验证缺口 | 自主决定 |");
+  expect(gradeMarkdown(g, true)).toContain("偏题 D");
   expect(gradeMarkdown(g, false, { kind: "review" })).toMatch(/^<!-- noop-grade:review DCBCD right - -->\n\*\*Noop review grade\*\* · /);
 });
 
