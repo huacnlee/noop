@@ -53,6 +53,8 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
+import { chatScreen, nsmetry } from "./analytics";
+import { useNsMetry, useScreenTracking } from "./nsmetry";
 
 /** One row of the system menu `MenuButton` shows: an action, a submenu (`items`) or an inline group (`inline`). */
 type MenuButtonItem = { id: string; label: string; icon?: string; disabled?: boolean; checked?: boolean; inline?: boolean; items?: MenuButtonItem[] };
@@ -4777,6 +4779,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const scope = signal<string | null>(null);
   effect(() => { const r = top(); readerAt.set(r.name === "task" ? `task:${r.id}` : r.name === "channel" ? `channel:${scope() ?? ""}` : r.name); });
   const scoped = () => { const slug = scope(); return slug ? channels.list().find((c) => c.slug === slug) : undefined; };
+  // Analytics: the page's kind only; a channel's slug, a task id or a doc path never leaves the device.
+  effect(() => { const r = top(); chatScreen.set(r.name === "channel" ? (scope() ? "/channel" : "/chat") : r.name === "team" ? "/settings" : `/${r.name}`); });
+  cleanup(() => chatScreen.set(null));
   const openScope = (slug: string | null) => { drawer.set(false); nav.popToRoot(); scope.set(slug); };
   // a channel's history beyond what this device holds; what is said there arrives live like the main chat's
   const channelFeed = signal<HubEvent[]>([]);
@@ -6628,6 +6633,9 @@ function App() {
   const email = signal("");
   const notice = signal("");
   let openRef: string | null = null;
+  // Analytics: a screen view per page (login, chat, a task...), flushed in batches and when the app goes to the background.
+  useNsMetry(nsmetry);
+  useScreenTracking(nsmetry, () => (!ready() ? null : config() ? chatScreen() : "/login"));
   loadConfig().then((r) => {
     openRef = r.ref;
     config.set(r.config);

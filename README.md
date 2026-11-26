@@ -11,7 +11,7 @@ Noop runs a small team of Claude Code and Codex agents on your own computers. Th
 - **Works for you, not with you** — give it a goal in one sentence; it breaks the work down, runs it in parallel and comes back with results.
 - **Learns how you decide** — starts cautious, asks more early on, and takes over more as it proves it decides like you.
 - **Quiet** — no noise, no raw errors. You hear about results and decisions, nothing else.
-- **Yours** — runs on your machines and your own free Cloudflare account. No shared service, no one else's server; the only outbound call is an anonymous daily heartbeat you can turn off ([details](#usage-statistics)).
+- **Yours** — runs on your machines and your own free Cloudflare account. No shared service, no one else's server; the only outside calls are anonymous usage statistics ([details](#usage-statistics)).
 
 **If this helps you, please [sponsor me](https://github.com/sponsors/huacnlee).**
 
@@ -66,9 +66,13 @@ Then just talk to it. When it needs you, you'll get a notification with the choi
 
 ## Usage statistics
 
-To know how many people run Noop, the primary machine sends one anonymous heartbeat a day to the author's own [Edgemetry](https://github.com/hayaran/Edgemetry) instance on Cloudflare. It carries only the Noop build date and the OS family. No email, Noop URL, machine name, repository or task content is sent, and Edgemetry keeps no IP address. The client apps send nothing. The website counts page views with the same Edgemetry instance, without cookies.
+Noop counts usage with the author's own [NsMetry](https://github.com/huacnlee/nsmetry) instance on Cloudflare (no cookies, no fingerprinting, no IP address kept):
 
-Turn it off with any of these:
+- The apps send the name of each screen opened (`/chat`, `/task`, `/settings`, ...), the app version, the OS and a random install ID, in batches. No email, Noop URL, task, channel, message or file name.
+- The primary machine sends one heartbeat a day with the Noop build date, the OS family and a random install ID.
+- The website counts page views.
+
+The daemon heartbeat can be turned off with any of these:
 
 ```toml
 # config.toml
