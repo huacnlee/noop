@@ -1,6 +1,7 @@
-// Minimal SMTP client for Workers (cloudflare:sockets). Enough to send one plain-text UTF-8 mail.
+// Minimal SMTP client for Workers (cloudflare:sockets). Enough to send one UTF-8 mail: plain text, or text + HTML.
 //   port 465 → implicit TLS · 587 (or secure:false) → STARTTLS · localhost with starttls:false → plain (local tests only)
 import { connect } from "cloudflare:sockets";
+import { mimeBody } from "./codemail";
 
 export interface SmtpCfg { host: string; port?: number; secure?: boolean; starttls?: boolean; user?: string; pass?: string; from?: string }
 
@@ -42,7 +43,7 @@ class Conn {
   async cmd(s: string, expect: number) { await this.send(s); return this.reply(expect); }
 }
 
-export async function sendMail(c: SmtpCfg, to: string, subject: string, text: string) {
+export async function sendMail(c: SmtpCfg, to: string, subject: string, text: string, html?: string) {
   const port = c.port ?? 465;
   const implicit = c.secure ?? port === 465;
   const plain = !implicit && c.starttls === false && isLocal(c.host); // never send credentials in clear over the internet
@@ -74,14 +75,12 @@ export async function sendMail(c: SmtpCfg, to: string, subject: string, text: st
     await conn.cmd(`RCPT TO:<${addr(to)}>`, 250);
     await conn.cmd("DATA", 354);
     const domain = addr(from).split("@")[1] ?? "agent-hub";
-    const body = b64(text).replace(/.{1,76}/g, "$&\r\n").trimEnd(); // base64 never starts a line with "." — no dot-stuffing hazard, but stuff anyway
     const msg = [
       `From: ${from}`, `To: ${to}`, `Subject: =?UTF-8?B?${b64(subject)}?=`,
       `Date: ${new Date().toUTCString().replace("GMT", "+0000")}`,
       `Message-ID: <${crypto.randomUUID()}@${domain}>`,
-      "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64",
-      "", body,
-    ].join("\r\n").replace(/\r\n\./g, "\r\n..");
+      ...mimeBody(text, html),
+    ].join("\r\n").replace(/\r\n\./g, "\r\n.."); // base64 and boundaries never start a line with "." — stuff anyway
     await conn.send(`${msg}\r\n.`);
     await conn.reply(250);
     await conn.send("QUIT").catch(() => {});
