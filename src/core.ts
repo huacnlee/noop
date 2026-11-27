@@ -518,7 +518,7 @@ export const MEMORY_KEEP = ["principles.md", "owner.md", "focus.md"];
  *  `keep` go last, in that order, so the cut takes the other files first instead of whichever sort first by name. */
 export function readAll(dir: string, tail = 12000, keep: string[] = []): string {
   const rank = (name: string) => keep.indexOf(name); // -1 for the rest: they stay first, in name order
-  const parts = list(dir).map((p) => ({ name: basename(p), text: `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}` }))
+  const parts = list(dir).map((p) => ({ name: basename(p), text: `### ${basename(p)}\n${readFileSync(p, "utf8").trim()}` }))
     .sort((a, b) => rank(a.name) - rank(b.name));
   const joined = parts.map((x) => x.text).join("\n\n");
   if (joined.length <= tail) return joined;
