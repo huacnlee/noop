@@ -1064,6 +1064,16 @@ type Outgoing = { id: string; ts: string; text: string; ref: string | null; file
 const MARKS = ["★", "◆", "▲", "●", "✦", "☾", "✿", "♪"];
 /** From this window width on, the app lays out for a desktop or tablet rather than a phone. */
 const WIDE = 860;
+/**
+ * A touch screen roomy both ways (iOS's regular width and height: iPhone Duo's inner display, an iPad mini upright)
+ * gets the sidebar beside the chat too, as Apple asks; a phone, or iPhone Duo's outer display, stays a phone.
+ */
+const ROOMY = 640;
+/** Whether the window lays out wide (the sidebar beside the pages) rather than as a phone. */
+const isWide = () => {
+  const { width, height } = windowSize();
+  return width >= WIDE || (touch && width >= ROOMY && height >= ROOMY);
+};
 
 function persona(from: string): { tint: string; mark: string } {
   const id = from.split("@")[0].toLowerCase();
@@ -1443,7 +1453,7 @@ function Message(props: {
   const targeted = () => ask && !done() && props.target() === e.ref;
   const rec = recommended(e);
   // a phone has no width to spare: the avatar sits in the name's row, and the message takes the whole column
-  const wide = () => windowSize().width >= WIDE;
+  const wide = isWide;
   if (isHub(e.from) && !ask && e.kind === "system" && !e.attachments?.length)
     // top-aligned on one shared line height: baseline alignment drifts once the text carries an inline chip
     return (
@@ -4765,7 +4775,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const push = createPush(hub, settings.toast.show);
   const reads = createMessageReads(hub);
   const channels = createChannels(hub, reads);
-  const wide = () => windowSize().width >= WIDE;
+  const wide = isWide;
   const drawer = signal(false);
   const drawerDragging = signal(false);
   const drawerVisible = signal(false);
