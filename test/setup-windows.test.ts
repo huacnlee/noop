@@ -2,12 +2,15 @@ import { expect, test } from "bun:test";
 import { winTaskXml } from "../src/setup";
 
 test("the Windows task runs headless, comes back within a minute and has no battery or time limits", () => {
-  const x = winTaskXml("PC\\me & you", "C:\\Users\\me\\.bun\\bin\\bun.exe", "C:\\Users\\me\\.noop\\app\\src\\cli.ts", "C:\\Users\\me\\.noop\\data\\logs\\daemon.log");
+  const x = winTaskXml("PC\\me & you", "C:\\Users\\me\\.bun\\bin\\bun.exe", "C:\\Users\\me\\.noop\\app\\src\\cli.ts", "C:\\Users\\me\\.noop\\data\\logs\\daemon.log",
+    "C:\\Windows", new Date(2026, 10, 27, 9, 5, 42));
   // no window: a headless console, output appended to the daemon log
   expect(x).toContain("<Command>C:\\Windows\\System32\\conhost.exe</Command>");
   expect(x).toContain("<Arguments>--headless cmd.exe /d /c &quot;&quot;C:\\Users\\me\\.bun\\bin\\bun.exe&quot; &quot;C:\\Users\\me\\.noop\\app\\src\\cli.ts&quot; start --foreground &gt;&gt; &quot;C:\\Users\\me\\.noop\\data\\logs\\daemon.log&quot; 2&gt;&amp;1&quot;</Arguments>");
-  // kept alive: the logon trigger repeats every minute, and a repeat while the daemon runs is dropped
-  expect(x).toMatch(/<LogonTrigger>[\s\S]*<Interval>PT1M<\/Interval>[\s\S]*<\/LogonTrigger>/);
+  // kept alive: a time trigger from the install on repeats every minute (a logon trigger's repeat would only begin at
+  // the next logon), and a repeat while the daemon runs is dropped; the logon trigger starts it at logon
+  expect(x).toMatch(/<TimeTrigger>[\s\S]*<StartBoundary>2026-11-27T09:05:00<\/StartBoundary>[\s\S]*<Interval>PT1M<\/Interval>[\s\S]*<\/TimeTrigger>/);
+  expect(x).toMatch(/<LogonTrigger>(?:(?!<Repetition>)[\s\S])*<\/LogonTrigger>/);
   expect(x).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
   expect(x).toContain("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>");
   expect(x).toContain("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");

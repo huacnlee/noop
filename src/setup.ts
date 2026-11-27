@@ -245,11 +245,15 @@ const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;"
  *    A headless conhost gives the same console without a window; the task stays in the logon session, so GUI work
  *    still has a desktop. Output goes to logs/daemon.log, as on macOS.
  *  - Kept alive: nothing restarted the daemon after `noop restart`, a self-update or a crash (launchd has KeepAlive,
- *    systemd Restart=always). The logon trigger repeats every minute and IgnoreNew drops the repeat while it runs.
+ *    systemd Restart=always). A time trigger from the install on repeats every minute and IgnoreNew drops the repeat
+ *    while it runs. A repeat on the logon trigger only begins at the next logon: installed in a running session, the
+ *    daemon exited by `noop restart` stayed down (2026-11-27). The logon trigger starts it at logon.
  *    `noop stop` disables the task so the repeat does not bring it back.
  *  - No battery or 72-hour limits (schtasks' defaults). */
-export function winTaskXml(user: string, bun: string, cli: string, log: string, windir = "C:\\Windows"): string {
+export function winTaskXml(user: string, bun: string, cli: string, log: string, windir = "C:\\Windows", now = new Date()): string {
   const run = `--headless cmd.exe /d /c ""${bun}" "${cli}" start --foreground >> "${log}" 2>&1"`;
+  const p = (n: number) => String(n).padStart(2, "0");
+  const start = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}T${p(now.getHours())}:${p(now.getMinutes())}:00`; // local time
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Noop fleet daemon</Description></RegistrationInfo>
@@ -257,8 +261,12 @@ export function winTaskXml(user: string, bun: string, cli: string, log: string, 
     <LogonTrigger>
       <Enabled>true</Enabled>
       <UserId>${xml(user)}</UserId>
-      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
     </LogonTrigger>
+    <TimeTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>${start}</StartBoundary>
+      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
