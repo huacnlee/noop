@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir, hostname } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeMacAgent } from "../src/setup";
+import { machineName } from "../src/machine";
 
 // the folder name "<test>" is not a valid Windows path, and the plist is a macOS service
 test.skipIf(process.platform === "win32")("fresh macOS service directories and XML-safe paths", () => {
@@ -37,7 +38,8 @@ test("primary initialization works on the current OS and survives reinitializati
     for (const args of [["--primary"], []]) {
       const result = Bun.spawnSync([process.execPath, "src/cli.ts", "init", ...args], { env, cwd: join(import.meta.dir, "..") });
       expect(result.exitCode).toBe(0);
-      expect(readFileSync(join(data, "config.toml"), "utf8")).toContain(`primary = "${hostname().split(".")[0]}"`);
+      // init names the primary with machineName() (LocalHostName on macOS); os.hostname() follows the network and can differ
+      expect(readFileSync(join(data, "config.toml"), "utf8")).toContain(`primary = "${machineName()}"`);
       expect(existsSync(join(data, "tasks/inbox"))).toBe(true);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
