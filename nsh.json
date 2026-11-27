@@ -55,7 +55,14 @@
       ]
     }
   },
-  "icon": "app/icon.png",
+  "icon": {
+    "macos": "app/icon-macos.png",
+    "windows": "app/icon-desktop.png",
+    "linux": "app/icon-desktop.png",
+    "ios": "app/icon.png",
+    "android": "app/icon.png",
+    "web": "app/icon.png"
+  },
   "store": {
     "ios": {
       "appId": "6835723652",
