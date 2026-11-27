@@ -44,6 +44,7 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
   let state: UpdateState = { kind: "none" };
   let busy = false;
   let heldPackage: (FoundPackage & { state: UpdateState }) | null = null;
+  let lastPackageError: unknown = null;
   const set = (next: UpdateState) => {
     state = next;
     onChange(next);
@@ -51,6 +52,26 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
 
   /** A failed check or download stays silent and the next tick tries again: a blip is not worth a banner. */
   async function check() {
+    await run(false).catch(() => {});
+  }
+
+  /**
+   * The Settings button: the same flow as the hourly check, but it says what happened. "ready" = an OTA package or
+   * update is downloaded, "shell" = only a new app shell is available, "latest" = nothing newer.
+   */
+  async function checkNow(): Promise<"ready" | "shell" | "latest" | "failed"> {
+    try {
+      if (busy) return "latest";
+      lastPackageError = null;
+      await run(true);
+    } catch {
+      return "failed";
+    }
+    const k = (state as UpdateState).kind;
+    return k === "ready" || k === "staged" ? "ready" : k === "shell" || k === "link" ? "shell" : k === "failed" || lastPackageError ? "failed" : "latest";
+  }
+
+  async function run(manual: boolean) {
     // A download waiting for its restart keeps being checked: a newer release replaces it, so the restart lands on
     // the latest instead of one version short (nsh/updater keeps the held download when the same version comes back).
     if (busy || state.kind === "installing" || state.kind === "failed" || (state.kind === "shell" && state.phase !== "available")) return;
@@ -66,6 +87,12 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
         set({ kind: "shell", version: found.version, url: found.url, canInstall: found.canInstall, phase: "available" });
         return;
       }
+      // Phones (no in-app restart) never send the owner to a store: the store lags behind releases and code arrives
+      // by OTA. A shell the app cannot install itself is the optional update next to the shell's version in Settings.
+      if (!found.canInstall && api.packages && !api.packages.restart) {
+        set({ kind: "shell", version: found.version, url: found.url, canInstall: false, phase: "available" });
+        return;
+      }
       if (!found.canInstall) return set({ kind: "link", version: found.version, url: found.url });
       if (state.kind === "ready" && state.version === found.version) return;
       downloading = true;
@@ -76,6 +103,7 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
       if (packageState) set(packageState);
       // A newer download that failed has already replaced the held one, so there is nothing left to restart into.
       if (downloading && state.kind === "ready") set({ kind: "none" });
+      if (manual && !packageState) throw e;
     } finally {
       busy = false;
     }
@@ -97,6 +125,7 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
       return next;
     } catch (e) {
       console.warn("package update failed:", String(e));
+      lastPackageError = e;
       return null;
     }
   }
@@ -136,7 +165,7 @@ export function createUpdates(api: UpdaterApi, onChange: (state: UpdateState) =>
     }
   }
 
-  return { check, install, installShell };
+  return { check, checkNow, install, installShell };
 }
 
 /** `nsh/updater`'s `shellInfo()`: the installed app (its shell) and the NSH runtime built into it. */

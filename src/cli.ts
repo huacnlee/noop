@@ -1,51 +1,77 @@
 #!/usr/bin/env bun
 // hub — CLI + daemon for the agent fleet.
+import { usageHeartbeat } from "./telemetry";
 import { guestCmd } from "./guest";
 import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {
-  type Cfg, P, ROOT, _commitPush, _pull, agentName, asText, chooseCli, claim, commitPush, guardMemory, heartbeat, hostCaps, hostName, journal,
+  type Cfg, type HostBeat, P, ROOT, _commitPush, _pull, agentName, asText, chooseCli, claim, commitPush, guardMemory, heartbeat, hostCaps, hostName, journal,
   list, loadConfig, locked, newTask, now, onlineHosts, pickTask, pull, readDoc, remember, writeDoc,
 } from "./core";
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { RUN_LIMIT, STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent, runLimits } from "./runner";
-import { writeRules } from "./rules";
+import { maybeCompactMemory, writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, MAX_WAKES, sameWaitAgain, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
-import { init, install, selfUpdate } from "./setup";
+import { init, install, selfUpdate, serviceState, startService, stopService } from "./setup";
+import { bridgeRestart, stayAwake } from "./awake";
 import { computeMetrics } from "./metrics";
 import { writeUsageReport } from "./usage-report";
 import { checkUnrunnable, supervise } from "./supervisor";
 import { collect, LEARN_PROMPT } from "./sessions";
 import { medic } from "./medic";
 import { githubStarved } from "./github";
+import { sharedSecrets } from "./secrets";
 import { doctor, visual } from "./visual";
 import { ackInbound, answerFromChat, appendEvent, cancelTask, feed, handleOwnerMessage, mediaDays, pendingInbound, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
-import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
+import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, FallbackModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
 import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, retireUnrunnableProposed, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
-import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
-import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
+import { CODE, L, isEnglish, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
+import { accountEnv, accountsStatus, classify, failoverAccount, networkBlocked, pendingLoginIds, pickAccount, reportFailure, reportNetworkBlock, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
+import { strayWorkspaces, taskWorkspace, workspaceRoot } from "./workspaces";
+import { gradeMeta, parseGrades } from "../app/grading";
+import { measuredGrade, runReviews } from "./review-grade";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
 
-/** every: "15m" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
+/** Interval schedules in minutes: "15m", "2h", "1d", "hourly"; undefined for clock schedules. */
+function intervalMinutes(every: string): number | undefined {
+  const s = every.trim();
+  if (s === "hourly") return 60;
+  const m = s.match(/^(\d+)(m|h|d)$/);
+  return m ? parseInt(m[1]) * { m: 1, h: 60, d: 1440 }[m[2] as "m" | "h" | "d"] : undefined;
+}
+
+/** True when `due` understands the schedule. An unknown one (say "1hr") is never due, so the routine would stop
+ *  silently; the scheduler reports it instead. "1h" and "1d" were set from settings on 2026-11-10 and were read
+ *  as clock times, which stopped issue-triage, triage-inbound and focus-check for over two weeks. */
+export function validEvery(every: string | undefined): boolean {
+  if (!every) return false;
+  if (intervalMinutes(every) !== undefined) return true;
+  const parts = every.trim().split(/\s+/);
+  const clock = /^([01]?\d|2[0-3]):[0-5]\d$/.test(parts.at(-1)!);
+  if (parts.length === 2) return clock && (parts[0] === "daily" || parts[0] === "weekdays");
+  if (parts.length === 3) return clock && parts[0] === "weekly" && /^(SUN|MON|TUE|WED|THU|FRI|SAT)/i.test(parts[1]);
+  return false;
+}
+
+/** every: "15m" | "2h" | "1d" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
 export function due(every: string, last: string | undefined, t = new Date()): boolean {
   const parts = every.trim().split(/\s+/);
   const lastT = last ? new Date(last) : null;
-  if (parts[0] === "hourly" || /^\d+m$/.test(parts[0])) {
-    const mins = parts[0] === "hourly" ? 60 : parseInt(parts[0]);
-    return !lastT || +t - +lastT >= mins * 60_000;
-  }
+  const mins = intervalMinutes(every);
+  if (mins !== undefined) return !lastT || +t - +lastT >= mins * 60_000;
+  if (!validEvery(every)) return false;
   const [h, m] = parts.at(-1)!.split(":").map(Number);
   // Most recent slot at or before t, stepping back over days the schedule excludes.
   // A machine asleep at 19:00 used to skip that day's routine entirely: `target` was
@@ -92,6 +118,15 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
     if (r.enabled === false) continue;
     const owner = r.scheduler ?? (r.kind === "learn" ? "each" : "primary"); // which host generates the task
     if (owner === "primary" ? !primary : owner !== "each" && owner !== host) continue;
+    if (!validEvery(r.every)) { // never due; say so once per bad value instead of staying silent
+      const key = `${r.name}#invalid`;
+      if (state[key] !== r.every) {
+        state[key] = r.every;
+        journal(host, `⚠️ routine \`${r.name}\` has an unknown schedule "${r.every}" and will not run; use 15m, 2h, 1d, hourly, daily HH:MM, weekdays HH:MM or weekly MON HH:MM`);
+      }
+      continue;
+    }
+    delete state[`${r.name}#invalid`];
     if (!due(r.every, state[r.name])) continue;
     if (r.kind === "learn") { // local session history → digest → task pinned to this host
       state[r.name] = new Date().toISOString();
@@ -172,6 +207,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   const { meta, body } = readDoc(path);
   const wanted = allowedClis(meta, cfg);
   const installed = (c: string) => !!Bun.which(c);
+  await sharedSecrets(cfg); // shared Claude keys decide which accounts exist
   const first = pickAccount(cfg, wanted.filter(installed)) ?? failoverAccount(cfg, null, wanted, installed);
   const agent = meta.agent || "lead";
   if (!first) { // no usable account right now → put it back, don't fail it
@@ -186,6 +222,9 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   let acct: NonNullable<typeof first> = first;
   const promptBody = meta.requeue_note ? `${body}\n\n> ${meta.requeue_note}\n` : body;
   let cli = acct.cli, out = "", res!: ReturnType<typeof parseResult>;
+  // a repo task works in its own worktree under ~/.noop/work, never in the owner's checkout
+  const cwd = await taskWorkspace(meta, cfg, P(), (line) => journal(host, `⚠️ ${meta.id} ${line}`));
+  const promptMeta = { ...meta, workspace: cwd };
   for (let hop = 0; ; hop++) { // quota / login trouble: switch account or CLI on this host instead of waiting it out
     cli = acct.cli;
     const model = cfg.clis?.[cli]?.model ?? (cli === "claude" ? "claude-opus-5-5" : "default");
@@ -204,7 +243,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const workCfg = limits.checkpointMinutes
       ? { ...cfg, clis: { ...cfg.clis, timeout_minutes: limits.workMinutes } }
       : cfg;
-    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note, limits), meta.repo || P(), workCfg, log, !!meta.gate_override,
+    out = await runAgent(cli, buildPrompt(promptMeta, promptBody, cfg, b.note, limits), cwd, workCfg, log, !!meta.gate_override,
       { ...b.env, ...accountEnv(acct) });
     if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; } // the owner cancelled it while it ran
     if (out.includes(RUN_LIMIT)) {
@@ -237,8 +276,8 @@ async function processTask(path: string, cfg: Cfg, host: string) {
           checkpointAt: limits.hardAt,
           hardAt: limits.hardAt,
         };
-        const checkpointOut = await runAgent(cli, buildPrompt(meta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
-          meta.repo || P(), checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
+        const checkpointOut = await runAgent(cli, buildPrompt(promptMeta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
+          cwd, checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
         if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; }
         const checkpoint = parseResult(checkpointOut);
         if (checkpoint.status !== "failed" && (checkpoint.status !== "waiting" || checkpoint.wait_check)) {
@@ -291,6 +330,10 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     });
     return;
   }
+  // the agent's self-grade of this run, its size measured from the PRs / MRs it names (outside the lock: one read per PR)
+  const reviews = runReviews(res.prs, `${res.summary}\n${res.waiting_on ?? ""}`);
+  const selfGrade = parseGrades(res.grades);
+  const grade = selfGrade && reviews.length && res.status !== "failed" ? await measuredGrade(selfGrade, reviews, !isEnglish()).catch(() => selfGrade) : selfGrade;
   await locked(async () => {
   await _pull();
 
@@ -307,7 +350,8 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     children.push(id);
     journal(host, `  ↳ ${id} → ${f.agent ?? agent}: ${f.title}`);
   }
-  const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined };
+  // a later run without a grade keeps the earlier one
+  const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined, ...(grade ? gradeMeta(grade) : {}) };
   const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
   const latest = existsSync(path) ? readDoc(path).body : body;
@@ -329,8 +373,15 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const wakes = Number(meta.wakes ?? 0);
     // the owner's approval covers the whole task: a wait for CI before the approved merge must not revoke it
     writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, gate_override: meta.gate_override, waiting_since: meta.waiting_since || now(), parked_at: now(), wake_at: w.wake_at, wait_kind: w.kind, wakes: wakes ? String(wakes) : undefined,
-      waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_base: undefined },
+      waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_base: undefined, wait_note: res.summary?.trim() || meta.wait_note },
       body + runNote + `\n**Waiting on:** ${res.waiting_on ?? "?"} (${w.kind === "human" ? "wakes on the owner's answer or an event" : `check again ${w.wake_at}`})\n`);
+    // a stage finished before the wait: bring it to the main chat like a result, once per new summary (a recheck with nothing new stays quiet)
+    if (waitProgressIsNew(meta, res)) {
+      const text = `${res.summary!.trim()}\n${L("Waiting on", "等待")}: ${res.waiting_on ?? "?"}`;
+      void notify(ownerWork && !meta.parent && meta.source === "owner@chat" ? text : `${meta.title}\n${text}`, cfg,
+        ownerWork && !meta.parent ? { kind: "notice", ref: meta.id, attachments: res.attachments, from: `${agentName(agent)}@${host}` }
+          : { kind: "system", ref: meta.id, attachments: res.attachments, from: `${agentName(agent)}@${host}`, quiet: true });
+    }
     if (!sameWaitAgain(meta, res.waiting_on)) journal(host, w.kind === "human" ? L(`⏳ ${meta.id} waiting on you: ${res.waiting_on ?? ""} (no timer, continues on the event)`, `⏳ ${meta.id} 等你处理：${res.waiting_on ?? ""}（不定时唤醒，事件到达再继续）`) : w.kind === "event" ? L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""} (wakes when its check changes, at the latest ${w.wake_at})`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}（检查命令变化即唤醒，最迟 ${w.wake_at}）`) : L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""}, checking again in ${w.minutes} minutes`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}，${w.minutes} 分钟后再看`));
   } else if (res.status === "needs_decision") {
     const did = openDecision(meta, res, host);
@@ -352,6 +403,13 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   }
   await _commitPush(`[${host}] ${res.status} ${meta.id}: ${meta.title}`);
   });
+}
+
+/** A parked run reports progress only when it says something new; the checkpoint fallback has nothing to report. */
+export function waitProgressIsNew(meta: Record<string, string | undefined>, res: Pick<Result, "summary" | "waiting_on">): boolean {
+  const s = res.summary?.trim();
+  if (!s || /^checkpoint saved/.test(res.waiting_on ?? "")) return false;
+  return s !== (meta.wait_note ?? "").trim();
 }
 
 export function checkpointFallback(id: string, log: string, resumeAt = Date.now() + 5 * 60_000): Result {
@@ -438,18 +496,29 @@ async function answerReplies(cfg: Cfg, host: string, queued: ReturnType<typeof p
 }
 
 /** Requeue tasks whose claiming host went silent (crash, sleep, network loss). */
-function reapStale(cfg: Cfg, host: string, ownOnly = false) {
+export function reapStale(cfg: Cfg, host: string, ownOnly = false) {
   const alive = new Set(onlineHosts(cfg).map((h) => h.host));
   const graceMs = (cfg.fleet?.reap_after_minutes ?? 20) * 60_000;
   for (const p of list(P("tasks", "active"), /^T-.*\.md$/)) {
     const { meta, body } = readDoc(p);
+    const own = meta.claimed_by === host;
     // own tasks not run by this process were orphaned by a crash/restart (we're alive, so no one else reaps them)
-    if (meta.claimed_by === host ? runningIds.has(meta.id) : ownOnly || alive.has(meta.claimed_by)) continue;
+    if (own ? runningIds.has(meta.id) : ownOnly || alive.has(meta.claimed_by)) continue;
     if (Date.now() - Date.parse(meta.started) < graceMs) continue;
+    // The task is queued again already (a failed claim or a stalled run put it back): this active copy is a stale
+    // claim restored from the sync base. Drop it — requeueing would overwrite the queued copy's attempt and stall
+    // counters, so the task could reset its retry budget forever (2026-11-25: 69 such lines in one day).
+    if (own && existsSync(P("tasks", "inbox", `${meta.id}.md`))) {
+      require("node:fs").unlinkSync(p);
+      journal(host, `♻️ dropped the stale claim of ${meta.id} on ${host} (it is already queued again)`);
+      continue;
+    }
     writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, requeued: now(),
-      requeue_note: `Requeued: host ${meta.claimed_by} went offline mid-task. Check for partial work (branch agent/${meta.id}-*).` }, body);
+      requeue_note: own
+        ? `Requeued: no run of this task is alive on ${host} (crashed or restarted). Check for partial work (branch agent/${meta.id}-*).`
+        : `Requeued: host ${meta.claimed_by} went offline mid-task. Check for partial work (branch agent/${meta.id}-*).` }, body);
     require("node:fs").unlinkSync(p);
-    journal(host, `♻️ requeued ${meta.id} (host ${meta.claimed_by} offline)`);
+    journal(host, own ? `♻️ requeued ${meta.id} (claimed by ${host}, but its run is gone)` : `♻️ requeued ${meta.id} (host ${meta.claimed_by} offline)`);
   }
 }
 
@@ -518,6 +587,8 @@ async function drainAndExit(why: string, host: string) {
       await _commitPush(`[${host}] ${why}`, { force: true });
     });
   } catch {}
+  // cover the gap until the service manager has started the next daemon and it holds its own block
+  bridgeRestart();
   process.exit(0);
 }
 
@@ -560,12 +631,22 @@ async function ownerUpdate(c: Cfg, host: string) {
   }
 }
 
+/** What a failed run blames. No keyword matching for the task itself: when the agent could not even report a
+ *  result, the medic (AI) decides whether the tooling broke. A network the model API refuses is the exception —
+ *  no medic run can repair the owner's VPN, and every medic run sent to look at it dies of the same 403. */
+export function failureKind(summary: string, out: string): "network" | "tooling" | "task" {
+  if (networkBlocked(out)) return "network";
+  return /agent returned no result block/.test(summary) ? "tooling" : "task";
+}
+
 /** A good report doesn't forward raw errors. Retry, call the medic for tooling problems, and only after that
  *  tell the owner — in one plain sentence, and only for work the owner actually cares about. */
 async function handleFailure(meta: Record<string, string>, body: string, summary: string, out: string, cfg: Cfg, host: string) {
   const attempt = Number(meta.attempt ?? 1);
-  // no keyword matching: when the agent could not even report a result, the medic (AI) decides whether the tooling broke
-  const tooling = /agent returned no result block/.test(summary);
+  const kind = failureKind(summary, out);
+  const blocked = kind === "network";
+  const tooling = kind === "tooling";
+  if (blocked) void reportNetworkBlock(cfg, host);
   if (tooling) void medic(`Agent run for ${meta.id} on ${host} ended without a result. Decide whether the tooling (CLI, auth, environment) is at fault and fix it; ignore it if the task itself failed:\n${out.slice(-2500)}`,
     cfg, { auto: true, kind: `tool-${meta.cli_used ?? "agent"}` });
   if (attempt < (cfg.fleet?.max_attempts ?? 2)) {
@@ -575,7 +656,7 @@ async function handleFailure(meta: Record<string, string>, body: string, summary
       if (existsSync(f)) unlinkSync(f);
       writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, status: undefined, attempt: String(attempt + 1) },
         `${body}\n\n> Attempt ${attempt} failed: ${summary.slice(0, 300)}. Try a different approach.\n`);
-      journal(host, `↻ ${meta.id} retry ${attempt + 1} (${tooling ? "tooling issue → medic" : "task failure"})`);
+      journal(host, `↻ ${meta.id} retry ${attempt + 1} (${blocked ? "network refused by the model API" : tooling ? "tooling issue → medic" : "task failure"})`);
       await _commitPush(`[${host}] retry ${meta.id}`);
     });
     return;
@@ -727,6 +808,11 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
+  // A channel nobody reads stays quiet: with this many cards already unanswered, one more menu is one more unread line.
+  // Off by default (0); a fleet turns it on with [idle] max_open_cards = N. 2026-11-23: four open cards, none answered
+  // in seven days, and the idle menu kept adding one every few hours.
+  const maxOpen = cfg.idle?.max_open_cards ?? 0;
+  if (maxOpen > 0 && list(P("decisions", "open"), /^[DP]-.*\.md$/).length >= maxOpen) return;
   // Re-offer after the latest unanswered menu's cooldown, regardless of filename order.
   const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta)
     .filter((m) => m.kind === "menu")
@@ -743,8 +829,25 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   const streak = Number(state.idle_empty ?? 0) || 0;
   const day = 24 * 60 * 60_000;
   if (empty && sinceLast < Math.min(cooldown * 2 ** streak, Math.max(cooldown, day))) return;
+  if (cfg.idle?.mode === "explore") {
+    // Owner 2026-11-25 (T-11170): an idle fleet finds its own work. The planner picks the next items from the team OKR
+    // (memory/okr.md) and dispatches them as followups instead of asking the owner to choose from a menu.
+    const agent = (cfg.idle?.agent as string | undefined) ?? "planner";
+    const id = newTask("Plan and dispatch self-driven work (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
+Follow your profile: read memory/okr.md, memory/focus.md and the open work of each channel, pick the 1-4 highest-value items
+that need no owner decision, and return them as followups (each with goal, acceptance criteria and evidence to bring back).
+Do not send a menu. If nothing qualifies, return done with one line saying why.`,
+      { agent, priority: "normal", source: "idle", extra: { kind: "explore" } });
+    state.last_menu = new Date().toISOString();
+    state.last_idle_task = id;
+    // An explore run hands out followups rather than raising a card, so "no card" is not "nothing found": keep its old
+    // fixed cooldown instead of growing the back-off.
+    state.idle_empty = "0";
+    journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} ${agent} planning self-driven work`);
+    return;
+  }
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
-Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,
+Build the owner's next-action menu per your profile. Return needs_decision only for candidates with new evidence or a prepared result that changes the owner's decision. If none qualify, return done with a brief no-change summary and no question, options, or followups; leave pending decisions unanswered.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — assess what changed before offering a refresh.` : ""}`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
   state.last_idle_task = id;
@@ -784,6 +887,7 @@ export async function tick(cfg: Cfg, background = false) {
     heartbeat(cfg, running, sample(cfg));
     if (primary) {
       runRoutines(cfg, host, primary);
+      try { const id = maybeCompactMemory(host); if (id) journal(host, `🗜 memory over budget → ${id} compaction`); } catch (e) { journal(host, `💥 memory compaction: ${e}`); }
       reapStale(cfg, host);
       wakeParents(host, ready);
       maybeSupervise(cfg, host);
@@ -903,6 +1007,21 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
     }
     await _commitPush(`[${host}] plan ${todo.length} tasks`);
   });
+}
+
+/** `noop start --foreground`, and what the service manager runs. A person starting a second copy by hand next to the
+ *  running service would make two daemons claim the same host's work, so that is refused (the service itself has no TTY). */
+async function foreground(cfg: Cfg) {
+  if (process.stdin.isTTY) {
+    const svc = await serviceState();
+    // Only a known pid tells another copy apart from this one: a Windows Scheduled Task has a console (so a TTY) and
+    // schtasks reports no pid, so the task would otherwise see itself as "already running" and exit 1 at every start.
+    if (svc.running && svc.pid && svc.pid !== process.pid && svc.pid !== process.ppid) {
+      process.exitCode = 1;
+      return void console.log(`✗ noop is already running as a service${svc.pid ? ` (pid ${svc.pid})` : ""}. Stop it first (noop stop), or watch it with noop status.`);
+    }
+  }
+  return daemon(cfg);
 }
 
 async function daemon(cfg: Cfg) {
@@ -1026,8 +1145,14 @@ async function daemon(cfg: Cfg) {
     },
   });
   setApplyOp((op) => runTool(store, op?.tool, op));
-  const model = new ClaudeModel(String(cfg.router?.model ?? "claude-haiku-5-5"), String(cfg.router?.cli ?? "claude"), (cfg.router?.timeout_seconds ?? 45) * 1000);
-  if (isPrimary(cfg, host) && Bun.which(String(cfg.router?.cli ?? "claude"))) model.warm(systemPrompt());
+  // the chat model, then fallbacks (router.fallback: model names, default Sonnet): a stuck or out-of-quota model no longer
+  // turns the owner's message into a "chat assistant unavailable" note while another model would have answered
+  const routerCli = String(cfg.router?.cli ?? "claude"), routerTimeout = (cfg.router?.timeout_seconds ?? 45) * 1000;
+  const primaryModel = new ClaudeModel(String(cfg.router?.model ?? "claude-haiku-5-5"), routerCli, routerTimeout);
+  const fallbackNames: string[] = Array.isArray(cfg.router?.fallback) ? cfg.router.fallback.map(String) : ["claude-sonnet-5-5"];
+  const model = new FallbackModel([primaryModel, ...fallbackNames.map((n) => new ClaudeModel(n, routerCli, routerTimeout))],
+    (from, err) => console.error(`chat brain: model ${from === 0 ? String(cfg.router?.model ?? "claude-haiku-5-5") : fallbackNames[from - 1]} failed (${err}); trying the next one`));
+  if (isPrimary(cfg, host) && Bun.which(routerCli)) primaryModel.warm(systemPrompt());
   if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered, sentAt, thread, channel }) => {
     const got = Date.now();
     const room = channel ? channels().find((c) => c.slug === channel) : undefined;
@@ -1068,7 +1193,10 @@ async function daemon(cfg: Cfg) {
     }
     await _commitPush(`[${host}] recover`);
   });
-  await locked(async () => { await _pull(); journal(host, `🟢 daemon started (${hostCaps(cfg).join(", ")})`); await _commitPush(`[${host}] up`); });
+  // a worker host must not sleep while the daemon runs; the result is in the start line so every host's state is visible
+  let awake = await stayAwake();
+  const awakeNote = "how" in awake ? `awake: ${awake.how}` : L(`⚠️ cannot keep this host awake: ${awake.error}`, `⚠️ 无法阻止本机睡眠：${awake.error}`);
+  await locked(async () => { await _pull(); journal(host, `🟢 daemon started (${hostCaps(cfg).join(", ")}; ${awakeNote})`); await _commitPush(`[${host}] up`); });
   for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void drainAndExit("stop", host));
   // a stray rejection (a voided notify/medic) used to kill the process → systemd restart → running work requeued
   process.on("unhandledRejection", (e) => console.error("unhandled rejection", e));
@@ -1076,6 +1204,11 @@ async function daemon(cfg: Cfg) {
   let lastUpdate = 0, failures = 0;
   for (;;) {
     const c = loadConfig();
+    // restore the sleep block if its helper was killed; report only a change, never every tick
+    const was = awake;
+    awake = await stayAwake();
+    if ("error" in awake && !("error" in was)) journal(host, L(`⚠️ lost the sleep block: ${awake.error}`, `⚠️ 阻止睡眠失效：${awake.error}`));
+    if ("how" in awake && "error" in was) journal(host, `☕ awake again: ${awake.how}`);
     if (adoptCloudUrl(c.cloud?.url)) journal(host, `☁️ hub moved: now syncing with ${c.cloud.url}`);
     if (existsSync(RESTART_FLAG())) { // `hub restart` (throttled) / `hub restart --force`
       const force = readFileSync(RESTART_FLAG(), "utf8").includes("force");
@@ -1083,6 +1216,7 @@ async function daemon(cfg: Cfg) {
     }
     if (!draining) await ownerUpdate(c, host);
     await locked(() => guardMemory(host)); // damage sync reported since the last tick; the daily memory snapshot
+    if (!draining) void usageHeartbeat(c).catch(() => null);
     try { await tick(c, true); failures = 0; } catch (e) {
       console.error("tick failed", e);
       if (++failures >= 3) void medic(`noop daemon: ${failures} consecutive tick failures on ${host}.\n${(e as Error)?.stack ?? e}`, c, { auto: true, kind: "daemon" });
@@ -1099,6 +1233,20 @@ async function daemon(cfg: Cfg) {
   }
 }
 
+/** Terminal colors for `noop status`/`noop tasks`: off when piped or with NO_COLOR (https://no-color.org). */
+const colorOn = () => !!process.stdout.isTTY && !process.env.NO_COLOR;
+const paint = (code: string) => (s: string | number) => (colorOn() ? `\x1b[${code}m${s}\x1b[0m` : String(s));
+export const C = { bold: paint("1"), dim: paint("2"), red: paint("31"), green: paint("32"), yellow: paint("33"), cyan: paint("36") };
+
+/** "12s ago", "5m ago", "3h ago", "2d ago" */
+export function ago(iso: string | undefined, nowMs = Date.now()): string {
+  const t = Date.parse(iso ?? "");
+  if (Number.isNaN(t)) return "never";
+  const s = Math.max(0, Math.round((nowMs - t) / 1000));
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`;
+}
+
+/** `noop status`: is Noop itself healthy on this machine (service, sync, server, resources). Work lives in `noop tasks`. */
 async function status(cfg: Cfg, brief = false) {
   if (brief) { // what a person wants to see right after installing
     const url = readHubToml().cloud?.url ?? cfg.cloud?.url;
@@ -1108,35 +1256,79 @@ async function status(cfg: Cfg, brief = false) {
     if (url) console.log(`\n  Open ${url}\n  and sign in with the code sent to your email.`);
     return;
   }
+  const host = hostName(cfg);
+  const row = (label: string, value: string) => console.log(`  ${C.dim(label.padEnd(11))}${value}`);
+  const ok = (s: string) => `${C.green("●")} ${C.green(s)}`, bad = (s: string) => `${C.red("●")} ${C.red(s)}`, warn = (s: string) => `${C.yellow("●")} ${C.yellow(s)}`;
+  console.log(`${C.bold("noop")} · ${C.bold(host)} ${C.dim(isPrimary(cfg, host) ? "(primary)" : "(worker)")}\n`);
+
+  // the service: is the daemon up under the OS service manager?
+  const svc = await serviceState();
+  const how = [svc.manager, svc.pid && `pid ${svc.pid}`, svc.since && `since ${svc.since}`].filter(Boolean).join(" · ");
+  if (!svc.manager) row("service", warn("no service manager") + C.dim("  run in a terminal: noop start --foreground"));
+  else if (!svc.installed) row("service", bad("not installed") + C.dim("  run: noop start"));
+  else if (svc.running) row("service", `${ok("running")}  ${C.dim(how)}`);
+  else row("service", `${bad("stopped")}  ${C.dim([svc.manager, svc.lastExit && svc.lastExit !== "0" && `last exit ${svc.lastExit}`].filter(Boolean).join(" · "))}${C.dim("  run: noop start")}`);
+  if (svc.logs) row("logs", C.dim(svc.logs));
+  if (svc.installed && !svc.running) process.exitCode = 1;
+
+  // the daemon's own pulse: its heartbeat, written every tick
+  let beat: HostBeat | undefined;
+  try { beat = JSON.parse(readFileSync(P("fleet", "hosts", `${host}.json`), "utf8")); } catch {}
+  const stale = !beat || Date.now() - Date.parse(beat.seen) > 5 * 60_000;
+  row("heartbeat", beat ? `${(stale ? C.yellow : C.green)(ago(beat.seen))}${beat.busy ? `  ${C.dim("·")} ${C.cyan(`${beat.busy} task${beat.busy === 1 ? "" : "s"} running`)}` : C.dim("  · idle")}` : C.yellow("none yet"));
+  const rev = runningRev().rev;
+  row("version", rev ? `${rev.slice(0, 7)}${beat?.rev && beat.rev !== rev ? C.yellow(`  (the running service reports ${beat.rev.slice(0, 7)})`) : ""}` : C.dim("unknown"));
+  const u = updateState();
+  if (u?.state && u.state !== "done") row("update", C.yellow(String(u.state)));
+
   // the server this machine actually syncs with is noop.toml's; the shared config only proposes one (adopted next tick)
   const hub = String(readHubToml().cloud?.url ?? "").replace(/\/$/, ""), shared = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
-  console.log(`server: ${hub || "local (not connected to a hub)"}${shared && hub && shared !== hub ? `   (shared config says ${shared}: switching on the next tick)` : ""}`);
-  if (hub) { // today's Cloudflare usage against the free plan (cloud/src/budget.ts)
-    const u = await fetch(`${hub}/api/usage`, { headers: { Authorization: `Bearer ${cfg.server?.token}` }, signal: AbortSignal.timeout(5000) })
-      .then((r) => (r.ok ? r.json() : null)).catch(() => null) as any;
-    const pct = (k: string) => `${Math.round((100 * u[k]) / u.free[k])}%`;
-    if (u?.free) console.log(`cloudflare today (UTC): ${u.requests} requests ${pct("requests")} · ${u.rowsRead} rows read ${pct("rowsRead")} · ${u.rowsWritten} rows written ${pct("rowsWritten")} of the free plan · db ${(u.dbBytes / 1e6).toFixed(0)} MB · ${u.level}`);
+  if (!hub) row("server", warn("local only") + C.dim("  not connected to a hub: noop init <url>"));
+  else {
+    // one request per `noop status`, run by a person: today's Cloudflare usage against the free plan (cloud/src/budget.ts)
+    const r = await fetch(`${hub}/api/usage`, { headers: { Authorization: `Bearer ${cfg.server?.token}` }, signal: AbortSignal.timeout(5000) }).catch((e) => e as Error);
+    const u = r instanceof Error || !r.ok ? null : await r.json().catch(() => null) as any;
+    row("server", `${r instanceof Error ? bad("unreachable") : r.ok ? ok("connected") : warn(`HTTP ${r.status}`)}  ${hub}`);
+    if (shared && shared !== hub) row("", C.yellow(`shared config says ${shared}: switching on the next tick`));
+    if (u?.free) {
+      const pct = (k: string) => { const n = Math.round((100 * u[k]) / u.free[k]); return (n >= 80 ? C.red : n >= 50 ? C.yellow : C.green)(`${n}%`); };
+      row("cloudflare", `${u.requests} requests ${pct("requests")} · ${u.rowsRead} rows read ${pct("rowsRead")} · ${u.rowsWritten} rows written ${pct("rowsWritten")} · db ${(u.dbBytes / 1e6).toFixed(0)} MB · ${u.level === "ok" ? C.green(u.level) : C.yellow(u.level)}`);
+      row("", C.dim("of the free plan, today (UTC)"));
+    }
   }
-  console.log(`autonomy: ${level(cfg)}   shadow judge: ${JSON.stringify(judgeAccuracy())}`);
-  console.log(`host ${hostName(cfg)}  caps: ${hostCaps(cfg).join(", ")}  primary: ${cfg.fleet?.primary}`);
-  console.log("online: " + onlineHosts(cfg).map((h) => `${h.host}(busy ${h.busy}, load ${h.stats?.loadRatio}, disk ${h.stats?.diskFreeGB}GB)`).join(", "));
+
+  // the fleet and this machine's headroom
+  const online = onlineHosts(cfg);
+  row("machines", `${C.bold(online.length)} online${online.length ? C.dim(": ") + online.map((h) => `${h.host === host ? C.cyan(h.host) : h.host}${C.dim(`(busy ${h.busy}, load ${h.stats?.loadRatio}, disk ${h.stats?.diskFreeGB}GB)`)}`).join(", ") : ""}`);
   const s = sample(cfg);
-  console.log("accounts:\n  " + accountsStatus(cfg).join("\n  "));
-  console.log(`this host: load ${s.load1}/${s.cores}  mem free ${s.memFreePct}%  disk free ${s.diskFreeGB}GB  → parallel ${allowedParallel(s, cfg, 0)}`);
+  const mem = (s.memFreePct < 10 ? C.red : s.memFreePct < 25 ? C.yellow : C.green)(`${s.memFreePct}%`);
+  const disk = (s.diskFreeGB < 5 ? C.red : s.diskFreeGB < 20 ? C.yellow : C.green)(`${s.diskFreeGB}GB`);
+  row("this host", `load ${s.load1}/${s.cores} · mem free ${mem} · disk free ${disk} → parallel ${allowedParallel(s, cfg, 0)}`);
+  row("caps", C.dim(hostCaps(cfg).join(", ")));
+  row("autonomy", `${level(cfg)}  ${C.dim(`shadow judge ${JSON.stringify(judgeAccuracy())}`)}`);
+  const accts = accountsStatus(cfg);
+  row("accounts", accts.length ? "" : C.dim("none"));
+  for (const a of accts) console.log(`    ${/✗|fail|exhaust|limit|expired/i.test(a) ? C.yellow(a) : a}`);
+  console.log(C.dim("\n  Tasks and decisions: noop tasks"));
+}
+
+/** `noop tasks`: the work queue, routines waiting for approval and the decisions waiting on the owner. */
+function tasks(cfg: Cfg) {
+  const tint: Record<string, (s: string | number) => string> = { active: C.cyan, failed: C.red, blocked: C.yellow, done: C.green };
   for (const f of ["proposed", "inbox", "active", "blocked", "failed", "done"]) {
     const items = list(P("tasks", f), /^T-.*\.md$/);
-    console.log(`\n${f.padEnd(8)} ${items.length}`);
+    console.log(`${f === "proposed" ? "" : "\n"}${C.bold(f.padEnd(8))} ${(tint[f] ?? ((x) => String(x)))(items.length)}`);
     if (f !== "done") for (const p of items.slice(-12)) {
       const m = readDoc(p).meta;
-      console.log(`  ${m.id} [${m.agent}] ${m.title}${m.claimed_by ? ` @${m.claimed_by}` : ""}${m.requires ? ` (needs ${m.requires})` : ""}`);
+      console.log(`  ${C.dim(m.id)} ${C.dim(`[${m.agent}]`)} ${m.title}${m.claimed_by ? C.cyan(` @${m.claimed_by}`) : ""}${m.requires ? C.dim(` (needs ${m.requires})`) : ""}`);
     }
   }
   const starved = routinesAwaitingApproval(cfg);
   if (starved.length) {
-    console.log("\nroutines waiting for your approval");
-    for (const r of starved) console.log(`  ${r.name}: ${r.copies.join(", ")} waiting since ${r.since.slice(0, 16).replace("T", " ")} — it fires on schedule but cannot start until you answer; set readonly = true or answer the batch`);
+    console.log(`\n${C.bold("routines waiting for your approval")}`);
+    for (const r of starved) console.log(`  ${C.yellow(r.name)}: ${r.copies.join(", ")} waiting since ${r.since.slice(0, 16).replace("T", " ")} — it fires on schedule but cannot start until you answer; set readonly = true or answer the batch`);
   }
-  console.log("\nopen decisions");
+  console.log(`\n${C.bold("open decisions")}`);
   for (const p of list(P("decisions", "open"))) {
     const m = readDoc(p).meta;
     const age = cardAge(m);
@@ -1144,14 +1336,14 @@ async function status(cfg: Cfg, brief = false) {
     // nothing and hid the one word that clears it. Name the item count and the command instead.
     if (m.kind === "proposals") {
       const n = (m.items ?? "").split(",").filter(Boolean).length;
-      console.log(`  ${m.id} proposals: ${n} item${n === 1 ? "" : "s"}${age}  ${m.question}  → noop decide ${m.id} "<1,3|all|none>"`);
+      console.log(`  ${C.yellow(m.id)} proposals: ${n} item${n === 1 ? "" : "s"}${age}  ${m.question}  → noop decide ${m.id} "<1,3|all|none>"`);
       continue;
     }
-    console.log(`  ${m.id} (${m.task}, ${m.agent}) ${m.question}  rec=${m.recommendation}${m.held ? `  [waiting on you${age}]` : age}`);
+    console.log(`  ${C.yellow(m.id)} ${C.dim(`(${m.task}, ${m.agent})`)} ${m.question}  rec=${m.recommendation}${m.held ? C.yellow(`  [waiting on you${age}]`) : age}`);
   }
 }
 
-/** How long a card has waited, as status() shows it: "" under a day, " · 12d" after. Unparseable dates count as fresh. */
+/** How long a card has waited, as `noop tasks` shows it: "" under a day, " · 12d" after. Unparseable dates count as fresh. */
 export function cardAge(meta: Record<string, string>, nowMs = Date.now()): string {
   const d = Date.parse(meta.created ?? meta.notified ?? "");
   if (Number.isNaN(d)) return "";
@@ -1163,21 +1355,26 @@ const HELP = `Noop — your own AI team
 
   noop init [<hub-url>] [--token <machine-token>]   join your hub (owner email login, or a machine token); asks for the URL if not given
   noop init --primary         the first machine, once: deploy your own Cloudflare Worker (holds the fleet data), seed ~/.noop/data
-  noop install                run as a service (systemd / launchd / Task Scheduler)
-  noop update                 self-update framework now (also automatic in daemon)
-  noop fix ["what is wrong"]  AI medic: diagnose & repair this install (auto-runs on install/update/daemon failures)
+  noop install                (re)write the service definition (systemd / launchd / Task Scheduler) and start it
+  noop start                  start noop in the background (installs the service the first time)
+  noop start --foreground     run in this terminal instead (Ctrl-C stops once running tasks finish)
+  noop stop                   stop the background service (running tasks finish first)
+  noop restart [--force]      restart once running tasks finish (picks up new code)
+  noop status                 is noop healthy here: service, heartbeat, server, Cloudflare usage, machines, accounts
+  noop update                 self-update framework now (also automatic while running)
+  noop fix ["what is wrong"]  AI medic: diagnose & repair this install (auto-runs on install/update/runtime failures)
   noop doctor                 check dependencies (agents, gh, headless GUI tools)
   noop visual …               headless display for GUI testing: start/run/shot/record/input/stop
 
-  noop daemon                 run forever (tick every host.tick_seconds)
+  noop tasks                  the work queue, routines waiting for approval and open decisions
   noop tick                   one cycle: pull → routines → replies → judge → run tasks → push
   noop add "title" [-b body] [-a agent] [-r os:linux (hard)] [--prefer os:macos (soft)] [-w heavy] [--host name] [--repo ~/work/x] [-p high] [--cli claude|codex]
   noop decide D-0001 "A"      answer a decision from the terminal
-  noop status                 queue / decision / accounts / resources overview
   noop learn [--full] [--dry]  learn the CEO from local Claude/Codex sessions (digest stays local; principles go to memory)
   noop metrics [days]         per-agent success, judge vs owner decisions (feeds self-evolution)
   noop usage                  weekly usage report (also posted every Monday by the built-in routine)
   noop agents                 list fleet members
+  noop workspaces             where task worktrees live (~/.noop/work) and any left outside it, e.g. next to your repos (lists only)
   noop notify "text"          test Slack/Discord
   noop security [--json]      check this Noop deployment (2FA, sessions, OAuth clients, allow-lists) and this machine's Noop setup
   noop 2fa setup              bind (or re-bind) the authenticator app every sign-in requires; noop 2fa confirm <code> · noop 2fa status
@@ -1217,7 +1414,13 @@ async function main() {
         : "noop restarts once its running tasks finish (at most once per hour; --force to skip the limit)");
     }
     case "update": return void console.log((await selfUpdate({ force: true })) ? "updated" : "up to date"); // asked by a person: retry even a release this host rejected
-    case "daemon": return daemon(cfg);
+    case "start": {
+      if (!rest.includes("--foreground") && !rest.includes("-f")) { if (!(await startService())) process.exitCode = 1; return; }
+      return foreground(cfg);
+    }
+    case "daemon": return foreground(cfg); // older service definitions still run `noop daemon`
+    case "stop": if (!(await stopService())) process.exitCode = 1; return;
+    case "tasks": return tasks(cfg);
     case "tick": return tick(cfg);
     case "add": {
       const { values, positionals } = parseArgs({
@@ -1329,6 +1532,14 @@ async function main() {
       return void (await cloudDeploy(cfg));
     }
     case "notify": return void console.log(await notify(rest.join(" "), cfg));
+    case "workspaces": {
+      const stray = await strayWorkspaces(cfg);
+      console.log(`Noop workspaces: ${workspaceRoot(cfg)}`);
+      if (!stray.length) return void console.log("Nothing left outside it.");
+      console.log(`Left outside it (${stray.length}; nothing was removed):`);
+      for (const s of stray) console.log(`  ${s.kind.padEnd(15)} ${s.path}${s.repo ? `  (of ${s.repo})` : ""}`);
+      return;
+    }
     default: console.log(HELP);
   }
 }

@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { P, list, readDoc, writeDoc } from "../src/core";
-import { sweepPlatform, alreadyAsked, cardFor, checkUnrunnable, classify, groupByCause, supervise, type Ctx, type Task } from "../src/supervisor";
+import { sweepPlatform, alreadyAsked, standingAnswer, cardFor, checkUnrunnable, classify, groupByCause, supervise, type Ctx, type Task } from "../src/supervisor";
 import { closeDecision, ignoreDecision } from "../src/decisions";
 
 const H = 3_600_000;
@@ -17,8 +17,11 @@ const task = (m: Record<string, string>, folder: "waiting" | "blocked" = "waitin
 // Every test file shares one throwaway hub (see test/preload.ts), and reroute/resume move tasks into
 // tasks/inbox with their host requirement stripped. A leftover there is a pickable task, so a later
 // file's pickTask() test would pick it up instead of its own fixture. Remove what this file created.
+// The cards supervise() opens go too: their summary names merge gates (合并), so a later file's search over
+// decisions would find them.
 afterAll(() => {
-  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202"]) rmSync(P("tasks", "inbox", `${id}.md`), { force: true });
+  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202", "T-0301"]) for (const f of ["inbox", "waiting"]) rmSync(P("tasks", f, `${id}.md`), { force: true });
+  for (const f of ["open", "closed"]) for (const p of list(P("decisions", f))) if (readDoc(p).meta.supervisor_cause) rmSync(p, { force: true });
 });
 
 test("young, normally cycling waits are left alone", () => {
@@ -148,6 +151,36 @@ test("supervise(): one card per cause, never twice; answering resumes every task
   expect(readFileSync(P("journal", `${new Date().toLocaleDateString("sv-SE")}.md`), "utf8")).toContain("supervisor ran");
 });
 
+test("standing answer: a platform card the judge sent back or the owner answered A settles the cause", () => {
+  const sent = { id: "D-1", supervisor_cause: "platform:os:macos", answered: "2026-11-24T10:00:00Z", answer: "SENT BACK by judge: check the Mac, else A" };
+  const owner = { id: "D-2", supervisor_cause: "platform:os:macos", answered: "2026-11-24T12:00:00Z", answer: "A" };
+  const other = { id: "D-3", supervisor_cause: "platform:os:macos", answered: "2026-11-24T13:00:00Z", answer: "放 Linux 上做" };
+  expect(standingAnswer("platform:os:macos", [sent, owner, other])?.id).toBe("D-2");
+  expect(standingAnswer("platform:os:macos", [sent])?.id).toBe("D-1");
+  expect(standingAnswer("platform:os:macos", [other, { id: "D-4", supervisor_cause: "platform:os:macos", tasks: "T-1" }])).toBeUndefined();
+  expect(standingAnswer("slow:lb", [{ ...sent, supervisor_cause: "slow:lb" }])).toBeUndefined(); // only platform/host causes
+});
+
+test("supervise(): a settled platform cause resumes new tasks with the standing answer instead of a new card, once", () => {
+  const seen = new Date().toISOString();
+  writeFileSync(P("fleet", "hosts", "huacnlee-macbook.json"), JSON.stringify({ ...mac, seen }));
+  writeFileSync(P("fleet", "hosts", "lb.json"), JSON.stringify({ ...lin, seen }));
+  writeDoc(P("decisions", "closed", "D-0901.md"), { id: "D-0901", supervisor_cause: "platform:os:macos", tasks: "T-0900", answered: seen, answer: "SENT BACK by judge: do it on Linux, record the gap (A)" }, "x");
+  const t0 = new Date(Date.now() - 10 * H).toISOString();
+  writeDoc(P("tasks", "waiting", "T-0301.md"), { id: "T-0301", title: "mac fix", requires: "os:macos", created: t0, waiting_on: "Mac", wait_check: "false", supervisor_requeued: "yes" }, "body");
+  const r = supervise({ fleet: {} }, "lb");
+  expect(r.cards).toBe(0);
+  const back = readDoc(P("tasks", "inbox", "T-0301.md"));
+  expect(back.meta.supervisor_precedent).toBe("D-0901");
+  expect(back.body).toContain("do it on Linux");
+  // waits again on the Mac: no second resume, no card
+  rmSync(P("tasks", "inbox", "T-0301.md"));
+  writeDoc(P("tasks", "waiting", "T-0301.md"), { ...back.meta, resumed: "", wakes: "9" }, "b");
+  const again = supervise({ fleet: {} }, "lb");
+  expect(again.cards).toBe(0);
+  expect(existsSync(P("tasks", "waiting", "T-0301.md"))).toBe(true);
+});
+
 test("supervise(): a replaced menu task goes to tasks/rejected instead of coming back as a new card", () => {
   const id = "T-9501-test";
   const blocked = P("tasks", "blocked", `${id}.md`);
@@ -227,6 +260,36 @@ test("merged PRs wake a task once for acceptance checks; waiting again afterward
     expect(closed.body).toContain("verification recorded as a gap: Need screenshot");
   } finally {
     for (const path of [waiting, inbox, done]) rmSync(path, { force: true });
+  }
+});
+
+import { settledBeforeTask } from "../src/supervisor";
+test("PRs merged before the task was created are background: they never wake or close it", () => {
+  const created = new Date(NOW).toISOString();
+  const before = new Date(NOW - H).toISOString(), after = new Date(NOW + H).toISOString();
+  expect(settledBeforeTask({ created }, [before])).toBe(true);
+  expect(settledBeforeTask({ created }, [before, after])).toBe(false);
+  expect(settledBeforeTask({ created }, [before, undefined])).toBe(false); // the other PR is still open
+  expect(settledBeforeTask({}, [before])).toBe(false); // no creation time: keep the old behaviour
+  const id = "T-9407-test";
+  const waiting = P("tasks", "waiting", `${id}.md`);
+  const blocked = P("tasks", "blocked", `${id}-b.md`);
+  const inbox = P("tasks", "inbox", `${id}.md`);
+  const done = [P("tasks", "done", `${id}.md`), P("tasks", "done", `${id}-b.md`)];
+  const gate = "[ $(date -u +%s) -lt 1794000000 ]"; // waits for tonight's game, not for a PR
+  const body = "Shipped in https://github.com/acme/core-api/pull/7; verify it during tonight's game.";
+  try {
+    writeDoc(waiting, { id, title: "Verify core-api #7 live", waiting_on: "tonight's game", wait_kind: "human", wait_check: gate, created }, body);
+    writeDoc(blocked, { id: `${id}-b`, title: "Verify core-api #7 live", status: "blocked", waiting_on: "tonight's game", wait_kind: "human", created }, body);
+    for (let i = 0; i < 2; i++) supervise({}, "test", NOW, () => `MERGED ${before}`, () => false);
+    expect([existsSync(waiting), existsSync(blocked), existsSync(inbox), ...done.map(existsSync)]).toEqual([true, true, false, false, false]);
+    // a PR the task does wait on still wakes it once it merges
+    writeDoc(waiting, { id, title: "Verify core-api #7 live", waiting_on: "core-api #8", wait_kind: "human", wait_check: gate, created }, `${body}\nFix: https://github.com/acme/core-api/pull/8`);
+    supervise({}, "test", NOW, (r) => r.endsWith("#7") ? `MERGED ${before}` : `MERGED ${after}`, () => false);
+    expect(existsSync(waiting)).toBe(false);
+    expect(readDoc(inbox).meta.supervisor_merged_prs).toBe("acme/core-api#7,acme/core-api#8");
+  } finally {
+    for (const path of [waiting, blocked, inbox, ...done]) rmSync(path, { force: true });
   }
 });
 

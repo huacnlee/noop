@@ -5,6 +5,7 @@
 // (git-synced data repo, running agents); the cloud store forwards it to the primary daemon over the existing
 // owner→fleet inbox — so a write has exactly one implementation, on the machine that owns the data.
 // Never exposed here: merge, release, settings, machine credentials (policies/autonomy.md hard gates).
+import { gradeOf } from "../../app/grading";
 
 export type Ev = { id: string; ts: string; from: string; kind: string; text: string; ref?: string; [k: string]: unknown };
 export type FileRow = { path: string; text: string; updated: string };
@@ -12,7 +13,7 @@ export type FileRow = { path: string; text: string; updated: string };
 /** A write. `tool` is the tool name; the rest are its validated arguments. */
 export type WriteOp =
   | { tool: "send_message"; text: string; reply_to?: string }
-  | { tool: "create_task"; title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[] }
+  | { tool: "create_task"; title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[]; new_work?: boolean }
   | { tool: "amend_task"; id: string; text: string }
   | { tool: "cancel_task"; id: string }
   | { tool: "set_priority"; id: string; priority: Priority }
@@ -80,6 +81,21 @@ export function listTasks(st: ToolStore, state = "open", query = "", limit = 50,
     .filter((t) => !q || `${t.id} ${t.title} ${t.repo ?? ""} ${t.agent ?? ""}`.toLowerCase().includes(q))
     .sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? "")).slice(Math.max(0, offset), Math.max(0, offset) + Math.max(1, Math.min(limit, 200)));
 }
+/** Names that pin a task to one thing: hyphenated project names (gpui-fast), repo names, PR/issue numbers (#2913). */
+const entities = (text: string) => new Set([
+  ...(text.toLowerCase().match(/[a-z0-9]+(?:[-_][a-z0-9]+)+/g) ?? []).filter((w) => !/^\d+(-\d+)*$/.test(w) && !/^(t|d|p)-\d+$/.test(w)),
+  ...(text.match(/#\d{2,}/g) ?? []),
+]);
+/** Open tasks that look like the same work as a new one: they name the same project or PR. A routine run and the owner's
+ *  later "release X now" are one job, so the brain must add to the open task instead of starting a second one. */
+export function similarOpenTasks(st: ToolStore, title: string, repo?: string): TaskRow[] {
+  const mine = entities(`${title} ${repo ? repo.split("/").pop() : ""}`);
+  if (!mine.size) return [];
+  return listTasks(st, "open", "", 200).filter((t) => {
+    const theirs = entities(`${t.title} ${t.repo ? t.repo.split("/").pop() : ""}`);
+    return [...mine].some((e) => theirs.has(e));
+  }).slice(0, 5);
+}
 export function parseTaskBody(title: string | undefined, body: string) {
   // the owner's words (a quote) or the task's own first paragraph; daemon notes ("Requeued after ...") are not the request
   // (new requeues keep their note in meta.requeue_note; older bodies still carry "> Requeued ..." / "> Attempt N failed" quotes)
@@ -98,7 +114,8 @@ const historyRow = (f: FileRow, folder: string) => {
   const { meta: m } = parseDoc(f.text);
   const state = folder === "waiting" && m.wake_at ? "parked" : folder === "inbox" && m.parked && m.requires ? "nohost" : folder === "rejected" ? "cancelled" : folder;
   return { id: m.id || f.path.split("/").pop()!.replace(/\.md$/, ""), title: m.title ?? "", agent: m.agent, host: m.claimed_by, state, needs: state === "nohost" ? m.requires : undefined,
-    started: m.started, created: m.created, finished: m.finished ?? m.cancelled, updated: m.finished ?? m.cancelled ?? m.started ?? m.created ?? f.updated, attempt: m.attempt, cli: m.cli_used, model: m.model };
+    started: m.started, created: m.created, finished: m.finished ?? m.cancelled, updated: m.finished ?? m.cancelled ?? m.started ?? m.created ?? f.updated, attempt: m.attempt, cli: m.cli_used, model: m.model,
+    grade: gradeOf(m, false) };
 };
 
 /** Every task the fleet has, newest first, a page at a time. */
@@ -122,7 +139,8 @@ export function taskInfo(st: ToolStore, id: string) {
     if (!f) continue;
     // the cards it asked: they belong to its conversation
     const decisions = ["open", "closed"].flatMap((w) => st.list(`decisions/${w}/`)).map((d) => parseDoc(d.text).meta).filter((m) => m.task === id && m.id).map((m) => String(m.id));
-    return { ...historyRow(f, s), ...parseTaskBody(parseDoc(f.text).meta.title, parseDoc(f.text).body), decisions };
+    const { meta, body } = parseDoc(f.text);
+    return { ...historyRow(f, s), ...parseTaskBody(meta.title, body), grade: gradeOf(meta), decisions };
   }
   return null;
 }
@@ -269,7 +287,8 @@ export const TOOLS: Tool[] = [
     inputSchema: obj({ title: str("Short imperative title"), details: str("Goal, context and acceptance criteria — everything the agent needs, in the owner's words"),
       repo: str("Optional repo, e.g. longbridge/nsh"), agent: str("Optional agent name from list_agents (default: lead, who plans and delegates)"),
       channels: { type: "array", description: "Work topics matched by goal: existing slugs, or {name, goal} for a new channel; empty for none", items: { anyOf: [{ type: "string" }, { type: "object", properties: { name: { type: "string" }, goal: { type: "string" } }, required: ["name", "goal"], additionalProperties: false }] }, maxItems: 3 },
-      follows: str("Optional: the task (T-…) this continues or corrects; the new task reads its result") }, ["title"]),
+      follows: str("Optional: the task (T-…) this continues or corrects; the new task reads its result"),
+      new_work: { type: "boolean", description: "Set only when an open task about the same project/PR exists and this is clearly separate work, not a step of it" } }, ["title"]),
     description: "Hand a piece of work to the fleet. An agent picks it up, does it and reports back in the feed. Use for anything that takes more than a quick answer (code, reviews, releases, research)." },
   { name: "amend_task", title: "Add to a task", annotations: RW, write: true,
     inputSchema: obj({ id: str("A task, open or finished, e.g. T-0184"), text: str("What to add or change, in the owner's words") }, ["id", "text"]),
@@ -315,7 +334,7 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
       const agent = s(a.agent);
       if (agent && !st.read(`agents/${agent}/profile.md`)) return `unknown agent ${agent} (see list_agents)`;
       return { tool: name, title: s(a.title).slice(0, 120), details: s(a.details).slice(0, 20_000) || undefined, repo: s(a.repo) || undefined,
-        agent: agent || undefined, follows: TASK_ID.test(s(a.follows)) ? s(a.follows) : undefined, ...(Array.isArray(a.channels) ? { channels: a.channels.slice(0, 3) } : {}) };
+        agent: agent || undefined, follows: TASK_ID.test(s(a.follows)) ? s(a.follows) : undefined, ...(Array.isArray(a.channels) ? { channels: a.channels.slice(0, 3) } : {}), ...(a.new_work === true ? { new_work: true } : {}) };
     }
     case "amend_task": {
       const id = s(a.id);

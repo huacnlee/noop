@@ -34,7 +34,7 @@ describe("shared secrets", () => {
     const r = await mcpLaunch("claude", cfg, { SHARED_T: "secret-value" });
     expect(r.args[0]).toBe("--mcp-config");
     expect(r.args.join(" ")).not.toContain("secret-value");
-    expect(statSync(r.file!).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") expect(statSync(r.file!).mode & 0o077).toBe(0); // Windows has no POSIX modes (ACLs instead)
     expect(JSON.parse(readFileSync(r.file!, "utf8")).mcpServers.gh.env.T).toBe("secret-value");
     require("node:fs").rmSync(r.file!);
     const c = await mcpLaunch("codex", cfg, { SHARED_T: "secret-value" });

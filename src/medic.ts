@@ -21,7 +21,7 @@ async function sh(cmd: string) {
 
 async function context(): Promise<string> {
   const svc = platform() === "linux" ? await sh("journalctl --user -u noop -u agent-hub -n 80 --no-pager 2>&1")
-    : platform() === "darwin" ? tail(join(DATA, "logs", "daemon.log")) : "";
+    : platform() === "darwin" || platform() === "win32" ? tail(join(DATA, "logs", "daemon.log")) : "";
   return [
     `OS: ${platform()} ${release()} ${arch()} · host ${hostName({})}`,
     `framework: ${CODE} @ ${await sh(`git -C '${CODE}' log -1 --oneline 2>&1`)} · status:\n${await sh(`git -C '${CODE}' status --short 2>&1 | head -20`)}`,

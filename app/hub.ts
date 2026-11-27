@@ -1,6 +1,7 @@
 // noop: the server's shapes and the pure logic of the timeline (no UI, no I/O), shared by App.tsx and the tests.
 import { L } from "./i18n";
 import { isWaiting } from "./badge";
+import type { Grade } from "./grading";
 
 export type Kind = "notice" | "decision" | "menu" | "proposals" | "login" | "owner" | "system";
 
@@ -24,11 +25,15 @@ export type HubEvent = {
 export type HostInfo = {
   host: string;
   caps: string[];
+  /** The fleet's primary: it runs the server, routines and the judge. */
+  primary?: boolean;
   seen?: string;
   busy?: number;
   stats?: { loadRatio?: number; load1?: number; cores?: number; memFreePct?: number; diskFreeGB?: number; diskFreePct?: number; [k: string]: unknown };
   os?: string;
   arch?: string;
+  /** Its private IPv4 address on the local network, when the machine found one. */
+  lan?: string;
   clis?: string[];
   accounts?: { cli: string; name: string; state: "ok" | "cooldown" | "login"; until?: string; model?: string }[];
   running?: { id: string; title: string; agent: string; started?: string; activity?: Activity }[];
@@ -61,6 +66,8 @@ export type TaskInfo = {
   /** state "active": its agent's latest sign of life. */
   activity?: Activity;
   runs?: { ts: string; host: string; cli: string; status: string; summary: string }[];
+  /** The agent's self-grade of its work (notes only on the task's own page, not in the status). */
+  grade?: Grade;
   steps?: { day?: string; time?: string; host?: string; kind?: string; text: string }[];
 };
 
@@ -265,6 +272,15 @@ export function imageType(type: string | undefined, name: string): string | null
   return IMAGE_EXT[(name.match(/\.(\w+)$/)?.[1] ?? "").toLowerCase()] ?? null;
 }
 
+/** A text file (Markdown, plain text) sent as a Markdown document: the name it goes by ("notes.txt" → "notes.md"), or null when it is not one. */
+export function textDocName(type: string | undefined, name: string): string | null {
+  const ext = (name.match(/\.(\w+)$/)?.[1] ?? "").toLowerCase();
+  const byExt = ["md", "markdown", "txt", "text"].includes(ext);
+  if (!byExt && !(type && /^text\/(markdown|x-markdown|plain)$/i.test(type.split(";")[0].trim()))) return null;
+  const stem = (byExt ? name.slice(0, -ext.length - 1) : name.replace(/\.\w+$/, "")) || "pasted";
+  return `${stem}.md`;
+}
+
 /** A paste this long goes with the message as a Markdown file, not into the box: it would bury the draft and the timeline. */
 export const PASTE_FILE_CHARS = 4000;
 export const PASTE_FILE_LINES = 80;
@@ -306,6 +322,8 @@ export type SettingsView = {
     routines: { name: string; desc?: string; every: string; agent: string; enabled: boolean }[];
     max_parallel: number | null;
     media_days?: number;
+    /** Machines and their task priority (higher takes tasks first; 0 by default). */
+    hosts?: { host: string; priority: number; primary?: boolean }[];
   };
   options: { clis: string[][]; autonomy: string[] };
 };
@@ -352,6 +370,7 @@ export const patches = {
   routine: (name: string, change: { enabled?: boolean; every?: string }) => ({ routines: { [name]: change } }),
   maxParallel: (n: number) => ({ host: { max_parallel: n } }),
   mediaDays: (days: number) => ({ media_days: days }),
+  hostPriority: (host: string, priority: number) => ({ fleet: { host_priority: { [host]: priority } } }),
   /** The whole list: an array replaces the saved one. */
   commands: (list: Command[]) => ({ commands: list }),
 };
@@ -437,7 +456,7 @@ const stem = (p: string) => p.slice(p.lastIndexOf("/") + 1).replace(/\.md$/i, ""
 /** The four groups of the 团队规则与记忆 list, from what /api/files/list returned for each prefix. */
 export function groupRules(lists: Record<string, DataFile[]>): RuleGroup[] {
   const md = (pre: string) => (lists[pre] ?? []).filter((f) => /\.md$/i.test(f.path));
-  const day = (f: DataFile) => (f.updated ?? "").slice(0, 10);
+  const day = (f: DataFile) => (f.updated ? dayKey(f.updated) : ""); // the file's own day, local like the chat
   const plain = (f: DataFile, title = stem(f.path)) => ({ path: f.path, title, detail: day(f) });
   const agents = md("agents/")
     .map((f) => f.path.match(/^agents\/([^/]+)\/(profile|memory)\.md$/i))

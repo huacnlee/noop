@@ -41,7 +41,7 @@ cd cloud && bunx wrangler dev --port 8799 --var HUB_TOKEN:test
 bun cloud/test/run.ts http://127.0.0.1:8799      # file sync harness (see cloud/test)
 ```
 
-The app uses the current NSH nightly, matching release CI. Install it with `curl -fsSL https://nsh.dev/install.sh | sh -s -- --nightly`, or run `nsh update nightly` with an existing installation. From `app/`, run `nsh test` and `./build-web.sh`. `app/dist` is not in git: `wrangler dev` needs that build first, and a machine leaves a local build alone instead of downloading the release's.
+The app uses the current NSH nightly, matching release CI. Install it with `curl -fsSL https://nsh.dev/install.sh | sh -s -- --nightly`, or run `nsh update nightly` with an existing installation. The client's `nsh.json` is at the repository root, beside `package.json`, and names its entry (`"entry": "app/App.tsx"`; this needs an NSH nightly with `nsh.json` `entry`): run `nsh run` and `nsh test` from the root. Run `app/build-web.sh` (from any directory). `app/dist` is not in git: `wrangler dev` needs that build first, and a machine leaves a local build alone instead of downloading the release's.
 
 Website: see [website/README.md](website/README.md). `website/` is the public project site on GitHub Pages and serves the installers; `web/` is the page each owner's Worker serves.
 

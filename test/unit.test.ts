@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit } from "../src/cli";
+import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit, validEvery, waitProgressIsNew } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
 import { dirtyPaths } from "../src/setup";
 import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
+import { shellBash } from "../src/shell";
 import { tooManyWakes } from "../src/waits";
 
 test("dirtyPaths keeps every path intact, including the first line", () => {
@@ -24,6 +25,25 @@ test("routine schedule", () => {  const t = new Date("2026-11-02T19:05:00"); // 
   expect(due("weekly FRI 17:00", undefined, t)).toBe(false);
   expect(due("daily 20:00", undefined, t)).toBe(false);
   expect(due("daily 02:30", undefined, t)).toBe(false); // first run long after slot → wait for next slot
+});
+
+test("routine schedule accepts hour and day intervals", () => {
+  const t = new Date("2026-11-26T14:00:00");
+  // "1h" / "1d" came from settings and were read as a clock time, so these routines never ran (T-11413).
+  expect(due("1h", undefined, t)).toBe(true);
+  expect(due("1h", "2026-11-26T13:30:00", t)).toBe(false);
+  expect(due("1h", "2026-11-26T12:59:00", t)).toBe(true);
+  expect(due("1d", "2026-11-25T15:00:00", t)).toBe(false);
+  expect(due("1d", "2026-11-25T13:59:00", t)).toBe(true);
+  expect(due("2h", "2026-11-26T12:30:00", t)).toBe(false);
+});
+
+test("routine schedule validation", () => {
+  for (const ok of ["15m", "60m", "1h", "1d", "hourly", "daily 09:00", "weekdays 19:00", "weekly MON 10:30", "weekly sun 9:05"])
+    expect(validEvery(ok)).toBe(true);
+  for (const bad of [undefined, "", "1hr", "daily", "daily 25:00", "weekly 10:30", "weekly XYZ 10:30", "every 1h"])
+    expect(validEvery(bad)).toBe(false);
+  expect(due("1hr", undefined, new Date())).toBe(false);
 });
 
 test("routine schedule catches up a slot missed while the machine slept", () => {
@@ -74,6 +94,14 @@ test("result parsing", () => {
 test("result parsing keeps a lone backslash such as a Windows drive path", () => {
   const out = '```json\n{"status":"done","summary":"can\'t reach D:\\、USB drives"}\n```';
   expect(parseResult(out)).toMatchObject({ status: "done", summary: "can't reach D:\\、USB drives" });
+});
+
+test("result parsing drops a stray bare word between members", () => {
+  // a real run (T-2208, 2026-11-23) finished its work and was re-run because codex wrote this
+  const out = '```json\n{\n  "status": "done",\n  "summary": "ok",\n tml "channels": ["c"]\n}\n```';
+  expect(parseResult(out)).toMatchObject({ status: "done", summary: "ok", channels: ["c"] });
+  // literals and exponents survive the repair
+  expect(parseResult('```json\n{"status":"done","summary":"ok",x "n":1e3,"b":true,"z":null}\n```')).toMatchObject({ n: 1000, b: true, z: null });
 });
 
 test("result parsing repairs a raw line break inside a JSON string", () => {
@@ -310,6 +338,20 @@ test("heartbeat carries the running code version, linked to its commit", async (
   if (r.rev_url) expect(r.rev_url).toEndWith(`/commit/${r.rev}`);
 });
 
+test("heartbeat reports the LAN address, skipping tunnels, containers and VPNs", async () => {
+  const { lanAddress } = await import("../src/core");
+  const v4 = (address: string, internal = false) => ({ address, family: "IPv4", internal });
+  // the owner's Mac mini: a proxy TUN (198.18.x) next to the wired port
+  expect(lanAddress({ lo0: [v4("127.0.0.1", true)], en0: [{ address: "fe80::1", family: "IPv6", internal: false }, v4("10.20.94.156")], utun4: [v4("198.18.0.1")] })).toBe("10.20.94.156");
+  // a Linux box with Docker and Tailscale: the Wi-Fi address wins
+  expect(lanAddress({ docker0: [v4("172.17.0.1")], "br-1a2b": [v4("172.18.0.1")], tailscale0: [v4("100.101.1.2")], wlan0: [v4("192.168.1.23")] })).toBe("192.168.1.23");
+  // Windows names its adapters; the WSL switch is virtual
+  expect(lanAddress({ "vEthernet (WSL)": [v4("172.24.0.1")], Ethernet: [v4("172.20.3.4")] })).toBe("172.20.3.4");
+  // nothing private on a physical adapter: report nothing rather than a wrong address
+  expect(lanAddress({ en0: [v4("169.254.3.4"), v4("203.0.113.9")], utun2: [v4("10.8.0.2")] })).toBeUndefined();
+  expect(lanAddress({})).toBeUndefined();
+});
+
 test("recentChat: the channel before an owner message, without the message itself", async () => {
   const { appendEvent, recentChat } = await import("../src/server");
   appendEvent({ from: "Kai", kind: "notice", text: "已补写 gpui-kit v0.9.0 的更新日志", ref: "T-0115" });
@@ -319,6 +361,16 @@ test("recentChat: the channel before an owner message, without the message itsel
   const lines = recentChat("这个细节记录下来，以后都这样");
   expect(lines.slice(-3).map((l) => l.slice(8))).toEqual(["Kai (T-0115): 已补写 gpui-kit v0.9.0 的更新日志", "owner: 不行，得留下贡献者名单", "hub (T-0116): 收到，接着 T-0115 处理（T-0116）"]);
   expect(recentChat("x", { limit: 1 }).length).toBe(1);
+});
+
+test("recentChat: a timestamp is the machine's local time, not the UTC slice of the ISO string", async () => {
+  const { appendEvent, recentChat } = await import("../src/server");
+  const { hm } = await import("../src/core");
+  const ts = new Date().toISOString();
+  appendEvent({ from: "owner", kind: "owner", text: "时间显示", ts });
+  const line = recentChat("", { limit: 1 })[0];
+  expect(line.startsWith(`[${hm(ts)}]`)).toBe(true);
+  if (new Date(ts).getTimezoneOffset() !== 0) expect(line.slice(1, 6)).not.toBe(ts.slice(11, 16));
 });
 
 test("pickTask: a task no machine here can run (needs another OS) never holds back the ones behind it", async () => {
@@ -381,7 +433,7 @@ test("a result block survives a later turn from a background task notification",
     { type: "result", result: '```json\n{"status":"done","summary":"tested"}\n```' },
     { type: "result", result: "that notification changes nothing" },
   ].map((l) => JSON.stringify(l)).join("\n");
-  const cfg = { clis: { fake: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "stream-json", lines] } } } as unknown as Cfg;
+  const cfg = { clis: { fake: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"', "stream-json", lines] } } } as unknown as Cfg;
   const log = `${tmpdir()}/noop-run-${process.pid}.log`;
   const res = parseResult(await runAgent("fake", "", tmpdir(), cfg, log));
   rmSync(log, { force: true });
@@ -677,7 +729,7 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
     { type: "item.completed", item: { type: "agent_message", text: "" } },
     { type: "turn.completed" },
   ].map((e) => JSON.stringify(e)).join("\n");
-  const cfg = { clis: { codex: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
+  const cfg = { clis: { codex: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
   const log = `${tmpdir()}/noop-codex-${process.pid}.log`;
   try {
     expect(parseResult(await runAgent("codex", "", tmpdir(), cfg, log))).toMatchObject({ status: "done", summary: "captured" });
@@ -685,10 +737,39 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
   } finally { rmSync(log, { force: true }); }
 });
 
+test("a Codex workspace credit error reaches classify instead of looking like a missing result", async () => {
+  // T-0455: stdout was error/turn.failed ("out of credits") and stderr was only models-manager timeouts.
+  // Assistant-text-only extraction left classify with the timeouts, so the account was not cooled down,
+  // the run was "no result block", and the medic was woken.
+  const { classify } = await import("../src/accounts");
+  const { codexMessages } = await import("../src/codex-output");
+  const message = "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.";
+  const lines = [
+    { type: "thread.started", thread_id: "01a217db-206d-7400-9887-b0254ecf4d52" },
+    { type: "turn.started" },
+    { type: "error", message },
+    { type: "turn.failed", error: { message } },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const stderr = "2026-11-26T12:36:11.380112Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out";
+  const cfg = { clis: { codex: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"; printf "%s\\n" "$2" >&2; exit 1', "--json", lines, stderr] } } } as unknown as Cfg;
+  const log = `${tmpdir()}/noop-codex-credits-${process.pid}.log`;
+  try {
+    const out = await runAgent("codex", "", tmpdir(), cfg, log);
+    expect(out).toContain(`ERROR: ${message}`);
+    expect(out.match(/out of credits/g)?.length).toBe(1); // error and turn.failed are one wall
+    expect(out).toContain("failed to refresh available models");
+    expect(classify(out)).toBe("quota");
+    expect(parseResult(out).summary).toContain("agent returned no result block");
+    expect(codexMessages(lines)).toBe(`ERROR: ${message}`);
+    // a real reply still wins when a turn error is absent, and tool output stays ignored
+    expect(classify("tests failed: 3 of 40\n" + stderr)).toBeNull();
+  } finally { rmSync(log, { force: true }); }
+});
+
 test("gate_override relaxes only the approvable gates", () => {
   const cfg = { gates: { extra: ["Bash(kubectl delete:*)"] } } as unknown as Cfg;
   const full = cliCommand("claude", cfg);
-  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)"])
+  for (const g of ["Bash(gh pr merge:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)", "Bash(rm -rf ~:*)", "Bash(gh api repos/:*)", "Bash(kubectl delete:*)", "Bash(pkill:*)", "Bash(killall:*)"])
     expect(full).toContain(g);
   const relaxed = cliCommand("claude", cfg, true);
   expect(relaxed).not.toContain("Bash(gh pr merge:*)");
@@ -789,8 +870,71 @@ test("readAll names the files that no longer fit instead of dropping them silent
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("readAll keeps the named files and cuts the others first", async () => {
+  const { readAll } = await import("../src/core");
+  const dir = mkdtempSync(join(tmpdir(), "noop-readall-keep-"));
+  try {
+    writeFileSync(join(dir, "focus.md"), "F".repeat(200));
+    writeFileSync(join(dir, "lessons.md"), "L".repeat(300));
+    writeFileSync(join(dir, "principles.md"), "P".repeat(300));
+    writeFileSync(join(dir, "taste.md"), "T".repeat(300));
+    const out = readAll(dir, 560, ["principles.md", "focus.md"]);
+    const first = out.split("\n")[0];
+    expect(first).toContain("not shown: lessons.md"); // alphabetical order alone would drop focus.md and lessons.md
+    expect(first).toContain("partly shown: taste.md");
+    expect(out).toContain("P".repeat(300));
+    expect(out.endsWith("F".repeat(200))).toBe(true);
+    const all = readAll(dir, 5000, ["principles.md"]);
+    expect(all).not.toContain("cut to the last"); // fits: everything shown, the kept file just moves to the end
+    expect(all.indexOf("### principles.md")).toBeGreaterThan(all.indexOf("### taste.md"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a long paste uploads as Markdown; other text types stay refused", async () => {
   const { uploadProblem } = await import("../cloud/src/uploads");
   expect(uploadProblem("text/markdown", 10)).toBeNull();
   expect(uploadProblem("text/html", 10)?.status).toBe(415);
+});
+
+test("pickTask: a higher-priority online machine with room takes the task first; a saturated one or a long wait does not hold it", async () => {
+  const { pickTask, writeDoc, P, hostName } = await import("../src/core");
+  const { writeFileSync, mkdirSync, rmSync } = await import("node:fs");
+  if (!Bun.which("claude") && !Bun.which("codex")) return;
+  const cfg: any = { clis: { default: ["claude", "codex"] }, fleet: { host_priority: { "prio-big": 10 } } };
+  mkdirSync(P("fleet", "hosts"), { recursive: true });
+  const beat = (stats: any) => writeFileSync(P("fleet", "hosts", "prio-big.json"), JSON.stringify({ host: "prio-big", caps: [], seen: new Date().toISOString(), busy: 0, version: "1", stats }));
+  const now = new Date().toISOString();
+  writeDoc(P("tasks", "inbox", "T-9031.md"), { id: "T-9031", title: "fresh", agent: "lead", priority: "urgent", planned: now, created: now }, "x");
+  try {
+    beat({ cpuBusyPct: 5, memFreePct: 60 });
+    expect(pickTask(cfg) ?? "").not.toContain("T-9031"); // the idle higher-priority machine gets it
+    beat({ cpuBusyPct: 95, memFreePct: 60 });
+    expect(pickTask(cfg)).toContain("T-9031"); // it is saturated: this machine runs it
+    cfg.fleet.host_priority[hostName(cfg)] = 20;
+    beat({ cpuBusyPct: 5, memFreePct: 60 });
+    expect(pickTask(cfg)).toContain("T-9031"); // this machine ranks higher
+  } finally { rmSync(P("fleet", "hosts", "prio-big.json"), { force: true }); rmSync(P("tasks", "inbox", "T-9031.md"), { force: true }); }
+});
+
+test("pasted long text attachments are inlined for the chat brain", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { withAttachments } = await import("../src/server");
+  const root = mkdtempSync(join(tmpdir(), "noop-paste-"));
+  const md = join(root, "pasted-3.md");
+  writeFileSync(md, "第一点：修复滚动\n第二点：改图标\n");
+  const text = withAttachments("", [md]);
+  expect(text.startsWith("(the owner pasted a long text, below)")).toBe(true);
+  expect(text).toContain("第二点：改图标");
+  expect(text).toContain(`- ${md}`);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a parked run reports progress to the chat once per new summary", () => {
+  expect(waitProgressIsNew({}, { summary: "Fixed the click; PR #514 pushed", waiting_on: "CI" })).toBe(true);
+  expect(waitProgressIsNew({ wait_note: "Fixed the click; PR #514 pushed" }, { summary: "Fixed the click; PR #514 pushed ", waiting_on: "CI" })).toBe(false);
+  expect(waitProgressIsNew({ wait_note: "old" }, { summary: "CI green, merge card next", waiting_on: "owner" })).toBe(true);
+  expect(waitProgressIsNew({}, { summary: "", waiting_on: "CI" })).toBe(false);
+  expect(waitProgressIsNew({}, checkpointFallback("T-1", "/tmp/r.log"))).toBe(false);
 });

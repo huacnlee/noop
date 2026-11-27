@@ -22,7 +22,7 @@ export function inQuiet(range: Quiet | undefined, tz: string | undefined, now = 
   if (!m) return false;
   let hm: string;
   try { hm = new Intl.DateTimeFormat("en-GB", { timeZone: tz || "UTC", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now); }
-  catch { hm = now.toISOString().slice(11, 16); }
+  catch { hm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`; } // no Intl: the runtime's own clock
   const [h, mi] = hm.split(":").map(Number), t = h * 60 + mi;
   const a = +m[1] * 60 + +m[2], b = +m[3] * 60 + +m[4];
   return a <= b ? t >= a && t < b : t >= a || t < b;

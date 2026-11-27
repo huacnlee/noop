@@ -40,7 +40,13 @@ if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
 } else { Run { bun upgrade } }  # an old bun cannot read a newer bun.lock
 Ok (bun --version)
 Step "Noop"
-if (Test-Path "$App\.git") { Run { git -C $App pull -q --ff-only } } else { Run { git clone -q https://github.com/huacnlee/noop.git $App } }
+# Rerunning updates the checkout: local edits (a medic's hotfix) are stashed, not lost, and a global
+# pull.rebase=true must not turn the fast-forward into a rebase that refuses a dirty tree.
+if (Test-Path "$App\.git") {
+  $dirty = & { $ErrorActionPreference = "Continue"; git -C $App status --porcelain --untracked-files=no 2>$null }
+  if ($dirty) { Run { git -C $App stash push -q -m "install: local edits before update" } }
+  Run { git -C $App pull -q --ff-only --no-rebase }
+} else { Run { git clone -q https://github.com/huacnlee/noop.git $App } }
 Push-Location $App; Run { bun install --frozen-lockfile }; Pop-Location
 # the noop command: bin\noop.cmd, on the user's PATH from the next terminal on and in this one now
 $Bin = "$App\bin"

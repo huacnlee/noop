@@ -17,6 +17,10 @@
 // Journals, logs and heartbeats keep no history (their history view is the current row): each write was a full copy,
 // and an append-only journal rewritten every minute alone grew history past a gigabyte. Past TARGET.storageBytes the
 // daily prune keeps only the latest row of every path.
+// A deleted path stays as a tombstone row (machines behind it learn the delete from `changes?since=`), and every task
+// move leaves one in the folder it left: tasks/inbox/ and tasks/active/ hold a row for every task ever run. Directory
+// listings (`path` range AND deleted = 0) walk the files_live partial index, so they read the live rows only; on the
+// primary key they read every tombstone in the range too, tens of thousands of billed rows per cold listing.
 
 /** Structural subset of Cloudflare's SqlStorage (also satisfied by a bun:sqlite adapter in tests). */
 export interface FilesSql { exec(query: string, ...bindings: any[]): { toArray(): any[] }; readonly databaseSize?: number }
@@ -36,6 +40,7 @@ export function initFilesSchema(sql: FilesSql) {
   sql.exec(`CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, content BLOB, hash TEXT, version INTEGER NOT NULL,
       updated TEXT, by TEXT, deleted INTEGER NOT NULL DEFAULT 0, rev INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS files_rev ON files (rev);
+    CREATE INDEX IF NOT EXISTS files_live ON files (path) WHERE deleted = 0;
     CREATE TABLE IF NOT EXISTS history (seq INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, version INTEGER, hash TEXT,
       content BLOB, ts TEXT, by TEXT, msg TEXT);
     CREATE INDEX IF NOT EXISTS history_path ON history (path, version);
@@ -85,7 +90,11 @@ function applyCas(sql: FilesSql, items: Prepared[], actor: string, msg: string):
     if (!it.content && liveVersion(r) === 0) { out.push({ path: it.path, version: Number(r?.version ?? 0), hash: null, deleted: true }); continue; } // delete of nothing
     const version = Number(r?.version ?? 0) + 1;
     rev++;
-    sql.exec(`INSERT INTO files (path, content, hash, version, updated, by, deleted, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    // a live path rewritten in place leaves path and deleted alone, so files_live is not rewritten (index rows are billed):
+    // heartbeats and journals, most writes, touch it never; only a path created or deleted (a task move) does
+    if (it.content && liveVersion(r) > 0) sql.exec("UPDATE files SET content = ?, hash = ?, version = ?, updated = ?, by = ?, rev = ? WHERE path = ?",
+      blob(it.content), it.hash, version, ts, actor, rev, it.path);
+    else sql.exec(`INSERT INTO files (path, content, hash, version, updated, by, deleted, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET content = excluded.content, hash = excluded.hash, version = excluded.version,
         updated = excluded.updated, by = excluded.by, deleted = excluded.deleted, rev = excluded.rev`,
       it.path, it.content ? blob(it.content) : null, it.hash, version, ts, actor, it.content ? 0 : 1, rev);

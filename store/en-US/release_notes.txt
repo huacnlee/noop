@@ -1,0 +1,6 @@
+- The composer's light keeps circling while a send can still be recalled or dictation is on.
+- Save machine priority in Settings with one button.
+- Routines refresh their standing question instead of asking it twice.
+- Agents no longer repeat themselves, and a stale checkout is no longer reported as current.
+- Sign-in backs off when a login ends without a link.
+- Other fixes and improvements.

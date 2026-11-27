@@ -33,7 +33,12 @@ printf "\n%sNoop%s — your own AI team\n\n" "$B" "$N"
 step "git";  command -v git >/dev/null || { printf "%s✗%s install git first\n" "$R" "$N"; exit 1; }; ok
 step "bun";  if ! command -v bun >/dev/null; then run bash -c "curl -fsSL https://bun.sh/install | bash"; export PATH="$HOME/.bun/bin:$PATH"; else run bun upgrade; fi; ok "$(bun --version)"
 step "Noop"
-if [ -d "$APP/.git" ]; then run git -C "$APP" pull -q --ff-only || true; else run git clone -q "$REPO" "$APP"; fi
+# Rerunning updates the checkout: local edits (a medic's hotfix) are stashed, not lost, and a global
+# pull.rebase=true must not turn the fast-forward into a rebase that refuses a dirty tree.
+if [ -d "$APP/.git" ]; then
+  [ -z "$(git -C "$APP" status --porcelain --untracked-files=no)" ] || run git -C "$APP" stash push -q -m "install: local edits before update"
+  run git -C "$APP" pull -q --ff-only --no-rebase || true
+else run git clone -q "$REPO" "$APP"; fi
 (cd "$APP" && run bun install --frozen-lockfile)
 mkdir -p "$HOME/.local/bin"
 ln -sf "$APP/bin/noop" "$HOME/.local/bin/noop"; ln -sf "$APP/bin/noop" "$HOME/.local/bin/hub"

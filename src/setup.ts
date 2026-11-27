@@ -1,9 +1,10 @@
 // hub init / install / update — out-of-the-box setup and self-update.
 import { $ } from "bun";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, win32 } from "node:path";
 import { CODE, DATA, HOME_DIR, P, isCloudDeployHost } from "./core";
+import { machineName } from "./machine";
 
 const STATE_DIRS = [
   "tasks/proposed", "tasks/rejected", "tasks/waiting", "tasks/inbox", "tasks/active", "tasks/blocked", "tasks/failed", "tasks/done",
@@ -51,7 +52,7 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
   const { commitPush, pull, loadConfig, hostName } = await import("./core");
   const { readHubToml, syncMode, writeHubToml } = await import("./sync");
   mkdirSync(DATA, { recursive: true });
-  const me = hostname().split(".")[0];
+  const me = machineName();
   const joined = readHubToml().cloud?.url;
   const primaryHere = existsSync(P("config.toml")) && new RegExp(`^\\s*primary\\s*=\\s*"${me}"`, "m").test(readFileSync(P("config.toml"), "utf8"));
   if (!opts.primary && !primaryHere) {
@@ -60,15 +61,37 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
     const token = opts.token ?? (url === joined ? readHubToml().server?.token : undefined) ?? await joinViaLogin(url, me);
     if (!token) { process.exitCode = 1; return; }
     writeHubToml({ cloud: { url }, server: { token } });
-    if (!(await pull())) { console.error(`could not sync from ${url} (check the URL / token)`); process.exitCode = 1; return; }
+    // The first pull mirrors all of the data and can take minutes: show it moving instead of a silent terminal.
+    let shown = false;
+    const progress = (files: number, bytes: number) => {
+      shown = true;
+      process.stdout.write(`\r  syncing from ${url}: ${files.toLocaleString("en-US")} files, ${(bytes / 1e6).toFixed(1)} MB`);
+    };
+    const synced = await pull({ progress });
+    if (shown) process.stdout.write("\n");
+    if (!synced) { console.error(`could not sync from ${url} (check the URL / token)`); process.exitCode = 1; return; }
     writeLocalConfig(me);
     console.log(`✔ joined ${url}; data mirrored to ${DATA}\n  next: hub install   (runs the daemon as a service)`);
     return;
   }
-  if (await syncMode() === "remote") await pull(); // re-running init: start from what the Worker has
+  // `init --primary <url> --token <HUB_TOKEN>`: adopt a Worker deployed with the Deploy to Cloudflare button
+  // (deploy/cloudflare) instead of deploying one with wrangler
+  const adopt = opts.primary && opts.worker ? adoptedWorker(opts.worker, opts.token) : undefined;
+  if (adopt === null) { process.exitCode = 1; return; }
+  if (adopt) writeHubToml({ cloud: adopt.cloud, server: { token: adopt.token } });
+  if (await syncMode() === "remote" && !(await pull()) && adopt) { // re-running init: start from what the Worker has
+    console.error(`could not sync from ${adopt.cloud.url}: check the URL and that --token is the Worker's HUB_TOKEN`);
+    process.exitCode = 1;
+    return;
+  }
   seedTemplates();
   const cfgPath = P("config.toml");
   let cfg = readFileSync(cfgPath, "utf8");
+  if (adopt) { // record it in the shared config too, as `noop cloud deploy` does
+    const block = `[cloud]\nurl = "${adopt.cloud.url}"\nname = "${adopt.cloud.name}"\n`;
+    cfg = /^\[cloud\]/m.test(cfg) ? cfg.replace(/^\[cloud\][^\[]*/m, `${block}\n`) : `${cfg.trimEnd()}\n\n${block}`;
+    writeFileSync(cfgPath, cfg);
+  }
   if (cfg.includes('primary = "__PRIMARY__"')) {
     cfg = cfg.replace('primary = "__PRIMARY__"', `primary = "${me}"`)
       .replace('# url = "__URL__"', `url = "http://${me}:8787"`);
@@ -86,6 +109,16 @@ export async function init(opts: { worker?: string; token?: string; primary?: bo
   }
   if (await syncMode() === "remote" && !(await commitPush(`[${me}] init`))) console.error("could not push the initial data; it will sync on the next daemon tick");
   console.log(`✔ data: ${DATA}\n  next: hub install   (runs the daemon as a service)`);
+}
+
+/** The [cloud] settings for a Worker someone already deployed (the Deploy to Cloudflare button), or null with the
+ *  reason printed. The Worker name is the first label of a workers.dev address; a custom domain keeps "noop". */
+export function adoptedWorker(worker: string, token?: string): { cloud: { url: string; name: string }; token: string } | null {
+  const url = worker.trim().replace(/\/$/, "");
+  if (!/^https?:\/\/[^/\s]+$/.test(url)) { console.error(`not a Worker address: ${worker} (e.g. https://noop.<you>.workers.dev)`); return null; }
+  if (!token?.trim()) { console.error("--token is required: the HUB_TOKEN you entered when deploying the Worker"); return null; }
+  const name = url.match(/^https:\/\/([a-z0-9-]+)\.[a-z0-9-]+\.workers\.dev$/i)?.[1] ?? "noop";
+  return { cloud: { url, name }, token: token.trim() };
 }
 
 function writeLocalConfig(me: string) {
@@ -125,7 +158,23 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
   const g = (...a: string[]) => $`git ${a}`.cwd(CODE).quiet().nothrow();
   if (!existsSync(join(CODE, ".git"))) return false;
   await g("fetch", "-q", "origin");
-  const head = (await g("rev-parse", "HEAD")).stdout.toString().trim();
+  // The install must track main. A task that branched inside it (e.g. an evolve PR) leaves it following that
+  // branch, which reads as "already current" forever. Go back to main once main has all of the branch's work.
+  const branch = (await g("rev-parse", "--abbrev-ref", "HEAD")).stdout.toString().trim();
+  if (branch && branch !== "main" && (await g("rev-parse", "--verify", "-q", "origin/main")).exitCode === 0) {
+    const unmerged = (await g("cherry", "origin/main", "HEAD")).stdout.toString().split("\n").some((l) => l.startsWith("+"));
+    const dirtyNow = dirtyPaths((await g("status", "--porcelain", "--untracked-files=no")).stdout.toString()).length > 0;
+    if (unmerged || dirtyNow || (await g("checkout", "-q", "main")).exitCode !== 0) {
+      if (updateBlocked(`on branch ${branch}`)) {
+        try {
+          const { loadConfig, hostName, journal } = await import("./core");
+          journal(hostName(loadConfig()), `⏸ self-update blocked — the install is on branch ${branch} (unmerged work or local edits), not main.`);
+        } catch {}
+      }
+      return false;
+    }
+  }
+  const head =(await g("rev-parse", "HEAD")).stdout.toString().trim();
   const up = (await g("rev-parse", "@{u}")).stdout.toString().trim();
   if (!up || head === up) return false;
   if (!opts.force && updateRejected(up)) return false; // already failed its tests here; wait for the next release
@@ -188,9 +237,59 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
 /** Machines installed before the rename keep their service name. */
 export const SERVICE = existsSync(join(homedir(), ".config/systemd/user/agent-hub.service")) || existsSync(join(homedir(), "Library/LaunchAgents/com.agent-hub.daemon.plist")) ? "agent-hub" : "noop";
 const LABEL = SERVICE === "agent-hub" ? "com.agent-hub.daemon" : "dev.noop.daemon";
+const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+/** The Windows Scheduled Task, as Task Scheduler XML.
+ *  - No window: bun is a console program, so a plain task opened a terminal window (titled "claude" by the agents
+ *    sharing it). Closing it ended the daemon and every running agent at once (exit 0xC000013A, 2026-11-27).
+ *    A headless conhost gives the same console without a window; the task stays in the logon session, so GUI work
+ *    still has a desktop. Output goes to logs/daemon.log, as on macOS.
+ *  - Kept alive: nothing restarted the daemon after `noop restart`, a self-update or a crash (launchd has KeepAlive,
+ *    systemd Restart=always). A time trigger from the install on repeats every minute and IgnoreNew drops the repeat
+ *    while it runs. A repeat on the logon trigger only begins at the next logon: installed in a running session, the
+ *    daemon exited by `noop restart` stayed down (2026-11-27). The logon trigger starts it at logon.
+ *    `noop stop` disables the task so the repeat does not bring it back.
+ *  - No battery or 72-hour limits (schtasks' defaults). */
+export function winTaskXml(user: string, bun: string, cli: string, log: string, windir = "C:\\Windows", now = new Date()): string {
+  const run = `--headless cmd.exe /d /c ""${bun}" "${cli}" start --foreground >> "${log}" 2>&1"`;
+  const p = (n: number) => String(n).padStart(2, "0");
+  const start = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}T${p(now.getHours())}:${p(now.getMinutes())}:00`; // local time
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Noop fleet daemon</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${xml(user)}</UserId>
+    </LogonTrigger>
+    <TimeTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>${start}</StartBoundary>
+      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <Enabled>true</Enabled>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>${xml(win32.join(windir, "System32", "conhost.exe"))}</Command><Arguments>${xml(run)}</Arguments></Exec>
+  </Actions>
+</Task>
+`;
+}
+
 /** Write a launch agent without loading it; also supports fresh macOS accounts. */
 export function writeMacAgent(home: string, data: string, bun: string, cli: string, path: string, label: string): string {
-  const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
   const plist = join(home, `Library/LaunchAgents/${label}.plist`);
   mkdirSync(join(plist, ".."), { recursive: true });
   mkdirSync(join(data, "logs"), { recursive: true });
@@ -198,10 +297,11 @@ export function writeMacAgent(home: string, data: string, bun: string, cli: stri
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${xml(label)}</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>${xml(bun)}</string><string>${xml(cli)}</string><string>daemon</string></array>
+  <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>${xml(bun)}</string><string>${xml(cli)}</string><string>start</string><string>--foreground</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string><key>HUB_DATA</key><string>${xml(data)}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ExitTimeOut</key><integer>5400</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>${xml(join(data, "logs", "daemon.log"))}</string>
   <key>StandardErrorPath</key><string>${xml(join(data, "logs", "daemon.log"))}</string>
@@ -224,7 +324,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${bun} ${cli} daemon
+ExecStart=${bun} ${cli} start --foreground
 Restart=always
 RestartSec=10
 # stopping lets running agents finish (the daemon drains), so a restart never throws work away.
@@ -235,8 +335,7 @@ TimeoutStopSec=90min
 Environment=PATH=${path}
 Environment=HUB_DATA=${DATA}
 Nice=5
-# keep the box awake while the fleet runs
-ExecStartPre=-/usr/bin/true
+# the daemon itself holds a systemd-inhibit sleep lock while it runs (src/awake.ts)
 
 [Install]
 WantedBy=default.target
@@ -252,11 +351,103 @@ WantedBy=default.target
     const plist = writeMacAgent(homedir(), DATA, bun, cli, path, LABEL);
     await $`launchctl bootout gui/${process.getuid!()} ${plist}`.quiet().nothrow();
     await $`launchctl bootstrap gui/${process.getuid!()} ${plist}`;
-    console.log(`✔ launchd agent installed: ${plist} (starts at login; caffeinate -i prevents idle sleep). Keep a primary Mac logged in and awake: sleep, logout or closing the lid pauses coordination until it returns.`);
+    console.log(`✔ launchd agent installed: ${plist} (starts at login; the daemon blocks idle and system sleep while it runs). Keep a primary Mac logged in and awake: sleep, logout or closing the lid pauses coordination until it returns.`);
   } else if (process.platform === "win32") {
-    const cmd = `"${bun}" "${cli}" daemon`;
-    await $`schtasks /Create /F /SC ONLOGON /RL LIMITED /TN ${SERVICE} /TR ${cmd}`.nothrow();
+    const log = join(DATA, "logs", "daemon.log");
+    mkdirSync(join(DATA, "logs"), { recursive: true });
+    const user = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME ?? "";
+    const file = join(HOME_DIR, "noop-task.xml");
+    mkdirSync(HOME_DIR, { recursive: true });
+    writeFileSync(file, Buffer.from(`﻿${winTaskXml(user, bun, cli, log, process.env.SystemRoot ?? process.env.windir)}`, "utf16le")); // schtasks reads UTF-16
+    const r = await $`schtasks /Create /F /TN ${SERVICE} /XML ${file}`.nothrow();
+    if (r.exitCode !== 0) return void console.log(`✗ schtasks could not create the task: ${r.stderr.toString().trim()}`);
     await $`schtasks /Run /TN ${SERVICE}`.nothrow();
-    console.log(`✔ Scheduled Task '${SERVICE}' installed (runs at logon, restarts with the daemon's own loop). Disable sleep: powercfg /change standby-timeout-ac 0`);
+    console.log(`✔ Scheduled Task '${SERVICE}' installed (runs at logon without a window, restarted within a minute when it exits). Logs: ${log}. Disable sleep: powercfg /change standby-timeout-ac 0`);
   }
+}
+
+// ------------------------------------------------------------------ service control (noop start / stop / status)
+export type ServiceManager = "launchd" | "systemd" | "schtasks";
+/** What the OS service manager says about Noop on this machine. */
+export type ServiceState = { manager: ServiceManager | null; installed: boolean; running: boolean; pid?: number; since?: string; lastExit?: string; logs?: string };
+
+/** `launchctl print gui/<uid>/<label>`: only the job's own (one-tab) lines; nested endpoints print their own `state`. */
+export function parseLaunchctl(out: string): Pick<ServiceState, "running" | "pid" | "lastExit"> {
+  const pid = Number(out.match(/^\tpid = (\d+)/m)?.[1]) || undefined;
+  const lastExit = out.match(/^\tlast exit code = (.+)$/m)?.[1]?.trim();
+  return { running: /^\tstate = running$/m.test(out), pid, lastExit };
+}
+
+/** `systemctl --user show <unit> -p LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestamp`. */
+export function parseSystemctl(out: string): Pick<ServiceState, "installed" | "running" | "pid" | "since"> {
+  const v = Object.fromEntries(out.split("\n").map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1).trim()]));
+  return { installed: v.LoadState === "loaded", running: v.ActiveState === "active" || v.ActiveState === "deactivating",
+    pid: Number(v.MainPID) || undefined, since: v.ActiveState === "active" && v.ActiveEnterTimestamp ? v.ActiveEnterTimestamp : undefined };
+}
+
+/** `schtasks /Query /TN <name> /FO LIST /V`: the Status line says Running / Ready / Disabled. */
+export function parseSchtasks(out: string): Pick<ServiceState, "running" | "lastExit"> {
+  return { running: /^Status:\s+Running/im.test(out), lastExit: out.match(/^Last Result:\s+(.+)$/im)?.[1]?.trim() };
+}
+
+const macPlist = () => join(homedir(), `Library/LaunchAgents/${LABEL}.plist`);
+const macTarget = () => `gui/${process.getuid!()}/${LABEL}`;
+
+export async function serviceState(): Promise<ServiceState> {
+  if (process.platform === "darwin") {
+    const installed = existsSync(macPlist()), logs = join(DATA, "logs", "daemon.log");
+    if (!installed) return { manager: "launchd", installed, running: false, logs };
+    const r = await $`launchctl print ${macTarget()}`.quiet().nothrow();
+    return { manager: "launchd", installed, logs, ...(r.exitCode === 0 ? parseLaunchctl(r.stdout.toString()) : { running: false }) };
+  }
+  if (process.platform === "linux") {
+    if (!Bun.which("systemctl")) return { manager: null, installed: false, running: false };
+    const r = await $`systemctl --user show ${SERVICE}.service -p LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestamp`.quiet().nothrow();
+    return { manager: "systemd", logs: `journalctl --user -u ${SERVICE} -f`, ...parseSystemctl(r.stdout.toString()) };
+  }
+  if (process.platform === "win32") {
+    const r = await $`schtasks /Query /TN ${SERVICE} /FO LIST /V`.quiet().nothrow();
+    return { manager: "schtasks", installed: r.exitCode === 0, ...(r.exitCode === 0 ? parseSchtasks(r.stdout.toString()) : { running: false }) };
+  }
+  return { manager: null, installed: false, running: false };
+}
+
+/** `noop start`: install the service the first time, otherwise (re)start it. Returns false when it could not. */
+export async function startService(): Promise<boolean> {
+  const st = await serviceState();
+  if (!st.manager) { console.log("No service manager here (systemd / launchd / Task Scheduler). Run it in this terminal instead: noop start --foreground"); return false; }
+  if (!st.installed) { await install(); return (await serviceState()).running || process.platform === "win32"; }
+  if (st.running) { console.log(`✓ noop is already running${st.pid ? ` (pid ${st.pid})` : ""}. To pick up new code: noop restart`); return true; }
+  if (st.manager === "launchd") {
+    const loaded = (await $`launchctl print ${macTarget()}`.quiet().nothrow()).exitCode === 0;
+    const r = loaded ? await $`launchctl kickstart ${macTarget()}`.quiet().nothrow() : await $`launchctl bootstrap gui/${process.getuid!()} ${macPlist()}`.quiet().nothrow();
+    if (r.exitCode !== 0) { console.log(`✗ launchctl failed: ${r.stderr.toString().trim()}`); return false; }
+  } else if (st.manager === "systemd") {
+    const r = await $`systemctl --user start ${SERVICE}.service`.quiet().nothrow();
+    if (r.exitCode !== 0) { console.log(`✗ systemctl failed: ${r.stderr.toString().trim()}`); return false; }
+  } else {
+    await $`schtasks /Change /TN ${SERVICE} /ENABLE`.quiet().nothrow(); // `noop stop` disabled it
+    const r = await $`schtasks /Run /TN ${SERVICE}`.quiet().nothrow();
+    if (r.exitCode !== 0) { console.log(`✗ schtasks failed: ${r.stderr.toString().trim()}`); return false; }
+  }
+  const now = await serviceState();
+  console.log(now.running || st.manager === "schtasks" ? `✓ noop started${now.pid ? ` (pid ${now.pid})` : ""}` : `✗ noop did not stay up; see ${st.logs ?? "the service logs"}`);
+  return now.running || st.manager === "schtasks";
+}
+
+/** `noop stop`: stop the service until the next `noop start` (or login/boot). Running tasks finish first. */
+export async function stopService(): Promise<boolean> {
+  const st = await serviceState();
+  if (!st.installed) { console.log("noop is not installed as a service; nothing to stop"); return true; }
+  // the task's one-minute repeat would start the daemon again; disabled, it stays stopped until `noop start` or `noop install`
+  if (st.manager === "schtasks") await $`schtasks /Change /TN ${SERVICE} /DISABLE`.quiet().nothrow();
+  if (!st.running) { console.log("✓ noop is not running"); return true; }
+  console.log("stopping noop: running tasks finish first, this can take a while…");
+  // launchd and systemd send SIGTERM, which the daemon answers by draining (ExitTimeOut / TimeoutStopSec allow 90 min)
+  const r = st.manager === "launchd" ? await $`launchctl bootout ${macTarget()}`.quiet().nothrow()
+    : st.manager === "systemd" ? await $`systemctl --user stop ${SERVICE}.service`.quiet().nothrow()
+    : await $`schtasks /End /TN ${SERVICE}`.quiet().nothrow();
+  if (r.exitCode !== 0) { console.log(`✗ could not stop noop: ${r.stderr.toString().trim()}`); return false; }
+  console.log("✓ noop stopped. Start it again with: noop start");
+  return true;
 }

@@ -49,7 +49,7 @@ export function usageWindow(from: number, to: number): Window {
     else if (/^judge/.test(m.answered_by ?? "")) w.byJudge++;
   }
   for (let t = from; t < to; t += 86400e3) {
-    const f = P("journal", `${new Date(t).toISOString().slice(0, 10)}.md`);
+    const f = P("journal", `${new Date(t).toLocaleDateString("sv-SE")}.md`); // journal days are local, like today()
     if (existsSync(f)) w.quotaHits += (readFileSync(f, "utf8").match(/hit usage limit/g) ?? []).length;
   }
   return w;
@@ -67,7 +67,7 @@ const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
 export function usageReport(end = Date.now()) {
   const week = 7 * 86400e3;
   const now = usageWindow(end - week, end), prev = usageWindow(end - 2 * week, end - week);
-  const day = (t: number) => new Date(t).toISOString().slice(0, 10);
+  const day = (t: number) => new Date(t).toLocaleDateString("sv-SE");
   const rate = (w: Window) => (w.finished ? Math.round((w.done / w.finished) * 100) : 0);
   const row = (label: string, a: number, b: number, suffix = "") => `| ${label} | ${fmt(a)}${suffix} | ${fmt(b)}${suffix} | ${delta(a, b)} |`;
   const lines = [

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { DATA, P, writeDoc } from "../src/core";
 import { channelPrompt, channels, createChannel, resolveChannels, updateChannel } from "../src/channels";
@@ -6,6 +6,7 @@ import { context, localStore } from "../src/brain";
 import { channelsView, slugify, writeOp } from "../cloud/src/tools";
 
 const reset = () => { rmSync(P("channels"), { recursive: true, force: true }); rmSync(P("tasks"), { recursive: true, force: true }); rmSync(P("decisions"), { recursive: true, force: true }); };
+afterAll(reset); // later files share DATA: a leftover D-0001 card leaks into their searches
 const store = () => localStore({ acts: {}, status: () => ({}), feed: () => [], root: DATA });
 
 test("slugs: ascii names become kebab-case, CJK-only names get a stable id", () => {
@@ -85,18 +86,6 @@ test("channelDigest: the channel's own talk (incl. the team's replies) plus main
   ];
   expect(digest2(evs, ["T-0001"], "a").map((e) => e.id)).toEqual(["1", "2", "3"]);
   expect(digest2(evs, ["T-0001"], "b").map((e) => e.id)).toEqual(["3", "4"]);
-});
-
-import { originChannel } from "../src/channels";
-test("originChannel: a task started in a channel, and cards about it, route back there", () => {
-  reset();
-  writeDoc(P("tasks", "done", "T-0901.md"), { id: "T-0901", title: "x", origin_channel: "nsh-i18n" }, "x");
-  writeDoc(P("tasks", "inbox", "T-0902.md"), { id: "T-0902", title: "y" }, "y");
-  writeDoc(P("decisions", "open", "D-0901.md"), { id: "D-0901", task: "T-0901" }, "q");
-  expect(originChannel("T-0901")).toBe("nsh-i18n");
-  expect(originChannel("D-0901")).toBe("nsh-i18n");
-  expect(originChannel("T-0902")).toBeUndefined();
-  expect(originChannel("T-9999")).toBeUndefined();
 });
 
 test("brain context: a message said in a channel names the channel and its goal", () => {

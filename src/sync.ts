@@ -1,3 +1,4 @@
+import "./test-isolation";
 // Data sync: ~/.noop/data is a local working mirror of the fleet files stored in the owner's own
 // Cloudflare Worker (cloud/src/files.ts). Agents and code keep reading/writing plain files; this module
 //   pull()        applies remote changes since the last seen rev (remote wins for paths changed on both sides,
@@ -9,9 +10,10 @@
 // sync-base/ (content of each path as last synced; used to revert and to merge appends), sync.lock (cross-process).
 // Modes: remote (noop.toml has [cloud] url + [server] token) · HUB_SYNC=local (no remote; commits are no-ops) ·
 //        HUB_SYNC_FAKE=<sqlite file> (offline tests: the real Worker module over bun:sqlite, in-process).
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hostname } from "node:os";
+import { machineName } from "./machine";
 import { LAZY_PUSH_MS, PULL_MIN_MS, latestOnly } from "../cloud/src/budget";
 import { isDamaged, nulCount, writeFileDurable } from "./integrity";
 
@@ -59,7 +61,7 @@ function httpTransport(url: string, token: string): Transport {
     try {
       const r = await fetch(base + path, {
         method: init.method ?? "GET", body: init.body === undefined ? undefined : JSON.stringify(init.body),
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Noop-Host": process.env.HUB_HOST || require("node:os").hostname().split(".")[0] }, signal: AbortSignal.timeout(60_000),
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Noop-Host": process.env.HUB_HOST || machineName() }, signal: AbortSignal.timeout(60_000),
       });
       return { status: r.status, json: await r.json().catch(() => ({})) };
     } catch { return null; }
@@ -145,11 +147,12 @@ const hash = (b: Uint8Array) => new Bun.CryptoHasher("sha256").update(b).digest(
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
 
-/** Paths never synced: machine-local config, logs, git leftovers, editor/tmp files. */
+/** Paths never synced: machine-local config, logs, locks, git leftovers, editor/tmp files. */
 export function ignored(rel: string): boolean {
   const parts = rel.split("/");
   const first = parts[0], name = parts[parts.length - 1];
-  if (first === ".git" || first.startsWith(".git.bak") || first === "logs" || rel === "config.local.toml") return true;
+  // locks/: agents' per-machine mkdir locks (e.g. locks/cargo); syncing them leaks one machine's lock to the others
+  if (first === ".git" || first.startsWith(".git.bak") || first === "logs" || first === "locks" || rel === "config.local.toml") return true;
   return /^\.sync-tmp-|\.tmp$|~$|\.sw[po]$|^\.DS_Store$|^#.*#$/.test(name) || parts.includes(".git");
 }
 
@@ -171,7 +174,13 @@ function writeAtomic(abs: string, data: Uint8Array) {
   mkdirSync(dirname(abs), { recursive: true });
   const tmp = join(dirname(abs), `.sync-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
   writeFileDurable(tmp, data); // flush before the rename: otherwise a power loss can leave the new name on zero-filled data
+  // x/y was deleted and x is now a file: the empty directory x is left behind; a non-empty one still throws
+  if (existsSync(abs) && statSync(abs).isDirectory()) rmdirSync(abs);
   renameSync(tmp, abs);
+}
+/** Delete a synced file; skips a path that is now a directory or sits under what is now a file (x ↔ x/y flips). */
+function rmFile(abs: string) {
+  if (existsSync(abs) && !statSync(abs).isDirectory()) rmSync(abs);
 }
 
 // ------------------------------------------------------------------ damaged files (zero-filled by a crash mid-write)
@@ -192,7 +201,7 @@ function noteDamaged(rel: string, data: Uint8Array, side: DamageAlert["side"]) {
 export function takeDamageAlerts(): DamageAlert[] { return damageNew.splice(0); }
 function setBase(rel: string, data: Uint8Array | null) {
   const f = join(BASE(), rel);
-  if (data) writeAtomic(f, data); else rmSync(f, { force: true });
+  if (data) writeAtomic(f, data); else rmFile(f);
 }
 const getBase = (rel: string): Uint8Array | null => { try { return new Uint8Array(readFileSync(join(BASE(), rel))); } catch { return null; } };
 function stamp(rel: string): { m: number; s: number } {
@@ -219,8 +228,10 @@ export function scan(st: State): Change[] {
     damageSeen.delete(seenKey(rel));
     changes.push({ path: rel, base_version: e?.v ?? 0, content: b64(data), _bytes: data, _hash: h });
   }
-  for (const [rel, e] of Object.entries(st.files)) if (!seen.has(rel) && !ignored(rel)) changes.push({ path: rel, base_version: e.v, deleted: true });
-  return changes;
+  // deletions first: the Worker assigns revs in this order, so x/y is gone everywhere before x is written as a file
+  const gone: Change[] = [];
+  for (const [rel, e] of Object.entries(st.files)) if (!seen.has(rel) && !ignored(rel)) gone.push({ path: rel, base_version: e.v, deleted: true });
+  return [...gone, ...changes];
 }
 
 // ------------------------------------------------------------------ cross-process lock (CLI commands vs. the daemon)
@@ -313,15 +324,19 @@ function applyRemote(st: State, f: Remote): "ok" | "merged" | "lost" {
     if (merged) { write = merged; outcome = "merged"; } else if (local || remote) outcome = "lost";
     if (outcome === "lost") console.error(`sync: ${f.path} changed remotely and locally — keeping the remote version`);
   }
-  if (write) { if (!local || hash(write) !== lh) writeAtomic(abs, write); } else rmSync(abs, { force: true });
+  if (write) { if (!local || hash(write) !== lh) writeAtomic(abs, write); } else rmFile(abs);
   if (!badRemote) setBase(f.path, remote); // else keep the last good copy: integrity.recoverMemory restores from it
   if (remote) st.files[f.path] = { v: f.version, h: f.hash ?? hash(remote), ...(outcome === "merged" || badRemote ? { m: -1, s: -1 } : stamp(f.path)) }; // badRemote: local is damaged too and gets restored in place, maybe within the same mtime tick and size
   else delete st.files[f.path];
   return outcome;
 }
 
-async function _pull(st: State, t: Transport): Promise<{ ok: boolean; lost: Set<string>; seen: Set<string> }> {
+/** Progress after each page of a pull: files and (decoded) bytes received so far. */
+export type PullProgress = (files: number, bytes: number) => void;
+
+async function _pull(st: State, t: Transport, progress?: PullProgress): Promise<{ ok: boolean; lost: Set<string>; seen: Set<string> }> {
   const lost = new Set<string>(), seen = new Set<string>();
+  let files = 0, bytes = 0;
   for (let page = 0; page < 10_000; page++) {
     const r = await t(`/api/files/changes?since=${st.rev}`);
     if (!r || r.status !== 200) { if (r) console.error(`sync: pull failed ${r.status} ${JSON.stringify(r.json).slice(0, 200)}`); return { ok: false, lost, seen }; }
@@ -329,17 +344,22 @@ async function _pull(st: State, t: Transport): Promise<{ ok: boolean; lost: Set<
     for (const f of r.json.files as Remote[]) { seen.add(f.path); if (applyRemote(st, f) === "lost") lost.add(f.path); }
     st.rev = r.json.rev;
     saveState(st);
+    if (progress) {
+      files += r.json.files.length;
+      for (const f of r.json.files as Remote[]) bytes += Math.floor((f.content?.length ?? 0) * 3 / 4);
+      progress(files, bytes);
+    }
     if (!r.json.more) break;
   }
   return { ok: true, lost, seen };
 }
 
-export async function pull(opts: { force?: boolean } = {}): Promise<boolean> {
+export async function pull(opts: { force?: boolean; progress?: PullProgress } = {}): Promise<boolean> {
   const t = await getTransport();
   if (!t) return true;
   if (!opts.force && syncTiming.now() - (lastPull.get(HOME()) ?? -Infinity) < syncTiming.pullMinMs) return true;
   return withLock(async () => {
-    const ok = (await _pull(loadState(), t)).ok;
+    const ok = (await _pull(loadState(), t, opts.progress)).ok;
     if (ok) lastPull.set(HOME(), syncTiming.now());
     return ok;
   });

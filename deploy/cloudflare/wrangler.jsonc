@@ -1,0 +1,22 @@
+// The Noop Worker, deployed by the "Deploy to Cloudflare" button.
+// `npm run build` (build.mjs) downloads the latest Noop release into ./noop: the Worker source and the web client.
+// Keep the bindings in step with cloud/wrangler.toml (test/deploy-cloudflare.test.ts checks it).
+{
+  "name": "noop",
+  "main": "noop/cloud/src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "noop/app/dist/web/noop",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/*.wasm", "/*.js", "/*.mjs", "/*.css", "/api/*", "/media/*", "/mcp", "/oauth/*", "/.well-known/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  // Login codes by email without SMTP: turn on Email Routing for one of your domains, verify your address,
+  // then add the HUB_MAIL_FROM secret (an address on that domain).
+  "send_email": [{ "name": "EMAIL" }]
+}

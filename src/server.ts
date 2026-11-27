@@ -12,17 +12,18 @@
 //   GET  /media/<file>                    → attachment
 //   GET  /api/files/list?prefix=  · GET /api/files/read?path=   → read-only rules & memory (same shape as the Worker)
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { gradeOf } from "../app/grading";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { accountsInfo } from "./accounts";
 import { cliCommand, startModel } from "./runner";
-import { type Cfg, DATA, JOURNAL_DAY, L, P, _commitPush, isEnglish, allowedClis, hostName, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
-import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
+import { type Cfg, DATA, JOURNAL_DAY, L, P, _commitPush, hm, isEnglish, allowedClis, hostName, hostPriority, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
+import { mediaResponse, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
 import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
-import { channels, originChannel, updateChannel } from "./channels";
+import { channels, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
 import { localSecretList, localSecretPut } from "./secrets";
@@ -48,7 +49,7 @@ const sockets = new Set<Sock>();
 const STATUS_PUSH_MS = 5_000;
 let statusPushed = "";
 let statusTimer: ReturnType<typeof setInterval> | null = null;
-function pushStatus() {
+function pushStatus(force = false) {
   const watching = [...sockets].filter((ws) => ws.data?.status);
   if (!watching.length) {
     if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
@@ -56,7 +57,10 @@ function pushStatus() {
     return;
   }
   const s = JSON.stringify({ $status: status() });
-  if (s === statusPushed) return;
+  // A client that just connected has never seen statusPushed (the last change any client saw), so its first frame
+  // must be unconditional: otherwise a second phone or a test that opens right after another watcher waits forever
+  // for a change that is not coming.
+  if (!force && s === statusPushed) return;
   statusPushed = s;
   for (const ws of watching) try { ws.send(s); } catch { /* the socket is going away */ }
 }
@@ -80,8 +84,8 @@ export const setMirror = (fn: (e: Event) => void) => { mirror = fn; };
 export function appendEvent(e: Omit<Event, "id" | "ts"> & Partial<Pick<Event, "id" | "ts">>, opts: { mirror?: boolean } = {}): Event {
   mkdirSync(FEED_DIR, { recursive: true });
   const ev: Event = { id: crypto.randomUUID(), ts: new Date().toISOString(), ...e };
-  // results and cards of work started in a channel stay in that channel
-  if (!ev.channel && ev.ref) { const c = originChannel(ev.ref); if (c) ev.channel = c; }
+  // results and cards of work started in a channel are not tagged with it: they show in the main chat, and the
+  // channel's digest picks them up through its task refs (the owner reads conclusions in the main chat, 2026-11-26)
   if (opts.mirror !== false) mirror?.(ev);
   appendFileSync(join(FEED_DIR, `${today()}.jsonl`), JSON.stringify(ev) + "\n");
   for (const ws of sockets) ws.send(JSON.stringify(ev));
@@ -105,7 +109,7 @@ export function recentChat(text = "", opts: { limit?: number; hours?: number; ch
   return evs.slice(-(opts.limit ?? 12)).map((e) => {
     const who = e.from === "owner" ? "owner" : e.from;
     const t = e.text.length > 700 ? `${e.text.slice(0, 700)}…` : e.text;
-    return `[${e.ts.slice(11, 16)}] ${who}${e.ref ? ` (${e.ref})` : ""}: ${t.replace(/\n+/g, " ⏎ ")}`;
+    return `[${hm(e.ts)}] ${who}${e.ref ? ` (${e.ref})` : ""}: ${t.replace(/\n+/g, " ⏎ ")}`;
   });
 }
 
@@ -183,7 +187,7 @@ export function taskView(path: string, state: string, log: string[]) {
   const needs = state === "inbox" && m.parked && m.requires ? String(m.requires) : undefined;
   if (needs) state = "nohost";
   return { id: m.id, title: m.title, agent: m.agent, host: m.claimed_by, state, needs, waiting_on: m.waiting_on, wake_at: m.wake_at, started: m.started, created: m.created, cli: m.cli_used, model: m.model,
-    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, request, runs, steps };
+    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, grade: gradeOf(m, false), request, runs, steps };
 }
 
 type TaskView = ReturnType<typeof taskView>;
@@ -191,13 +195,18 @@ type TaskView = ReturnType<typeof taskView>;
 const taskStore = () => localStore({ acts: {}, status: () => ({}), feed: () => [] });
 
 /** Per host: what it runs now, what it finished lately, and (for this machine) its AI accounts. */
+/** The fleet's primary: the one [fleet] primary names, else this machine (only the primary serves the API). */
+const primaryHost = (cfg: Cfg | null) => String(cfg?.fleet?.primary ?? "") || (cfg ? hostName(cfg) : "");
+
 function hostViews(active: TaskView[], finished: TaskView[]) {
   let cfg: Cfg | null = null;
   try { cfg = loadConfig(); } catch {}
   const me = cfg ? hostName(cfg) : "";
+  const primary = primaryHost(cfg);
   const ran = (t: TaskView, h: string) => t.host === h || t.runs.some((r) => r.host === h);
   return onlineHosts(cfg ?? {}).map((h) => ({
     ...h,
+    primary: h.host === primary,
     os: h.caps.find((c) => c.startsWith("os:"))?.slice(3),
     arch: h.caps.find((c) => c.startsWith("arch:"))?.slice(5),
     clis: h.caps.filter((c) => c.startsWith("cli:")).map((c) => c.slice(4)),
@@ -234,7 +243,7 @@ export function status() {
 }
 
 // ---------------------------------------------------------------- settings (UI-adjustable, shared via data repo)
-const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days", "mcp_servers"]; // whitelisted top-level keys
+const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days", "mcp_servers", "fleet"]; // whitelisted (fleet: only host_priority) top-level keys
 
 /** What an agent is for, from its profile's first line: "# Name (中文名) — what it does". */
 /** Chinese titles and one-liners for the built-in roles (a profile's own Chinese "(标题)" and text still win where present). */
@@ -242,6 +251,7 @@ const ROLE_ZH: Record<string, { title: string; about: string }> = {
   apprentice: { title: "学徒", about: "从你自己的 AI 会话里学习你怎么做事、怎么判断、偏好什么" },
   architect: { title: "团队架构师", about: "持续调整这个团队的规则、提示词、记忆和角色，贴合你真实的工作" },
   "chief-of-staff": { title: "幕僚长", about: "团队空闲时给你列出可以直接开干的下一步选项" },
+  planner: { title: "规划", about: "按团队 OKR 主动找事、派探索任务，带着验证过的方案来找你" },
   dispatcher: { title: "分诊调度", about: "扫描所有进来的信号，拆成任务交给对应成员" },
   lead: { title: "负责人", about: "任务的默认负责人，决定一件事需要走多少流程" },
   "ops-watcher": { title: "线上值守", about: "盯线上告警和 CI 健康" },
@@ -298,6 +308,7 @@ export function settingsView() {
       routines: (cfg.routine ?? []).map((r: any) => ({ name: r.name, desc: routineDesc(r), every: r.every, agent: r.agent, enabled: r.enabled !== false })),
       max_parallel: cfg.host?.max_parallel ?? null,
       media_days: mediaDays(cfg),
+      hosts: knownHosts().map((host) => ({ host, priority: hostPriority(cfg, host), primary: host === primaryHost(cfg) })),
     },
     options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
   };
@@ -305,6 +316,9 @@ export function settingsView() {
 
 let settingsHook: ((summary: string) => Promise<void>) | null = null;
 export const onSettingsSaved = (fn: (summary: string) => Promise<void>) => { settingsHook = fn; };
+
+/** Every machine that has ever sent a heartbeat (fleet/hosts/<host>.json), online or not. */
+const knownHosts = () => (existsSync(P("fleet", "hosts")) ? readdirSync(P("fleet", "hosts")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort() : []);
 
 export async function saveSettings(patch: Record<string, unknown>) {
   const cur = existsSync(P("settings.json")) ? JSON.parse(readFileSync(P("settings.json"), "utf8")) : {};
@@ -314,6 +328,13 @@ export async function saveSettings(patch: Record<string, unknown>) {
     return o;
   };
   const clean = Object.fromEntries(Object.entries(patch).filter(([k]) => SETTABLE.includes(k)));
+  if ("fleet" in clean) {
+    // only the machine priority is set from the app; other [fleet] keys (primary, …) stay in config.toml
+    const table = (clean.fleet as any)?.host_priority;
+    const prio: Record<string, number> = {};
+    for (const [h, v] of Object.entries(table && typeof table === "object" ? table : {})) if (/^[\w.-]+$/.test(h) && Number.isFinite(Number(v))) prio[h] = Math.max(-99, Math.min(99, Math.round(Number(v))));
+    if (Object.keys(prio).length) clean.fleet = { host_priority: prio }; else delete clean.fleet;
+  }
   if ("mcp_servers" in clean) {
     // the whole list replaces the saved one. The app checks each entry first; here an entry that still fails
     // (a literal secret above all: the data repo syncs through the cloud) is left out rather than failing the save,
@@ -401,8 +422,16 @@ export function withAttachments(text: string, files: string[], missing = 0): str
   if (!files.length && !missing) return text;
   const lines = files.map((f) => `- ${f}`);
   if (missing) lines.push(`- (${missing} more image(s) could not be downloaded)`);
-  return `${text.trim() || "(see the attached images)"}\n\nAttached images from the owner (absolute paths on the primary host; open them to see; a .md is a long text the owner pasted):\n${lines.join("\n")}`;
+  // pasted long text (.md/.txt) goes inline: the chat brain may have no file access on this host, and the text is the message
+  const pasted = files.filter((f) => /\.(md|txt)$/i.test(f)).map((f) => {
+    let body = "";
+    try { body = readFileSync(f, "utf8"); } catch { return ""; }
+    if (body.length > PASTED_MAX) body = `${body.slice(0, PASTED_MAX)}\n…(truncated, full text in ${f})`;
+    return `\n\n--- pasted text (${basename(f)}) ---\n${body.trim()}\n--- end of pasted text ---`;
+  }).join("");
+  return `${text.trim() || (pasted ? "(the owner pasted a long text, below)" : "(see the attached images)")}${pasted}\n\nAttached images from the owner (absolute paths on the primary host; open them to see; a .md is a long text the owner pasted, already included above):\n${lines.join("\n")}`;
 }
+const PASTED_MAX = 60_000;
 
 export async function handleOwnerMessage(
   text: string, reply_to?: string, noAmend = false,
@@ -494,7 +523,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         const f = join(MEDIA, basename(url.pathname));
         if (!existsSync(f)) return json({ error: "not found" }, 404);
         const file = Bun.file(f);
-        return new Response(file, { headers: mediaHeaders(file.type, basename(f)) });
+        return mediaResponse(req, file, file.type, basename(f));
       }
       if (url.pathname === "/api/feed") return json({ events: feed(url.searchParams.get("since") ?? undefined) });
       if (url.pathname === "/api/status") return json(status());
@@ -585,7 +614,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       open(ws) {
         sockets.add(ws);
         if (!ws.data?.status) return;
-        pushStatus(); // the dashboard as of now, then on every change while this client watches
+        pushStatus(true); // the dashboard as of now (even unchanged), then on every change while this client watches
         statusTimer ??= setInterval(pushStatus, STATUS_PUSH_MS);
       },
       close(ws) { sockets.delete(ws); pushStatus(); }, // the last watcher leaving also stops the timer

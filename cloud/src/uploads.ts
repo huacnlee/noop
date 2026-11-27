@@ -56,3 +56,24 @@ export function mediaHeaders(type: string, name: string): Record<string, string>
     "cache-control": "private, max-age=31536000",
   };
 }
+
+/** Native players probe the file and seek with single byte-range requests. */
+export function mediaResponse(req: Request, blob: Blob, type: string, name: string): Response {
+  const headers = mediaHeaders(type, name);
+  headers["accept-ranges"] = "bytes";
+  headers["content-length"] = String(blob.size);
+  if (req.method === "HEAD") return new Response(null, { headers });
+  const range = req.headers.get("range")?.match(/^bytes=(\d*)-(\d*)$/i);
+  if (!range || (!range[1] && !range[2]) || req.headers.has("if-range")) return new Response(blob, { headers });
+
+  const start = range[1] ? Number(range[1]) : Math.max(0, blob.size - Number(range[2]));
+  const end = range[1] && range[2] ? Math.min(Number(range[2]), blob.size - 1) : blob.size - 1;
+  if (start > end) {
+    headers["content-range"] = `bytes */${blob.size}`;
+    headers["content-length"] = "0";
+    return new Response(null, { status: 416, headers });
+  }
+  headers["content-range"] = `bytes ${start}-${end}/${blob.size}`;
+  headers["content-length"] = String(end - start + 1);
+  return new Response(blob.slice(start, end + 1), { status: 206, headers });
+}

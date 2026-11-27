@@ -1,7 +1,9 @@
+import "./test-isolation";
 // noop core — shared files as the world (stigmergy; synced via the owner's Worker, src/sync.ts), task queue, agent runner, journal, memory.
 import { OFFLINE_AFTER_MINUTES } from "../cloud/src/budget";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
+import { homedir, networkInterfaces } from "node:os";
+import { machineName } from "./machine";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import * as sync from "./sync";
 import { recoverMemory, snapshotMemory } from "./integrity";
@@ -71,11 +73,15 @@ export function loadConfig(): Cfg {
 }
 
 export const hostName = (cfg: Cfg): string =>
-  process.env.HUB_HOST || cfg.host?.name || hostname().split(".")[0];
+  process.env.HUB_HOST || cfg.host?.name || machineName();
 
 export const now = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
 export const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD local
 export const hhmm = () => new Date().toLocaleTimeString("sv-SE").slice(0, 5);
+/** "11:08" for any UTC timestamp, in this machine's time zone: stored in UTC, read by people in local time. */
+export const hm = (at: string | number | Date = new Date()) => new Date(at).toLocaleTimeString("sv-SE", { hour12: false }).slice(0, 5);
+/** This machine's zone name, for prompts and labels ("Asia/Shanghai"). */
+export const localTimeZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; } };
 
 // ------------------------------------------------------------------ data sync (src/sync.ts)
 // All data mutations are serialized so parallel workers in one daemon never race on the mirror.
@@ -88,9 +94,9 @@ export function locked<T>(fn: () => Promise<T> | T): Promise<T> {
 
 export const hasRemote = async () => (await sync.syncMode()) === "remote";
 
-export const pull = (opts?: { force?: boolean }) => locked(() => _pull(opts));
+export const pull = (opts?: Parameters<typeof sync.pull>[0]) => locked(() => _pull(opts));
 /** Apply remote changes to DATA (remote wins on paths edited on both sides, except mergeable appends). */
-export const _pull = (opts?: { force?: boolean }): Promise<boolean> => sync.pull(opts);
+export const _pull = (opts?: Parameters<typeof sync.pull>[0]): Promise<boolean> => sync.pull(opts);
 
 /** Commit every local change via the Worker's compare-and-swap; false if we lost a race (or are offline). */
 export const commitPush = (msg: string, opts?: { force?: boolean }) => locked(() => _commitPush(msg, opts));
@@ -278,6 +284,7 @@ export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null
 // ------------------------------------------------------------------ fleet presence (heartbeats)
 export type HostBeat = { host: string; caps: string[]; seen: string; busy: number; version: string; stats?: any;
   /** The noop code this host runs: its commit and that commit's page. */ rev?: string; rev_url?: string;
+  /** Its private IPv4 address on the local network; absent when none can be found. */ lan?: string;
   /** How this host is doing with the owner's latest "update every machine". */ update?: UpdateState;
   /** Per running task: when its agent last showed a sign of life and what it was doing. */ activity?: Record<string, Activity> };
 
@@ -327,11 +334,25 @@ export function runningRev(): { rev?: string; rev_url?: string } {
 /** The owner's "update every machine" (fleet/update.json, synced): each host updates once per request. */
 export const UPDATE_REQUEST = () => P("fleet", "update.json");
 
+type Iface = { address: string; family: string | number; internal: boolean };
+/** Virtual adapters whose private addresses are not the machine's LAN address (VPN, proxy TUN, containers, VMs). */
+const VIRTUAL_IFACE = /^(utun|tun|tap|wg|tailscale|zt|docker|br-|veth|virbr|vmnet|vboxnet|bridge|llw|awdl|anpi|ap\d|lo|vEthernet)/i;
+const isPrivateV4 = (a: string) => /^10\./.test(a) || /^192\.168\./.test(a) || /^172\.(1[6-9]|2\d|3[01])\./.test(a);
+/** The machine's private IPv4 on its local network: ignores loopback, link-local, VPN/proxy tunnels (198.18.x, 100.64.x)
+ *  and container/VM bridges; prefers wired/Wi-Fi adapters (en*, eth*, wl*). Undefined when nothing qualifies. */
+export function lanAddress(ifaces: Record<string, Iface[] | undefined> = networkInterfaces()): string | undefined {
+  const found = Object.entries(ifaces).flatMap(([name, list]) =>
+    VIRTUAL_IFACE.test(name) ? [] : (list ?? []).filter((i) => (i.family === "IPv4" || i.family === 4) && !i.internal && isPrivateV4(i.address))
+      .map((i) => ({ name, address: i.address })));
+  const physical = (n: string) => /^(en|eth|wl|Ethernet|Wi-?Fi)/i.test(n) ? 0 : 1;
+  return found.sort((a, b) => physical(a.name) - physical(b.name) || a.name.localeCompare(b.name, "en", { numeric: true }))[0]?.address;
+}
+
 export function heartbeat(cfg: Cfg, busy: number, stats?: unknown) {
   const host = hostName(cfg);
   const f = P("fleet", "hosts", `${host}.json`);
   mkdirSync(dirname(f), { recursive: true });
-  writeFileSync(f, JSON.stringify({ host, caps: hostCaps(cfg), seen: now(), busy, version: "1", stats, ...runningRev(), update: updateState(), activity: agentActivity.size ? Object.fromEntries(agentActivity) : undefined } satisfies HostBeat, null, 2));
+  writeFileSync(f, JSON.stringify({ host, caps: hostCaps(cfg), seen: now(), busy, version: "1", stats, ...runningRev(), lan: lanAddress(), update: updateState(), activity: agentActivity.size ? Object.fromEntries(agentActivity) : undefined } satisfies HostBeat, null, 2));
 }
 
 /** Caps of every machine that has ever written a heartbeat. Offline hosts stay listed, so a routine pinned to a
@@ -356,6 +377,31 @@ function yieldToPreferred(meta: Record<string, string>, caps: string[], cfg: Cfg
   const waitMs = (cfg.fleet?.prefer_wait_minutes ?? 10) * 60_000;
   if (Date.now() - Date.parse(meta.created) > waitMs) return false; // waited long enough
   return onlineHosts(cfg).some((h) => h.host !== hostName(cfg) && prefer.every((r) => h.caps.includes(r)));
+}
+
+/** The owner's machine priority (`fleet.host_priority`, e.g. { "omarchy-lb": 10, "macbook": -5 }; settable from settings.json).
+ *  Higher goes first; unlisted machines are 0. It only orders machines that can all run a task: `requires` / `host:` pins
+ *  and the task's own `prefer` still win. */
+export const hostPriority = (cfg: Cfg, host: string): number => Number(cfg.fleet?.host_priority?.[host] ?? 0) || 0;
+
+/** Device condition: an online machine counts as free for more work only with CPU and memory headroom. */
+export const hostHasRoom = (h: HostBeat): boolean => {
+  const s = h.stats;
+  if (!s) return h.busy === 0;
+  return heartPressure(s) < 0.75 && (s.memFreePct == null || s.memFreePct >= 15) && (s.diskFreeGB == null || s.diskFreeGB >= 5);
+};
+
+/** Leave the task for a higher-priority online machine that can run it and has room. Like `prefer`, the wait lapses after
+ *  `prefer_wait_minutes`, so a busy or broken preferred machine never holds the queue. */
+function yieldToPriority(meta: Record<string, string>, cfg: Cfg): boolean {
+  const table = cfg.fleet?.host_priority;
+  if (!table || !Object.keys(table).length) return false;
+  const waitMs = (cfg.fleet?.prefer_wait_minutes ?? 10) * 60_000;
+  const since = Date.parse(meta.planned || meta.created);
+  if (!Number.isNaN(since) && Date.now() - since > waitMs) return false;
+  const me = hostName(cfg), mine = hostPriority(cfg, me), prefer = reqList(meta.prefer);
+  return onlineHosts(cfg).some((h) => h.host !== me && hostPriority(cfg, h.host) > mine && matches(meta, h.caps)
+    && prefer.every((r) => h.caps.includes(r)) && hostHasRoom(h));
 }
 
 /** A host's CPU pressure as its heartbeat reports it (0-1): measured utilisation when known, else load/cores. */
@@ -383,7 +429,7 @@ export function pickTask(cfg: Cfg, myLoad = 0, heavyOk = true): string | null {
   const cands = list(P("tasks", "inbox"), /^T-.*\.md$/)
     .map((p) => ({ p, m: readDoc(p).meta }))
     // the planner decides where a task runs first; unplanned tasks wait for it (at most plan_wait_minutes)
-    .filter(({ m }) => (m.planned || Date.now() - Date.parse(m.created ?? "") > (cfg.fleet?.plan_wait_minutes ?? 3) * 60_000) && matches(m, caps) && chooseCli(m, cfg) && !yieldToPreferred(m, caps, cfg) && !yieldHeavy(m, cfg, myLoad, heavyOk))
+    .filter(({ m }) => (m.planned || Date.now() - Date.parse(m.created ?? "") > (cfg.fleet?.plan_wait_minutes ?? 3) * 60_000) && matches(m, caps) && chooseCli(m, cfg) && !yieldToPreferred(m, caps, cfg) && !yieldToPriority(m, cfg) && !yieldHeavy(m, cfg, myLoad, heavyOk))
     .sort((a, b) => (rank[a.m.priority] ?? 2) - (rank[b.m.priority] ?? 2) || a.p.localeCompare(b.p));
   return cands[0]?.p ?? null;
 }
@@ -400,6 +446,12 @@ async function _claim(path: string, host: string): Promise<string | null> {
   if (await _commitPush(`[${host}] claim ${meta.id}: ${meta.title}`)) return dest;
   // undo only our claim (other pending local results stay queued); after a lost race the pull already applied the winner
   sync.revertLocal([relative(DATA, dest), relative(DATA, path)]);
+  // A claim of ours restored from the sync base is a stale copy: its delete never reached the Worker, so the base still
+  // holds it. Keeping it makes the reaper fire on every tick and rewrite the requeued copy from it, resetting the
+  // attempt and stall counters. A lost race restores the winner's claim instead, which names another host (one daemon
+  // per host: a claim naming this host that no run owns is stale by definition).
+  const back = existsSync(dest) ? readDoc(dest).meta : null;
+  if (back?.claimed_by === host) rmSync(dest, { force: true });
   // a task queued here and not pushed yet has no synced copy to revert to: put it back rather than delete it
   if (!readdirSync(P("tasks")).some((d) => existsSync(P("tasks", d, `${meta.id}.md`)))) writeFileSync(path, raw);
   return null;
@@ -457,10 +509,17 @@ export function readTail(p: string, tail = 12000): string {
   return `[… the first ${s.length - tail} of ${s.length} characters are cut; read ${p} for them]\n${s.slice(-tail)}`;
 }
 
+/** The memory files every prompt is built around: the owner's profile, current focus and the principles the judge decides
+ *  by (sessions.ts tells the learner to record per-category rules there "so the judge can decide them next time"). */
+export const MEMORY_KEEP = ["principles.md", "owner.md", "focus.md"];
+
 /** Every .md of a folder, joined, last `tail` characters. The files that fall into the cut part are named, so a folder
- *  that outgrows its budget does not lose whole files (the alphabetically first ones) without a trace. */
-export function readAll(dir: string, tail = 12000): string {
-  const parts = list(dir).map((p) => ({ name: basename(p), text: `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}` }));
+ *  that outgrows its budget does not lose whole files (the alphabetically first ones) without a trace. Files named in
+ *  `keep` go last, in that order, so the cut takes the other files first instead of whichever sort first by name. */
+export function readAll(dir: string, tail = 12000, keep: string[] = []): string {
+  const rank = (name: string) => keep.indexOf(name); // -1 for the rest: they stay first, in name order
+  const parts = list(dir).map((p) => ({ name: basename(p), text: `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}` }))
+    .sort((a, b) => rank(a.name) - rank(b.name));
   const joined = parts.map((x) => x.text).join("\n\n");
   if (joined.length <= tail) return joined;
   const cut = joined.length - tail;

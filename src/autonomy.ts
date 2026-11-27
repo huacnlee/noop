@@ -236,6 +236,16 @@ function closeBatch(path: string, answer: string) {
   unlinkSync(path);
 }
 
+/** One-based selections in a batch reply. An empty set represents an explicit "none". */
+export function proposalPicks(answer: string, items: string[]) {
+  const a = answer.trim().toLowerCase();
+  // words without a pick are not "none": keep the card open rather than reject every item.
+  // numbers count only when nothing but a colon follows them: "1、不做 2、做" or "1 no 2 yes" are words, not a pick of 1
+  if (!/^(all|none)\b|^\d[\d,\s，]*($|[:：])/.test(a)) return undefined;
+  return new Set<number>(a.startsWith("all") ? items.map((_, i) => i + 1)
+    : a.startsWith("none") ? [] : (a.match(/^[\d,\s，]+/)?.[0] ?? "").split(/[,，\s]+/).filter(Boolean).map(Number));
+}
+
 /** Owner's answer to a proposals batch: approve picked ones, reject the rest (rejections are a learning signal). */
 export function resolveProposals(id: string, answer: string, by: string): boolean {
   const f = P("decisions", "open", `${id}.md`);
@@ -243,12 +253,8 @@ export function resolveProposals(id: string, answer: string, by: string): boolea
   const { meta, body } = readDoc(f);
   // keep empty slots: card line n is items[n-1], so dropping an empty id would shift every later pick by one
   const ids = (meta.items ?? "").split(",");
-  const a = answer.trim().toLowerCase();
-  // words without a pick are not "none": keep the card open rather than reject every item.
-  // numbers count only when nothing but a colon follows them: "1、不做 2、做" or "1 no 2 yes" are words, not a pick of 1
-  if (!/^(all|none)\b|^\d[\d,\s，]*($|[:：])/.test(a)) return false;
-  const picked = new Set<number>(a.startsWith("all") ? ids.map((_, i) => i + 1)
-    : a.startsWith("none") ? [] : (a.match(/^[\d,\s，]+/)?.[0] ?? "").split(/[,，\s]+/).filter(Boolean).map(Number));
+  const picked = proposalPicks(answer, ids);
+  if (!picked) return false;
   const note = answer.replace(/^([\d,\s，]+|all|none)\s*[:：]?/i, "").trim(); // "1,3: 2 waits" picks 1 and 3, the rest is the note
   ids.forEach((tid, i) => {
     const p = P("tasks", "proposed", `${tid}.md`);

@@ -2,7 +2,7 @@
 import '../styles/global.css';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const canonical = new URL(`${base}/privacy/`, Astro.site);
-const updated = 'November 17, 2026';
+const updated = 'November 26, 2026';
 ---
 <!doctype html>
 <html lang="en" data-theme="dark">
@@ -26,6 +26,7 @@ const updated = 'November 17, 2026';
       li { color: var(--secondary); margin-bottom: 6px; }
       .updated { color: var(--muted); font-size: 13px; }
     </style>
+    <script defer src="https://nsmetry.huacnlee-account.workers.dev/em.js" data-domain="noop"></script>
   </head>
   <body>
     <main class="shell">
@@ -35,8 +36,17 @@ const updated = 'November 17, 2026';
 
       <p>Noop is a client for a Noop server that you run yourself, on your own computers and your own Cloudflare account. This policy covers the Noop apps for iOS, Android, macOS, Windows and Linux.</p>
 
-      <h2>We do not collect your data</h2>
-      <p>The developer of Noop does not run a service for the apps and does not collect, store, sell or share any of your personal data. The apps contain no analytics, advertising or tracking code, and they do not track you across other apps or websites.</p>
+      <h2>We do not collect your personal data</h2>
+      <p>The developer of Noop does not run a service for the apps and does not collect, store, sell or share any of your personal data. The apps contain no advertising or tracking code, and they do not track you across other apps or websites.</p>
+
+      <h2>Anonymous usage statistics</h2>
+      <p>To learn which parts of Noop are used, the developer counts usage with NsMetry, the developer's own analytics on Cloudflare. It sets no cookies, does no fingerprinting and stores no IP address.</p>
+      <ul>
+        <li><strong>The apps</strong> send the name of each screen you open (such as "chat", "task" or "settings"), the app version, the operating system and its version, the device class and a random ID made when the app is installed. They are sent in batches. No email, server address, task, channel, message or file name is sent.</li>
+        <li><strong>The self-hosted Noop service</strong> on your machine sends one heartbeat a day with the Noop build date, the operating system family and a random install ID. Turn it off with <code>[telemetry] enabled = false</code> in config.toml or <code>NOOP_TELEMETRY=0</code>.</li>
+        <li><strong>Your Noop Worker</strong> on your own Cloudflare account sends one report a day with the Noop build date, a random install ID and counts only: how many machines are online, how many devices signed in during the last day on each platform (iOS, Android, macOS, Windows, Linux, web) and how many MCP connectors. The same setting turns it off, from the next deploy.</li>
+        <li><strong>This website</strong> counts page views.</li>
+      </ul>
 
       <h2>Where your data goes</h2>
       <ul>

@@ -127,3 +127,20 @@ test("work the owner asked for resets the streak; routine work does not", () => 
   maybeProposeNext(cfg, "test", st);
   expect(st.idle_empty).toBeUndefined();
 });
+
+test("max_open_cards silences the idle menu while that many cards are unanswered", () => {
+  const clock = spyOn(Date, "now").mockReturnValue(now);
+  try {
+    const capped = { idle: { after_minutes: 20, cooldown_minutes: 180, max_open_cards: 3 } };
+    menu("D-F0020", 600);
+    menu("D-F0021", 600, "decision");
+    maybeProposeNext(capped, "test", state());
+    expect(tasks()).toHaveLength(1); // 2 open < 3: still allowed
+    rmSync(list(P("tasks/inbox"))[0], { force: true });
+    writeDoc(P("decisions/open", "P-F0009.md"), { id: "P-F0009", created: ago(600) }, "pending");
+    maybeProposeNext(capped, "test", state());
+    expect(tasks()).toEqual([]); // 3 open, all older than any cooldown
+    maybeProposeNext(cfg, "test", state());
+    expect(tasks()).toHaveLength(1); // without the setting nothing changes
+  } finally { clock.mockRestore(); }
+});

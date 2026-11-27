@@ -68,3 +68,27 @@ export function ipAllowed(ip: string | null | undefined, nets: Net[]): boolean {
     return (p.n >> shift) << shift === n.base;
   });
 }
+
+/** The list as one canonical string: entries split on commas/whitespace, trimmed, duplicates dropped, joined by ",". */
+export function normalizeAllowList(raw: string | string[] | undefined): string {
+  const all = (Array.isArray(raw) ? raw.join(",") : raw ?? "").split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+  return [...new Set(all)].join(",");
+}
+
+export const MAX_ALLOW_ENTRIES = 200;
+
+/** An owner's edit of the list, checked before it goes anywhere. Refuses entries that don't parse, a list that would
+ *  shut out the device making the change, and (unless `force`) one that would shut out a machine seen recently. */
+export function checkAllowEdit(entries: string[], ctx: { requester: string; machines: string[]; force?: boolean }):
+  { ok: true; value: string } | { ok: false; code: "bad" | "self" | "machines" | "too_many"; ips: string[] } {
+  const value = normalizeAllowList(entries);
+  if (!value) return { ok: true, value }; // empty: the allow-list is off, nobody is shut out
+  const list = value.split(",");
+  if (list.length > MAX_ALLOW_ENTRIES) return { ok: false, code: "too_many", ips: [] };
+  const { nets, bad } = parseAllowList(value);
+  if (bad.length) return { ok: false, code: "bad", ips: bad };
+  if (!ipAllowed(ctx.requester, nets)) return { ok: false, code: "self", ips: [ctx.requester] };
+  const out = ctx.machines.filter((ip) => !ipAllowed(ip, nets));
+  if (out.length && !ctx.force) return { ok: false, code: "machines", ips: out };
+  return { ok: true, value };
+}

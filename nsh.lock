@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "packages": [
+    {
+      "name": "nsh-extra",
+      "version": "0.7.1",
+      "source": "crates.io",
+      "checksum": "sha256-40bc806c5aa90e23f58fb1974cc8de2b65975ce287b1187a407212eacf04c008",
+      "dir": "nsh-extra/0.7.1",
+      "module": "nsh-extra"
+    },
+    {
+      "name": "nsh-icon",
+      "version": "0.2.2",
+      "source": "crates.io",
+      "checksum": "sha256-638773b01e553407287797cc85f42a697ae9f86e5189746a784d18c5eaab37ac",
+      "dir": "nsh-icon/0.2.2",
+      "module": "nsh-icon"
+    },
+    {
+      "name": "nsh-icon-lucide",
+      "version": "0.2.1",
+      "source": "crates.io",
+      "checksum": "sha256-aa2647c3cd43f805a5290ea165148044690fa0450bd956af96da9f26faecd8f5",
+      "dir": "nsh-icon-lucide/0.2.1",
+      "module": "nsh-icon-lucide/native",
+      "exports": {
+        "nsh-icon-lucide": "tsx/index.ts"
+      },
+      "dependencies": [
+        "nsh-icon"
+      ]
+    },
+    {
+      "name": "nsmetry",
+      "version": "0.1.0",
+      "source": "crates.io",
+      "checksum": "sha256-af276faced021a9b34d191574b326a03ad5654808823edd9ed6a7506a5046dcd",
+      "dir": "nsmetry/0.1.0",
+      "module": "nsmetry/native",
+      "exports": {
+        "nsmetry": "src/index.ts"
+      }
+    }
+  ]
+}

@@ -1,15 +1,17 @@
 // Builds the prompt for an agent, runs Claude Code / Codex headless, parses the structured result.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { codexMessage } from "./codex-output";
+import { codexMessage, codexTurnError } from "./codex-output";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, readTail, recentJournal, signature,
+  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, precedents, readAll, MEMORY_KEEP, readIf, readTail, recentJournal, signature,
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
 import { claudeMcpConfig, codexMcpLaunch, mcpServers, usableMcp, withOAuth } from "../app/mcp-servers";
+import { claudeAuthArgs } from "./accounts";
 import { sharedSecrets } from "./secrets";
+import { GRADE_SPEC } from "../app/grading";
 
 export type Result = {
   status: "done" | "needs_decision" | "failed" | "delegated" | "waiting";
@@ -26,6 +28,10 @@ export type Result = {
   attachments?: string[];
   channels?: unknown[];
   followups?: { title: string; body?: string; agent?: string; priority?: string; repo?: string; requires?: string; host?: string }[];
+  /** The agent's self-grade of this run's work (see GRADE_SPEC); parse it with `parseGrades`. */
+  grades?: unknown;
+  /** PRs / MRs this run opened or updated: the size grade is measured from them. */
+  prs?: unknown;
 };
 
 export type RunLimits = {
@@ -72,9 +78,12 @@ const RESULT_SPEC = () => `Finish the work, then end your final reply with EXACT
   "lessons": ["durable lesson for your own memory (optional)"],
   "attachments": ["/abs/path/screenshot.png", "/abs/path/recording.mp4", "/abs/path/report.md"],   // optional: shown to the owner with the message; a long report goes as a .md file the owner opens in the chat, never as "see file"
   "channels": ["existing-slug", {"name": "New topic", "goal": "what it is for"}],   // see # Channels; [] when none fits
-  "followups": [{"title": "...", "body": "...", "agent": "<agent id>", "priority": "normal", "difficulty": "hard if it needs deep engineering/design work", "requires": "os:macos when it needs macOS/iOS/Xcode (os:windows for Windows); omit otherwise"}]
+  "followups": [{"title": "...", "body": "...", "agent": "<agent id>", "priority": "normal", "difficulty": "hard if it needs deep engineering/design work", "requires": "os:macos when it needs macOS/iOS/Xcode (os:windows for Windows); omit otherwise"}],
+  "grades": {"drift": "D: ...", "size": "C: ...", "risk": "B: ...", "proof": "C: ...", "calls": "D: ...", "fit": "right: ..."},   // see # Self-grade
+  "prs": ["https://github.com/o/r/pull/123"]   // every PR / MR this run opened or updated
 }
-Write summary, question and options in the owner's language (${L("English", "Simplified Chinese")} unless the owner writes otherwise), plain text, no emoji; keep identifiers, links and code as they are.
+${GRADE_SPEC}
+Write summary, question, options and the grades' evidence in the owner's language (${L("English", "Simplified Chinese")} unless the owner writes otherwise), plain text, no emoji; keep identifiers, links and code as they are.
 Only use needs_decision after doing all preparation that does not depend on the answer.
 Never sit idle waiting on something slow (GitHub Actions/CI, a release, a review, a deploy): if the next step needs it, return "waiting" with waiting_on, wait_minutes and wait_check. If the PR's workflow runs are held for "Approve and run" (gh run list shows status waiting / action_required, gh pr checks shows nothing), CI will never start by itself: return wait_kind "human" and say in waiting_on that the owner must approve the run, with the PR link. Once the PR this task exists for is merged, never return waiting for extra verification (screenshots, local renders, device checks): record it as a verification gap in the summary and return done.
 Before returning "waiting", do every part of the task that does not depend on the condition (other platforms, docs, tests, screenshots, the next PR): implement and let CI verify rather than wait for a host. Waiting on another PR to merge is not a reason to stop: build on its branch or merge it locally, and note the dependency.
@@ -97,7 +106,7 @@ ${readTail(P("agents", agent, "memory.md"), 8000) || "(empty)"}
 ${readAll(P("policies"))}
 
 # Owner profile & principles
-${readAll(P("memory"))}
+${readAll(P("memory"), 12000, MEMORY_KEEP)}
 
 # Owner decision precedents (follow them; never re-ask a decided question)
 ${precedents(25) || "(none yet)"}
@@ -123,7 +132,7 @@ ${deadlinePrompt(limits)}
 ${channelPrompt()}
 
 # Task ${meta.id}: ${meta.title}
-Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.agent-hub/work — never inside the hub folder ${ROOT}, which syncs to the cloud   Host capabilities: ${meta.host_caps ?? ""}
+Working directory: ${workspaceNote(meta, ROOT)}   Host capabilities: ${meta.host_caps ?? ""}
 Priority: ${meta.priority}   Source: ${meta.source}
 
 ${body}
@@ -174,7 +183,7 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false, mcpArgs:
     // non-interactive: workspace-write sandbox with network, never ask for approval
     const cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write",
       "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true"];
-    for (const dir of codexWritableDirs(homedir(), cfg.resources?.work_dirs)) cmd.push("--add-dir", dir);
+    for (const dir of codexWritableDirs(homedir(), [...(cfg.resources?.work_dirs ?? []), ...(cfg.resources?.workspace_dir ? [cfg.resources.workspace_dir] : [])])) cmd.push("--add-dir", dir);
     if (c.model) cmd.push("-m", c.model);
     cmd.push(...mcpArgs);
     return [...cmd, "-"];
@@ -189,6 +198,16 @@ export function startModel(cli: string, cmd: string[], codexHome?: string): stri
   if (i >= 0 && cmd[i + 1]) return cmd[i + 1];
   if (cli === "codex") return readIf(join(codexHome, "config.toml"), 100000).match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1];
   return undefined;
+}
+
+/** Where the task runs and where scratch goes. Every Noop working copy lives under ~/.noop/work so the owner can
+ *  delete them all at once; the owner's own checkouts (and the folders around them) are never written to. */
+export function workspaceNote(meta: Record<string, string | undefined>, root = ROOT): string {
+  const ws = meta.workspace || root;
+  const repoLine = meta.repo && meta.workspace
+    ? `${ws} — your own git worktree of ${meta.repo}, made by Noop for this task (detached at the remote's default branch: fetch and create your branch here). ${meta.repo} is the owner's checkout: never switch its branch, write files in it, or create worktrees or folders inside it or next to it (no \`../<repo>-x\`).`
+    : ws;
+  return `${repoLine}   Scratch space (more checkouts, worktrees, logs, build targets): ~/.noop/work only — never the owner's source folders, never inside the hub folder ${root}, which syncs to the cloud. Name anything you add there after the task (e.g. ~/.noop/work/<repo>-${meta.id}, ~/.noop/work/${meta.id}-logs); if you need a second worktree, \`git worktree add ~/.noop/work/<repo>-${meta.id}-2\`. Remove extra worktrees (\`git worktree remove\`) once their branch is pushed and you return done; Noop removes the task's own workspace after the task closes.`;
 }
 
 /** Running agent processes by task id (so the owner can cancel one). */
@@ -249,7 +268,7 @@ export async function mcpLaunch(cli: string, cfg: Cfg, secrets?: Record<string, 
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
   extraEnv: Record<string, string> = {}, retryEmpty = true): Promise<string> {
   const mcp = await mcpLaunch(cli, cfg).catch(() => ({ args: [] as string[], env: {} as Record<string, string>, file: undefined }));
-  const cmd = cliCommand(cli, cfg, gateOverride, mcp.args);
+  const cmd = cliCommand(cli, cfg, gateOverride, [...mcp.args, ...(cli === "claude" ? claudeAuthArgs(extraEnv) : [])]);
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
   const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
@@ -270,7 +289,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const json = cmd.includes("stream-json") || codexJson;
   const act = { at: Date.now(), step: undefined as string | undefined, steps: 0, model: startModel(cli, cmd, extraEnv.CODEX_HOME) };
   const inFlight = new Map<string, string>(); // tool_use id → tool name, until its result comes back
-  let resultText: string | undefined, assistantText = "";
+  let resultText: string | undefined, assistantText = "", turnErrors = "", seenTurnError = "";
   const touch = () => {
     act.at = Date.now();
     if (tid) agentActivity.set(tid, { at: new Date(act.at).toISOString(), step: act.step, steps: act.steps, model: act.model });
@@ -282,6 +301,10 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
     if (codexJson) {
       const text = codexMessage(e);
       if (text !== undefined) assistantText += text + "\n\n";
+      // quota/auth walls arrive here, not as assistant text. Keep them out of assistantText so an
+      // empty run can still be retried, but put them in the text classify reads.
+      const failure = codexTurnError(e);
+      if (failure && failure !== seenTurnError) { seenTurnError = failure; turnErrors += `ERROR: ${failure}\n`; }
       return;
     }
     if (e.type === "system" && e.subtype === "init" && e.model) act.model = String(e.model);
@@ -340,7 +363,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   if (tid) agentActivity.delete(tid);
   const logged = json ? raw.split("\n").map(stripImages).join("\n") : raw;
   writeFileSync(logFile, `$ ${cmd.join(" ")}\n(exit ${code})\n\n${logged}\n\n[stderr]\n${err}`);
-  const out = json ? (resultText ?? assistantText) : raw;
+  const out = json ? `${resultText ?? assistantText}${turnErrors}` : raw;
   if (timedOut) return `${out}${RUN_LIMIT} hit the ${Math.round(timeoutMs / 60_000)}-minute work limit${act.step ? `; last step: ${act.step}` : ""}`;
   if (stalled) return `${out}${STALLED} no output for ${Math.round(stallMs / 60_000)} minutes${act.step ? `; last step: ${act.step}` : ""}`;
   // A provider occasionally answers with an empty completion (no text, no tool call, exit 0) and Claude Code's own
@@ -394,7 +417,7 @@ function parsed(text: string): Result | null {
   } catch { return null; }
 }
 
-/** Models occasionally put a literal line break, a bare `"` or a lone backslash inside a JSON string. Keep the text, make the block parseable.
+/** Models occasionally put a literal line break, a bare `"` or a lone backslash inside a JSON string, or a stray word between members. Keep the text, make the block parseable.
  * A `"` inside a string is a stray quote unless the next non-space character can follow a value (`:`, `,`, `}`, `]`, end). */
 function repairJson(json: string): string {
   let out = "", inString = false, escaped = false;
@@ -413,6 +436,14 @@ function repairJson(json: string): string {
       const next = json[j] ?? "";
       if (next === "" || next === "," || next === ":" || next === "}" || next === "]") { inString = false; out += c; }
       else out += '\\"';
+      continue;
+    }
+    if (!inString && /[A-Za-z_]/.test(c)) {
+      // a stray bare word between members (codex wrote `"…",\n tml "channels"` in T-2208) is noise: drop it,
+      // keeping the JSON literals and a number's exponent
+      const word = /^[A-Za-z_]+/.exec(json.slice(i))![0];
+      if (/^(true|false|null)$/.test(word) || /[\d.]$/.test(out)) out += word;
+      i += word.length - 1;
       continue;
     }
     if (inString && c === "\n") out += "\\n";

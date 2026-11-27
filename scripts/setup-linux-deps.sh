@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Avoid package-index refreshes and compiler downloads on warm release builds.
+# The app links a Rust nshm, so every target builds Rust here: QuickJS needs clang, WebAssembly objects llvm-ar,
+# and the Linux host GTK 4 and GStreamer. Installed packages are skipped, so warm runners refresh nothing.
 set -euo pipefail
-packages=()
-if [[ "${CACHE_HIT:-}" != true && ( "${PREBUILT:-}" != true || "$TARGET" == linux ) ]]; then
-  packages+=(clang llvm libclang-dev pkg-config)
-  if [[ "$TARGET" == linux ]]; then
-    packages+=(libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev)
-  fi
+packages=(clang llvm libclang-dev pkg-config)
+if [[ "$TARGET" == linux ]]; then
+  packages+=(libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev)
 fi
 if [[ "$TARGET" == linux ]]; then
   packages+=(libgtk-4-1 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 xvfb xauth)

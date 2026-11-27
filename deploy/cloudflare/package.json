@@ -1,0 +1,26 @@
+{
+  "name": "noop-cloudflare",
+  "private": true,
+  "description": "Deploy your own Noop Worker to Cloudflare with one click.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  },
+  "cloudflare": {
+    "label": "Noop",
+    "products": ["Workers", "Durable Objects"],
+    "categories": [],
+    "bindings": {
+      "HUB_TOKEN": {
+        "description": "The machine token your computers use to connect. Use a long random string, for example the output of `openssl rand -hex 32`, and keep it: the primary machine needs it."
+      },
+      "HUB_OWNER_EMAIL": {
+        "description": "Your email address. Only this address can sign in."
+      }
+    }
+  }
+}

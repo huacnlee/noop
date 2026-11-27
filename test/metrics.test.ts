@@ -1,7 +1,7 @@
 // Fleet metrics: `blocked/` holds tasks parked on the owner's decision, not agent failures.
 // Counting them as failures understates success and corrupts the numbers the architect uses to graduate an agent.
 import { afterAll, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -120,6 +120,15 @@ test("metrics say which code produced them, and when that code is behind or dirt
   const s = M.codeState(dir)!;
   expect(s.behind_origin).toBe(1);
   expect(s.dirty_files).toBe(1);
+  // "0 commits behind" measured against a ref fetched days ago must not read as current
+  expect(s.origin_fetched_minutes).toBeGreaterThanOrEqual(0);
+  expect(s.origin_fetched_minutes).toBeLessThan(5);
+  const fetched = join(dir, ".git", "FETCH_HEAD");
+  writeFileSync(fetched, "ref: refs/heads/main\n");
+  const threeDaysAgo = new Date(Date.now() - 3 * 86400e3);
+  utimesSync(fetched, threeDaysAgo, threeDaysAgo);
+  expect(M.refAgeMinutes(dir)).toBeGreaterThan(4000);
+  rmSync(fetched);
   expect(M.codeState(join(dir, "nope"))).toBeNull(); // no git checkout → null, not a false "clean"
   rmSync(dir, { recursive: true, force: true });
 }, 120_000); // ~13 synchronous git spawns: 3 read the real checkout, 10 build the throwaway repo. Each runs 0.2-1 s on a

@@ -5,14 +5,15 @@
 import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { type Cfg, L, hostName, journal, HOME_DIR } from "./core";
+import { type Cfg, L, hm, hostName, journal, HOME_DIR } from "./core";
 import { notify } from "./notify";
+import { cachedSecrets } from "./secrets";
 
 const HOME = join(HOME_DIR, "accounts");
 const STATE = join(HOME, "state.json");
 
-export type Account = { cli: string; name: string; dir: string; default?: boolean };
-type AState = { cooldown_until?: string; needs_login?: boolean; last_error?: string; login_id?: string; token?: string; cred?: number; told?: string };
+export type Account = { cli: string; name: string; dir: string; default?: boolean; auth?: "oauth" | "api" };
+type AState = { cooldown_until?: string; needs_login?: boolean; last_error?: string; login_id?: string; token?: string; cred?: number; told?: string; login_fails?: number; login_tried?: number };
 type State = { accounts: Record<string, AState>; seq: number; alerted?: Record<string, string> };
 
 const load = (): State => (existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : { accounts: {}, seq: 0 });
@@ -23,7 +24,41 @@ const key = (a: Account) => `${a.cli}-${a.name}`;
 export function accounts(cfg: Cfg, cli: string): Account[] {
   const list: Account[] = (cfg.accounts ?? []).filter((a: Account) => a.cli === cli)
     .map((a: Account) => ({ ...a, dir: (a.dir ?? join(HOME, `${a.cli}-${a.name}`)).replace(/^~/, homedir()) }));
-  return list.length ? list : [{ cli, name: "default", dir: "", default: true }];
+  if (list.length) return list;
+  const primary: Account = { cli, name: "default", dir: "", default: true };
+  // An explicitly parked key is a fallback, never the subscription's replacement.
+  const api = cli === "claude" ? claudeApiEnv() : {};
+  if (api.ANTHROPIC_API_KEY || api.ANTHROPIC_AUTH_TOKEN) return [
+    { ...primary, auth: "oauth" }, { ...primary, name: "api", auth: "api" },
+  ];
+  return [primary];
+}
+
+/** Claude API credentials, in order: the team's shared keys set once in Noop's Settings → Keys (every machine), then
+ *  this machine's ~/.claude/settings.json, where underscore-prefixed entries are the owner's parked fallback.
+ *  A shared key always comes with its own base URL (or none): a machine's gateway URL never pairs with a shared key. */
+export const CLAUDE_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+export function claudeApiEnv(dir = join(homedir(), ".claude"), shared: Record<string, string> = cachedSecrets()): Record<string, string> {
+  if (shared.ANTHROPIC_API_KEY) return Object.fromEntries([["ANTHROPIC_API_KEY", shared.ANTHROPIC_API_KEY], ...(shared.ANTHROPIC_BASE_URL ? [["ANTHROPIC_BASE_URL", shared.ANTHROPIC_BASE_URL]] : [])]);
+  try {
+    const env = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))?.env ?? {};
+    return Object.fromEntries(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+      .map((key) => [key, env[key] || env[`_${key}`]])
+      .filter(([, value]) => typeof value === "string" && value.length));
+  } catch { return {}; }
+}
+
+/** The subscription login: a `claude setup-token` token shared in Settings → Keys (one login, every machine),
+ *  else the one this machine's assisted login saved. */
+export function claudeOAuthToken(a: Account, shared: Record<string, string> = cachedSecrets()): string | undefined {
+  return shared.CLAUDE_CODE_OAUTH_TOKEN || load().accounts[key(a)]?.token;
+}
+
+/** Override user-level API auth without rewriting settings or putting secrets in argv. */
+export function claudeAuthArgs(env: Record<string, string | undefined>): string[] {
+  return env.NOOP_CLAUDE_AUTH === "oauth" ? ["--settings", JSON.stringify({ apiKeyHelper: "", env: {
+    ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "",
+  } })] : [];
 }
 
 /** Claude Code can authenticate through an API gateway instead of an Anthropic OAuth login: the `env` block of
@@ -60,6 +95,7 @@ export function codexGatewayAuth(dir: string): string | null {
 }
 
 function usesGateway(a: Account): boolean {
+  if (a.auth) return a.auth === "api";
   const dir = a.default ? join(homedir(), a.cli === "claude" ? ".claude" : ".codex") : a.dir;
   if (a.cli === "claude") return !!gatewayAuth(dir);
   if (a.cli === "codex") return !!codexGatewayAuth(dir);
@@ -70,7 +106,25 @@ function usesGateway(a: Account): boolean {
 function credStamp(a: Account): number {
   const dir = a.default ? join(homedir(), a.cli === "claude" ? ".claude" : ".codex") : a.dir;
   const f = join(dir, a.cli === "claude" ? ".credentials.json" : "auth.json");
-  try { return statSync(f).mtimeMs; } catch { return 0; }
+  try { return statSync(f).mtimeMs; } catch {}
+  // On macOS Claude Code keeps the default login in the Keychain, not .credentials.json: without this the stamp is
+  // always 0, a stale needs_login never clears after the owner logs in again, and the fleet stays paused for good.
+  if (a.cli === "claude" && a.default && process.platform === "darwin") return keychainStamp("Claude Code-credentials");
+  return 0;
+}
+
+/** Modification time of a macOS Keychain generic password (no secret is read), 0 if missing. */
+function keychainStamp(service: string): number {
+  try {
+    const r = Bun.spawnSync(["security", "find-generic-password", "-s", service], { stdout: "pipe", stderr: "pipe" });
+    return r.exitCode === 0 ? parseKeychainMdat(r.stdout.toString()) : 0;
+  } catch { return 0; }
+}
+
+/** `"mdat"<timedate>=0x… "20261126020914Z\000"` → epoch ms, 0 if absent. */
+export function parseKeychainMdat(out: string): number {
+  const m = out.match(/"mdat"<timedate>=\S*\s+"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z/);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0;
 }
 
 export function usable(a: Account): boolean {
@@ -82,7 +136,7 @@ export function usable(a: Account): boolean {
     save(all);
     return true;
   }
-  if ((s.needs_login || s.cooldown_until) && s.cred && credStamp(a) > s.cred) {
+  if ((s.needs_login || s.cooldown_until) && s.cred !== undefined && credStamp(a) > s.cred) {
     // the owner logged in again (maybe another account): try it right away instead of waiting out the old limit
     all.accounts[key(a)] = { ...s, needs_login: false, cooldown_until: undefined, cred: undefined, told: undefined };
     save(all);
@@ -112,12 +166,17 @@ export function failoverAccount(cfg: Cfg, failed: Account | null, wanted: string
 
 export function accountEnv(a: Account): Record<string, string> {
   const env: Record<string, string> = {};
+  if (a.auth === "oauth") Object.assign(env, { NOOP_CLAUDE_AUTH: "oauth", ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "" });
+  if (a.auth === "api") Object.assign(env, claudeApiEnv(a.default ? undefined : a.dir), { NOOP_CLAUDE_AUTH: "api", CLAUDE_CODE_OAUTH_TOKEN: "" });
+  // setup-token is saved in Noop's account state, including the default account.
+  if (a.cli === "claude" && a.auth !== "api") {
+    const tok = claudeOAuthToken(a);
+    if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
+  }
   if (a.default) return env;
   mkdirSync(a.dir, { recursive: true });
   if (a.cli === "claude") {
     env.CLAUDE_CONFIG_DIR = a.dir;
-    const tok = load().accounts[key(a)]?.token;
-    if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
   }
   if (a.cli === "codex") env.CODEX_HOME = a.dir;
   return env;
@@ -127,13 +186,25 @@ export function accountEnv(a: Account): Record<string, string> {
 // "try again at/in <time>" is a quota reset hint. A vague "try again in a moment" is what a gateway 5xx says
 // ("a server-side issue, usually temporary"): counting it as quota put the account on a one-hour cooldown
 // and moved all its work to the other CLI over a blip.
-const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|no credits remaining|insufficient credits|purchase more credits|\b402\b|add credits to continue|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)(?! (?:a|a few|some) (?:moments?|bit|while|seconds?|minutes?)\b)/i;
-const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth (token|session) (has )?expired|login required|unauthorized|codex login/i;
+const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|no credits remaining|insufficient credits|purchase more credits|out of credits|\b402\b|add credits to continue|payment is past due|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)(?! (?:a|a few|some) (?:moments?|bit|while|seconds?|minutes?)\b)/i;
+// "login reached its time limit" is Claude Code's wording for a subscription login that expired and cannot be renewed.
+// Unrecognised, it is not an auth failure: the account is never parked and chat never fails over to the next account.
+const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth (token|session) (has )?expired|login reached its time limit|login required|unauthorized|codex login/i;
 
 export type Failure = "quota" | "auth" | null;
 
+/** Anthropic's edge refusing this machine's egress IP: a VPN, proxy or hosting network, or an unsupported
+ *  region. It is not an account problem — "signing in again won't change this" — so it must never park the
+ *  account behind a login link, and the medic cannot repair it either: only the owner's network can. */
+const NETWORK = /blocked before it reached [^.\n]*API|network this request came from isn't allowed|supported-countries/i;
+
+export function networkBlocked(output: string): boolean {
+  return NETWORK.test(output.slice(-4000));
+}
+
 export function classify(output: string): Failure {
   const tail = output.slice(-4000);
+  if (NETWORK.test(tail)) return null; // the same network carries every account: no login, cooldown or failover helps
   if (AUTH.test(tail)) return "auth";
   if (QUOTA.test(tail)) return "quota";
   return null;
@@ -169,10 +240,11 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
   const gateway = kind === "auth" && usesGateway(a);
   if (kind === "quota") {
     st.cooldown_until = quotaCooldownUntil(st.cooldown_until, output);
-    journal(host, `${key(a)} hit usage limit → cooldown until ${st.cooldown_until.slice(11, 16)}Z`);
+    journal(host, `${key(a)} hit usage limit → cooldown until ${hm(st.cooldown_until)}`);
     if (st.told !== st.cooldown_until) {
       st.told = st.cooldown_until;
-      const others = (cfg.clis?.preference ?? ["claude", "codex"]).filter((c: string) => c !== a.cli && Bun.which(c) && accounts(cfg, c).some(usable));
+      const same = accounts(cfg, a.cli).filter((other) => key(other) !== key(a) && usable(other)).map((other) => `${other.cli}/${other.name}`);
+      const others = [...same, ...(cfg.clis?.preference ?? ["claude", "codex"]).filter((c: string) => c !== a.cli && Bun.which(c) && accounts(cfg, c).some(usable))];
       const at = new Date(st.cooldown_until).toLocaleTimeString(L("en-US", "zh-CN"), { hour: "2-digit", minute: "2-digit" });
       void notify([L(`${a.cli === "claude" ? "Claude" : "Codex"} (${host}) is out of quota, back around ${at}.`, `${a.cli === "claude" ? "Claude" : "Codex"}（${host}）额度用完了，约 ${at} 恢复。`),
         others.length ? L(`Until then tasks go to ${others.join(", ")}.`, `这期间任务先交给 ${others.join("、")} 做。`) : L("No AI is available until then, tasks will queue.", "这期间没有可用的 AI，任务会排队等着。"),
@@ -203,6 +275,20 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
   await alertIfAllExhausted(cfg);
 }
 
+/** The model API refused this machine's network. Retrying is worth it (a proxy picks a different exit next
+ *  time) but nothing on this machine can fix it, so tell the owner at most once every 6 hours instead of
+ *  waking the medic on every run. */
+export async function reportNetworkBlock(cfg: Cfg, host: string) {
+  const s = load();
+  const last = s.alerted?.network ? Date.parse(s.alerted.network) : 0;
+  if (Date.now() - last < 6 * 3600_000) return;
+  (s.alerted ??= {}).network = new Date().toISOString();
+  save(s);
+  journal(host, `🌐 the model API refused this machine's network (VPN / proxy / unsupported region); runs keep retrying`);
+  await notify(L(`${host} cannot reach the model API: it refuses this machine's network (a VPN, proxy, or an unsupported region). Signing in again does not help — check the VPN or proxy on that machine and pick an exit in a supported country.`,
+    `${host} 连不上模型 API：对方拒绝了这台机器的网络（VPN、代理或不支持的地区）。重新登录没用——请检查那台机器上的 VPN/代理，换一个受支持地区的节点。`), cfg, { kind: "notice" });
+}
+
 async function alertIfAllExhausted(cfg: Cfg) {
   const clis: string[] = cfg.clis?.preference ?? ["claude", "codex"];
   const installed = clis.filter((c) => Bun.which(c));
@@ -230,12 +316,16 @@ function loginCommand(a: Account): { cmd: string[]; needsCode: boolean } {
   return { cmd: ["claude", "setup-token"], needsCode: true };
 }
 
-/** Wrap in `script` so TUIs think they have a terminal (headless box, no monitor). */
-function withPty(cmd: string[]): string[] {
-  const q = cmd.map((c) => `'${c}'`).join(" ");
-  if (process.platform === "linux" && Bun.which("script")) return ["script", "-qfec", q, "/dev/null"];
-  if (process.platform === "darwin") return ["script", "-q", "/dev/null", ...cmd];
-  return cmd;
+/** How to run a login command so it can print its link without a monitor.
+ * - codex `login --device-auth` prints plain text: run it as is. Wrapping it in BSD `script` on macOS broke it,
+ *   because Bun's stdin pipe is a socket and `script` exits 1 with "tcgetattr/ioctl: Operation not supported on socket".
+ * - claude `setup-token` is a TUI that prints nothing without a terminal: give it a real pseudo-terminal
+ *   (Bun's `terminal` spawn option) on macOS, `script` on Linux, the bare command elsewhere. */
+export function loginSpawn(cli: string, cmd: string[], platform: string = process.platform, hasScript = !!Bun.which("script")): { argv: string[]; pty: boolean } {
+  if (cli === "codex") return { argv: cmd, pty: false };
+  if (platform === "linux" && hasScript) return { argv: ["script", "-qfec", cmd.map((c) => `'${c}'`).join(" "), "/dev/null"], pty: false };
+  if (platform === "darwin") return { argv: cmd, pty: true };
+  return { argv: cmd, pty: false };
 }
 
 export async function startLogin(a: Account, cfg: Cfg) {
@@ -243,13 +333,15 @@ export async function startLogin(a: Account, cfg: Cfg) {
   if ([...pending.values()].some((p) => p.account === k)) return;
   const s = load();
   const id = `L-${String(++s.seq).padStart(4, "0")}`;
-  s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id };
+  s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id, login_tried: Date.now() };
   save(s);
   const { cmd, needsCode } = loginCommand(a);
-  const proc = Bun.spawn(withPty(cmd), {
-    stdin: "pipe", stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, ...accountEnv(a), BROWSER: "/bin/false", TERM: "xterm-256color", COLUMNS: "500" },
-  });
+  const { argv, pty } = loginSpawn(a.cli, [...cmd, ...claudeAuthArgs(accountEnv(a))]);
+  const env = { ...process.env, ...accountEnv(a), BROWSER: "/bin/false", TERM: "xterm-256color", COLUMNS: "500" };
+  const dec = new TextDecoder();
+  const proc = pty
+    ? Bun.spawn(argv, { env, terminal: { cols: 500, rows: 50, data: (_t, d) => void onData(dec.decode(d, { stream: true })) } })
+    : Bun.spawn(argv, { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   pending.set(id, { id, account: k, proc, started: Date.now() });
   let buf = "";
   let sent = false;
@@ -275,15 +367,19 @@ export async function startLogin(a: Account, cfg: Cfg) {
     const dec = new TextDecoder();
     for await (const c of stream) await onData(dec.decode(c));
   };
-  void Promise.all([pump(proc.stdout as ReadableStream), pump(proc.stderr as ReadableStream)]);
+  if (!pty) void Promise.all([pump(proc.stdout as ReadableStream), pump(proc.stderr as ReadableStream)]);
   proc.exited.then(async (code) => {
     pending.delete(id);
     const st = load();
     const ok = code === 0;
-    st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined };
+    const fails = nextLoginFails(st.accounts[k]?.login_fails ?? 0, ok);
+    st.accounts[k] = { ...st.accounts[k], needs_login: !ok, login_id: undefined, cooldown_until: undefined, login_fails: fails || undefined };
     save(st);
-    journal(host, ok ? `${k} logged in (${id})` : `${k} login ${id} failed (exit ${code})`);
-    await notify(ok ? L(`${k} logged in, the fleet continues`, `${k} 登录成功，fleet 继续运转`) : L(`${id} login did not finish (exit ${code}), a new link will follow`, `${id} 登录未完成（exit ${code}），稍后会再发新链接`), cfg);
+    const next = fails ? ` → next try in ${Math.round(loginBackoffMs(fails) / 60_000)}m` : "";
+    journal(host, ok ? `${k} logged in (${id})` : `${k} login ${id} failed (exit ${code})${next}`);
+    // The owner can act on a sent link or the first silent failure; repeating the same silent failure is noise.
+    if (ok || sent || fails === 1)
+      await notify(ok ? L(`${k} logged in, the fleet continues`, `${k} 登录成功，fleet 继续运转`) : sent ? L(`${id} login did not finish (exit ${code}), a new link will follow`, `${id} 登录未完成（exit ${code}），稍后会再发新链接`) : L(`${id} login for ${k} exited (code ${code}) without printing a link; retrying with backoff, run \`${a.cli} login\` on ${host} to fix it now`, `${id}：${k} 的登录命令没打出链接就退出了（exit ${code}），之后会逐步拉长重试间隔；可在 ${host} 上手动执行 \`${a.cli} login\` 立即修复`), cfg);
   });
   setTimeout(() => { if (pending.has(id)) proc.kill(); }, 30 * 60_000); // link expiry
 }
@@ -293,10 +389,23 @@ export const pendingLoginIds = () => new Set(pending.keys());
 export function submitLoginCode(id: string, code: string): boolean {
   const p = pending.get(id);
   if (!p) return false;
+  if (p.proc.terminal) { p.proc.terminal.write(code.trim() + "\r"); return true; }
   const stdin = p.proc.stdin as import("bun").FileSink;
   stdin.write(code.trim() + "\r");
   stdin.flush();
   return true;
+}
+
+/** Consecutive logins that did not finish. Both kinds back off: a command that dies before printing a link
+ * (L-0001…L-0019 overnight), and a link that expires unanswered — once the link could be sent, a fresh one every
+ * 30 minutes meant two owner notifications per half hour while nobody was at the machine (L-0009…L-0022 overnight). */
+export function nextLoginFails(prev: number, ok: boolean): number {
+  return ok ? 0 : prev + 1;
+}
+
+/** Retry delay after `fails` consecutive logins that did not finish: 30m, 1h, 2h … capped at 12h. */
+export function loginBackoffMs(fails: number): number {
+  return Math.min(30 * 60_000 * 2 ** Math.max(0, fails - 1), 12 * 3600_000);
 }
 
 /** Periodically retry logins for accounts still flagged (e.g. after an expired link). */
@@ -316,7 +425,9 @@ export async function retryLogins(cfg: Cfg) {
       continue;
     }
     // back off: a login that exits immediately would otherwise send a new link every tick
-    if (Date.now() - (lastLoginTry.get(key(a)) ?? 0) < 30 * 60_000) continue;
+    // persisted login_tried keeps the backoff across daemon restarts (self-updates restart it several times a day)
+    const tried = Math.max(lastLoginTry.get(key(a)) ?? 0, st.login_tried ?? 0);
+    if (Date.now() - tried < loginBackoffMs(st.login_fails ?? 0)) continue;
     lastLoginTry.set(key(a), Date.now());
     await startLogin(a, cfg);
   }

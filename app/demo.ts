@@ -38,6 +38,9 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
   const files = new Map<string, { content: string; updated: string }>();
   const docs = new Map<string, string>();
   let demoSecrets: { name: string; updated: string }[] = [];
+  const DEMO_IP = "203.0.113.7";
+  let demoAllowList: string[] = [];
+  const demoAllow = () => ({ entries: demoAllowList.map((value) => ({ value, mine: value === DEMO_IP || value === "203.0.113.0/24" })), on: demoAllowList.length > 0, ip: DEMO_IP, machines: [], pending: null });
   let settingsView: SettingsView;
 
   function emit(e: Omit<HubEvent, "id" | "ts"> & { ts?: string }): HubEvent {
@@ -68,8 +71,24 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
       t("T-0116", L("Fix the flaky login test", "修复不稳定的登录测试"), "dev", "done", 40, {
         request: L("The login test fails one run in ten on CI. Find out why and fix it.", "登录测试在 CI 上十次挂一次，查清原因并修好。"),
         runs: [{ ts: iso(40), host: "linux-box", cli: "claude", status: "done", summary: L("Fixed: the test raced the session cookie. PR #42 waits for it; 50 CI runs passed.", "修好了：测试和 session cookie 有竞争。PR #42 改为等待 cookie，CI 连跑 50 次全过。") }],
+        grade: { grades: "DDCDD", fit: "right", notes: [
+          L("Only the login test's wait changed, as asked.", "只改了登录测试的等待，正是要求的。"),
+          L("6 lines in one test helper.", "测试辅助函数里改了 6 行。"),
+          L("Test code only; a revert undoes it.", "只动测试代码，回滚即可撤销。"),
+          L("50 CI runs in a row passed.", "CI 连跑 50 次全过。"),
+          L("Obvious: a failing test.", "显而易见：测试挂了。"),
+          L("The smallest change that removes the race.", "消除竞争的最小改动。"),
+        ] },
       }),
-      t("T-0115", L("Compress the website images", "压缩网站图片"), "lead", "done", 180, { channel: "website" }),
+      t("T-0115", L("Compress the website images", "压缩网站图片"), "lead", "done", 180, { channel: "website",
+        grade: { grades: "BABCB", fit: "over", notes: [
+          L("Also added a build-time image pipeline nobody asked for.", "顺带加了一条没人要求的构建期图片流水线。"),
+          L("~210 lines across the build script and 3 pages.", "构建脚本和 3 个页面共约 210 行。"),
+          L("Every page's images now go through the new step.", "所有页面的图片都经过新步骤。"),
+          L("Built locally; the pages were not opened.", "本地构建通过，没打开页面看。"),
+          L("Picked WebP over AVIF without asking.", "没问就选了 WebP 而不是 AVIF。"),
+          L("Re-encoding the 12 large images would have been enough.", "其实重新压缩那 12 张大图就够了。"),
+        ] } }),
       t("T-0114", L("Summarise this week's issues", "汇总本周 issue"), "lead", "done", 60 * 26),
       t("T-0113", L("Translate the docs into Chinese", "把文档翻译成中文"), "lead", "inbox", 3),
     );
@@ -135,8 +154,8 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
   function status(): Status & { hub: { online: boolean; seen: string } } {
     const active = tasks.filter((t) => t.state === "active");
     const host = (name: string, os: string, arch: string, clis: string[], primary: boolean) => ({
-      host: name, caps: [`os:${os}`, `arch:${arch}`, ...clis.map((c) => `cli:${c}`), ...(primary ? ["primary"] : [])], seen: iso(0),
-      busy: active.filter((t) => t.host === name).length, os, arch, clis,
+      host: name, caps: [`os:${os}`, `arch:${arch}`, ...clis.map((c) => `cli:${c}`)], primary, seen: iso(0),
+      busy: active.filter((t) => t.host === name).length, os, arch, clis, lan: primary ? "192.168.1.10" : "192.168.1.23",
       stats: { loadRatio: primary ? 0.31 : 0.58, cores: primary ? 12 : 16, memFreePct: 46, diskFreeGB: primary ? 412 : 180, diskFreePct: 58 },
       accounts: clis.map((cli) => ({ cli, name: "default", state: "ok" as const })),
       running: active.filter((t) => t.host === name).map((t) => ({ id: t.id, title: t.title, agent: t.agent, started: t.started, activity: t.activity })),
@@ -217,7 +236,7 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
         delete t.activity;
         const summary = resultOf(text, title);
         t.runs = [{ ts: iso(), host: "studio", cli: "claude", status: "done", summary }];
-        say({ from: "lead@studio", kind: "notice", ref: t.id, ...(owner.channel ? { channel: owner.channel } : {}), text: summary });
+        say({ from: "lead@studio", kind: "notice", ref: t.id, text: summary }); // results show in the main chat too
         pushStatus();
       });
     });
@@ -266,6 +285,14 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
         demoSecrets = demoSecrets.filter((k) => k.name !== name);
         if (b.value) demoSecrets = [...demoSecrets, { name, updated: new Date().toISOString() }].sort((x, y) => x.name.localeCompare(y.name));
         return ok({ secrets: demoSecrets });
+      }
+      // demo: the list applies at once (no primary to wait for); this device is 203.0.113.7
+      case "GET /api/allow-ips": return ok(demoAllow());
+      case "PUT /api/allow-ips": {
+        const list = [...new Set((Array.isArray(b.entries) ? b.entries : []).map((e) => String(e).trim()).filter(Boolean))];
+        if (list.length && !list.some((e) => e === DEMO_IP || e === "203.0.113.0/24")) return { status: 400, data: { error: `这台设备的 IP ${DEMO_IP} 将不在名单里，保存后你会被挡在外面。`, code: "self", ips: [DEMO_IP] } };
+        demoAllowList = list;
+        return ok(demoAllow());
       }
       case "PUT /api/settings": {
         const deep = (a: Record<string, unknown>, c: Record<string, unknown>): Record<string, unknown> => {

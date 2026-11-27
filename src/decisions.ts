@@ -1,7 +1,7 @@
 // Decisions: agent asks → AI judge (owner's precedents & principles) → only unprecedented taste calls reach the owner.
 import { existsSync, unlinkSync, appendFileSync, writeFileSync } from "node:fs";
 import {
-  type Cfg, L, P, agentName, journal, list, newTask, nextId, now, precedents, readAll, readDoc, readTail, today, writeDoc,
+  type Cfg, L, P, agentName, journal, list, newTask, nextId, now, precedents, readAll, MEMORY_KEEP, readDoc, readTail, today, writeDoc,
 } from "./core";
 import { notify } from "./notify";
 import { ask, type Result } from "./runner";
@@ -31,18 +31,42 @@ function supersedeOlderMenus(newTaskId: string, keep: string) {
   }
 }
 
+/** The same question text across runs differs only in spacing or the final mark ("…改哪几项？" / "…改哪几项?"). */
+const questionKey = (s?: string) => (s ?? "").replace(/\s+/g, "").replace(/[?？!！。.]+$/, "");
+
+/** Where a card's task came from, for cards opened before the card itself recorded it (D-0201, D-0001). */
+const taskSource = (task?: string) => {
+  if (!task) return "";
+  for (const state of ["inbox", "active", "waiting", "blocked", "proposed", "done", "rejected"]) {
+    const p = P("tasks", state, `${task}.md`);
+    if (existsSync(p)) return readDoc(p).meta.source ?? "";
+  }
+  return "";
+};
+
 export function openDecision(task: Record<string, string>, res: Result, host: string): string {
   const opts = res.options?.length ? res.options : ["A: approve", "B: reject"];
+  const open = list(P("decisions", "open")).map((p) => readDoc(p).meta);
   // One task, one card. A task that asks again (a resumed run, a re-plan, a judge send-back) used to open a
   // second card for the same question: T-0008 left both D-0008 and D-0007 open within ten minutes, and the
   // owner's list grew a duplicate nobody could tell apart from the real one. Refresh the open card instead.
-  const prior = list(P("decisions", "open")).map((p) => readDoc(p).meta).find((m) => m.task && m.task === task.id);
+  const prior = open.find((m) => m.task && m.task === task.id)
+    // One question, one card — from the same routine. A weekly routine runs again long before the owner answers,
+    // so its standing question comes from a new task each cycle and the per-task rule above never fires:
+    // focus-check left D-0201 (2026-11-16) and D-0212 (2026-11-23) open with identical text, and uptime-watch left
+    // D-0001 and D-0004. Refresh that card and list both runs, so one answer resumes both. The routine source must
+    // match: two one-off tasks that both ask a generic "Merge?" about different work still get a card each.
+    ?? (task.kind || !(task.source ?? "").startsWith("routine:") ? undefined : open.find((m) =>
+      !m.kind && m.agent === task.agent && questionKey(m.question) !== "" && questionKey(m.question) === questionKey(res.question)
+      && (m.source || taskSource(m.task)) === task.source));
   const id = prior?.id ?? nextId("D", P("decisions"));
   // A menu asks from a new idle task each round, so the per-task refresh above never fires: on 2026-11-19 five
   // menu cards (D-0003…D-0007) sat open at once, all asking "what next?", with five blocked tasks behind them.
   if (task.kind === "menu") supersedeOlderMenus(task.id, id);
+  const tasks = prior ? [...new Set([...cardTasks(prior), task.id])] : [];
   writeDoc(P("decisions", "open", `${id}.md`), {
-    id, task: task.id, agent: task.agent, host, created: prior?.created ?? now(),
+    id, task: task.id, tasks: tasks.length > 1 ? tasks.join(",") : undefined, agent: task.agent, host,
+    created: prior?.created ?? now(), source: task.source,
     question: res.question ?? "", recommendation: res.recommendation ?? "", options: opts.join(" | "),
     attachments: (res.attachments ?? []).join(" | ") || undefined,
     kind: task.kind === "menu" ? "menu" : undefined,
@@ -64,7 +88,7 @@ Decide one of:
 Be conservative: when in doubt, "hold". Never decide anything involving money, credentials, production data deletion, or messages committing the owner personally.
 
 # Owner principles & profile
-${readAll(P("memory"))}
+${readAll(P("memory"), 12000, MEMORY_KEEP)}
 
 # Fleet policy
 ${readAll(P("policies"))}

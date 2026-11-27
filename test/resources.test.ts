@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allowedParallel, busyShare, canRunHeavy, cleanupLine, diskAlertDue, pressureOf, staleDerivedData } from "../src/resources";
@@ -85,4 +85,58 @@ test("cleanupLine stays silent when a pass freed nothing", () => {
   expect(cleanupLine(0, [], 10)).toBeNull();
   expect(cleanupLine(80e6, [], 10)).toBeNull(); // noise floor
   expect(cleanupLine(2.5e9, ["rust incremental caches: 2.5GB"], 43)).toBe("🧹 disk cleanup freed 2.5GB → 43GB free (rust incremental caches: 2.5GB)");
+});
+
+test("taskIdsInName finds the task a scratch dir was made for", () => {
+  const { taskIdsInName } = require("../src/resources");
+  expect(taskIdsInName("t10829-prof")).toEqual(["T-10829"]);
+  expect(taskIdsInName("gf-10648")).toEqual(["T-10648"]);
+  expect(taskIdsInName("nsh-T-H0057")).toEqual(["T-H0057"]);
+  expect(taskIdsInName("allsum-nsh-T10105")).toEqual(["T-10105"]);
+  expect(taskIdsInName("noop")).toEqual([]);
+  expect(taskIdsInName("gf178")).toEqual([]); // a PR number, not a task id
+});
+
+test("judgeScratch keeps open-task, busy, recent and unpushed dirs and removes the rest", async () => {
+  const { judgeScratch } = require("../src/resources");
+  const base = { open: new Set(["T-10866"]), busy: new Set<string>(), minIdleDays: 7, closedIdleDays: 1, hasWork: async () => false };
+  expect(await judgeScratch("/w/noop-T-10866", { ...base, idleDays: 30 })).toBe("keep-open-task");
+  expect(await judgeScratch("/w/nsh", { ...base, busy: new Set(["/w/nsh/sub"]), idleDays: 30 })).toBe("keep-busy");
+  expect(await judgeScratch("/w/t10500-x", { ...base, idleDays: 0.5 })).toBe("keep-recent");
+  expect(await judgeScratch("/w/t10500-x", { ...base, idleDays: 2 })).toBe("remove");
+  expect(await judgeScratch("/w/nsh", { ...base, idleDays: 2 })).toBe("keep-recent"); // shared checkout idles longer
+  expect(await judgeScratch("/w/nsh", { ...base, idleDays: 8 })).toBe("remove");
+  expect(await judgeScratch("/w/t10500-x", { ...base, idleDays: 9, hasWork: async () => true })).toBe("keep-work");
+});
+
+test("reapScratch only removes git checkouts: plain dirs and loose files hold work nothing else has", async () => {
+  const { reapScratch } = require("../src/resources");
+  const { execSync } = require("node:child_process");
+  const root = mkdtempSync(join(tmpdir(), "noop-scratch-"));
+  const git = (cwd: string, cmd: string) => execSync(`git -c user.email=t@t -c user.name=t ${cmd}`, { cwd, stdio: "ignore" });
+  const old = new Date(Date.now() - 30 * 86400e3);
+  const age = (...ps: string[]) => ps.forEach((p) => utimesSync(p, old, old));
+  try {
+    git(root, "init -q --bare origin.git");
+    git(root, "clone -q origin.git t10500-clone");
+    git(join(root, "t10500-clone"), "commit -q --allow-empty -m x");
+    git(join(root, "t10500-clone"), "push -q origin HEAD");
+    const clone = join(root, "t10500-clone");
+    age(join(clone, ".git", "index"), join(clone, ".git", "HEAD"), join(clone, ".git"), clone);
+    mkdirSync(join(root, "t10501-notes"));
+    writeFileSync(join(root, "t10501-notes", "credentials.json"), "{}");
+    age(join(root, "t10501-notes", "credentials.json"), join(root, "t10501-notes"));
+    mkdirSync(join(root, "t10502-wrap"));
+    git(join(root, "t10502-wrap"), "clone -q ../origin.git repo");
+    writeFileSync(join(root, "t10502-wrap", "repo", "edit.txt"), "uncommitted");
+    age(join(root, "t10502-wrap"));
+    writeFileSync(join(root, "notes.txt"), "x");
+    age(join(root, "notes.txt"), join(root, "origin.git"));
+    const res = await reapScratch({ resources: { scratch_dirs: [root] } }, new Set(), true);
+    expect(res.removed).toBe(1);
+    expect(existsSync(clone)).toBe(false); // pushed and clean: safe to reclaim
+    expect(existsSync(join(root, "t10501-notes", "credentials.json"))).toBe(true);
+    expect(existsSync(join(root, "t10502-wrap", "repo", "edit.txt"))).toBe(true);
+    expect(existsSync(join(root, "notes.txt"))).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

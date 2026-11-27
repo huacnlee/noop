@@ -2,7 +2,8 @@ import { describe, expect, open, test } from "nsh/test";
 import { URL as ParsedURL } from "url";
 
 const URL = "http://hub.test:8787";
-const STORAGE = { "hub.url": URL, "hub.token": "tok" };
+// most tests start with the Channels section open; the fold tests clear "hub.channelsOpen"
+const STORAGE = { "hub.url": URL, "hub.token": "tok", "hub.channelsOpen": "1" };
 const ts = (min: number) => new Date(Date.now() - (60 - min) * 60000).toISOString();
 
 const events = [
@@ -25,9 +26,9 @@ const status = {
   decisions: [{ id: "D-0001", kind: "decision", question: "要不要升级依赖？", held: true }],
   recent: [{ id: "T-0005", title: "修复登录页", agent: "dev", host: "linux-box", state: "done", finished: ts(30), updated: ts(30) }],
   hosts: [{
-    host: "linux-box", caps: ["os:linux", "arch:x64", "cli:claude"], seen: ts(59), busy: 1,
+    host: "linux-box", caps: ["os:linux", "arch:x64", "cli:claude"], primary: true, seen: ts(59), busy: 1,
     stats: { loadRatio: 0.42, cores: 8, memFreePct: 40, diskFreeGB: 120, diskFreePct: 60 },
-    os: "linux", arch: "x64", clis: ["claude"], accounts: [{ cli: "claude", name: "default", state: "ok" }],
+    os: "linux", arch: "x64", lan: "192.168.1.20", clis: ["claude"], accounts: [{ cli: "claude", name: "default", state: "ok" }],
     running: [{ id: "T-0007", title: "截图检查 gallery", agent: "dev", started: ts(50) }],
     recent: [{ id: "T-0005", title: "修复登录页", state: "done", finished: ts(30) }],
     rev: "c1cc0851234567890abcdef1234567890abcdef0", rev_url: "https://github.com/acme/noop/commit/c1cc0851234567890abcdef1234567890abcdef0",
@@ -414,7 +415,7 @@ describe("channel", () => {
         { ts: ts(5), host: "linux-box", cli: "codex", status: "done", summary: "已修复登录页布局，桌面验证通过" },
       ] } },
     }, width: 1200, height: 800, platform: "macos" });
-    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.press("text:T-0005 >> nth=0");
     await app.waitFor("id:task-talk");
     await app.waitFor("text:已修复登录页布局，桌面验证通过");
     expect(app.shows("text:请修复登录页在手机上的布局")).toBe(true);
@@ -463,8 +464,8 @@ describe("channel", () => {
       [`GET ${URL}/media/*`]: { body: "# Acceptance\n\nCopy works on every page." },
       [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0005", title: "修复登录页", agent: "dev", state: "done", created: ts(1), runs: [] } },
     } });
-    await app.waitFor("id:task-chip-T-0005 >> nth=0");
-    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.waitFor("text:T-0005 >> nth=0");
+    await app.press("text:T-0005 >> nth=0");
     await app.waitFor("id:task-talk");
     await app.type("id:task-composer", "草稿");
     await app.keyboard.press("a");
@@ -528,7 +529,7 @@ describe("channel", () => {
     await app.waitFor("text:主要结果在主会话");
     expect(app.shows("text:只在任务里说的话")).toBe(false);
     expect(app.shows("text:任务里的回复")).toBe(false);
-    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.press("text:T-0005 >> nth=0");
     await app.waitFor("text:很久以前的对话");
     expect(app.shows("text:只在任务里说的话")).toBe(true);
     expect(app.shows("text:任务里的回复")).toBe(true);
@@ -604,12 +605,13 @@ describe("channel", () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:opt-D-0001-B");
+    expect(app.shows("text:要不要升级依赖？")).toBe(true);
     await app.press("id:opt-D-0001-B");
+    // the sidebar's 待你决定 drops it the moment the answer is chosen, before it is even posted
+    expect(app.shows("text:要不要升级依赖？")).toBe(false);
     await app.waitUntil(() => posts.length === 1);
     expect(posts[0]).toMatchObject({ text: "D-0001 B" });
-    // the sidebar drops it at once, before the hub's status catches up
-    expect(app.shows("text:要不要升级依赖？")).toBe(true);
-    await app.waitUntil(() => !app.shows("text:要不要升级依赖？"));
+    expect(app.shows("text:要不要升级依赖？")).toBe(false);
   });
 
   test("a next-steps menu takes several items at once", async () => {
@@ -799,13 +801,17 @@ describe("channel", () => {
       { slug: "old-ops", name: "Old ops", goal: "retired", status: "archived", created: ts(-30000), last_activity: ts(-30000), stale: true, count: 0, items: [] },
     ];
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "noop.channels.since": ts(-10000) }, width: 1200, height: 800, platform: "macos",
+      storage: { "hub.url": URL, "hub.token": "tok", "noop.channels.since": ts(-10000) }, width: 1200, height: 800, platform: "macos",
       network: {
         ...hub([]),
         [`GET ${URL}/api/channels`]: { body: { channels: chans } },
         [`POST ${URL}/api/channels`]: (r: { body?: string | null }) => { posts.push(JSON.parse(r.body!)); return { body: { ok: true } }; },
       },
     });
+    // Channels start folded: only the open channel and ones with unread show until the heading opens the section
+    await app.waitFor("id:side-channels");
+    expect(app.shows("id:side-channel-omasend")).toBe(false);
+    await app.press("id:side-channels");
     await app.waitFor("id:side-channel-omamail");
     await app.waitFor("Quiet 7d");
     // archived channels are folded under one row until it is opened
@@ -831,6 +837,23 @@ describe("channel", () => {
     await app.press("id:channel-archive");
     await app.waitFor("id:channel-archived");
     expect(posts).toEqual([{ slug: "omamail", name: "Omamail 邮件", goal: "omamail 的 PR 与 issue，以及发布" }, { slug: "omamail", archived: true }]);
+  });
+
+  test("channels: the open section lists the most recently active few and folds the rest under More", async () => {
+    const chans = Array.from({ length: 12 }, (_, i) => ({ slug: `c${i}`, name: `C${i}`, goal: `goal ${i}`, status: "active", created: ts(-900), last_activity: ts(-i * 10), stale: false, count: 0, refs: [], items: [] }));
+    const app = await open("./App.tsx", {
+      storage: { "hub.url": URL, "hub.token": "tok", "noop.channels.since": ts(100) }, width: 1200, height: 800, platform: "macos",
+      network: { ...hub([]), [`GET ${URL}/api/channels`]: { body: { channels: chans } } },
+    });
+    await app.waitFor("id:side-channels");
+    expect(app.shows("id:side-channel-c0")).toBe(false);
+    await app.press("id:side-channels");
+    await app.waitFor("id:side-channel-c7");
+    expect(app.shows("id:side-channel-c8")).toBe(false);
+    await app.press("id:side-channels-more");
+    await app.waitFor("id:side-channel-c11");
+    await app.press("id:side-channels-more");
+    await app.waitUntil(() => !app.shows("id:side-channel-c11"));
   });
 
   test("a channel is its own room: messages sent there carry the channel, and its talk stays out of the main chat", async () => {
@@ -931,10 +954,14 @@ describe("channel", () => {
     await app.press("label:Load 42% · Disk 120 GB free · 1 running");
     await app.waitFor("id:rev-linux-box");
     expect(app.shows("c1cc085")).toBe(true);
+    await app.waitFor("id:lan-linux-box");
+    expect(app.shows("192.168.1.20")).toBe(true);
+    expect(app.count("id:primary-linux-box")).toBe(1); // marked on its page, not in the sidebar
     await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-version");
     await app.waitFor("id:version-linux-box");
+    await app.waitFor("id:primary-linux-box");
     app.onDialog((d) => (d.title === "Update all machines?" ? "Cancel" : null));
     await app.press("id:update-fleet");
     await app.waitUntil(() => app.dialogs().length === 1);
@@ -1085,7 +1112,7 @@ describe("images", () => {
     await app.waitFor("id:doc-side");
     await app.waitUntil(() => app.shows("text:Task findings"));
     // back on the channel, the task's report is not shown in the channel's reader
-    await app.press("Channel >> nth=0");
+    await app.press("label:Back to Channel");
     await app.waitUntil(() => app.shows("text:开始处理 T-0007，很快完成"));
     expect(app.shows("id:doc-reader")).toBe(false);
   });
@@ -1230,6 +1257,20 @@ describe("images", () => {
     expect(posts[0]).toMatchObject({ text: "看这个", attachments: ["/media/shot-1.png"] });
   });
 
+  test("a pasted Markdown or text file goes as a Markdown document", async () => {
+    const posts: { text: string; attachments?: string[] }[] = [];
+    const uploads: string[] = [];
+    const app = await open("./App.tsx", { ...desk, network: withUploads(posts, uploads) });
+    await app.waitFor("id:composer");
+    await app.paste("id:composer", { files: [here("fixtures/notes.txt")] });
+    await app.waitFor("id:pasted-doc");
+    expect(app.shows("label:notes.md")).toBe(true);
+    await app.type("id:composer", "读一下");
+    await app.submit("id:composer");
+    await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
+    expect(posts[0].attachments?.length).toBe(1);
+  });
+
   test("in a channel a pasted image sends there, and sending lands on the newest message", async () => {
     const chans = [{ slug: "nsh-i18n", name: "NSH i18n", goal: "NSH 多语言", status: "active", created: ts(-900), last_activity: ts(60), stale: false, count: 0, refs: [], items: [] }];
     const talk = Array.from({ length: 60 }, (_, i) => ({ id: `c${i}`, ts: ts(i), from: "lead@primary", kind: "notice", text: `Channel line ${i}\n${"Some longer content. ".repeat(6)}`, channel: "nsh-i18n" }));
@@ -1318,6 +1359,7 @@ describe("keyboard", () => {
     expect(app.shows("即将发送")).toBe(false);
     await app.press("id:recall-send");
     await app.waitUntil(() => app.value("id:composer") === "发错了");
+    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 }); // nothing is under way any more
     await app.wait(6000);
     expect(posts.length).toBe(0);
   });
@@ -1350,7 +1392,11 @@ describe("keyboard", () => {
     await app.waitFor("id:composer");
     await app.type("id:composer", "看一下日志");
     await app.submit("id:composer");
+    await app.waitFor("id:composer-sweep"); // a faint light circles the composer while the message can be recalled
+    await app.wait(2500);
+    expect(app.count("id:composer-sweep")).toBe(1); // still there after the first lap
     await app.waitUntil(() => posts.length === 1, { timeout: 8000 }); // sent after the 5 s undo window
+    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 }); // gone once it has left
     expect(posts[0]).toMatchObject({ text: "看一下日志" });
     expect(app.value("id:composer")).toBe("");
   });
@@ -1459,6 +1505,36 @@ describe("team settings", () => {
     await app.waitFor("text:5");
     await app.press("label:Back to Channel");
     await app.waitFor("id:composer");
+  });
+
+  test("sets a machine's task priority", async () => {
+    const puts: unknown[] = [];
+    let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2, hosts: [{ host: "mini", priority: 0, primary: true }, { host: "box", priority: 0 }] }, options: { clis: [], autonomy: [] } };
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: {
+        ...hub([]),
+        [`GET ${URL}/api/settings`]: () => ({ body: view }),
+        [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
+          const p = JSON.parse(r.body!);
+          puts.push(p);
+          view = { ...view, effective: { ...view.effective, hosts: [{ host: "mini", priority: p.fleet.host_priority.mini, primary: true }, { host: "box", priority: 0 }] } };
+          return { body: view };
+        },
+      },
+    });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-parallel");
+    await app.waitFor("text:Machine priority");
+    await app.waitFor("id:primary-mini"); // the primary is marked, the other machine is not
+    expect(app.count("id:primary-box")).toBe(0);
+    await app.press("id:priority-mini-inc");
+    await app.press("id:priority-mini-inc");
+    expect(puts).toEqual([]); // clicks stay a draft
+    await app.press("id:priority-save");
+    await app.waitUntil(() => puts.length === 1);
+    expect(puts).toEqual([{ fleet: { host_priority: { mini: 2 } } }]);
   });
 
   test("picks how long images are kept", async () => {
@@ -1677,20 +1753,26 @@ describe("voice input", () => {
     const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("label:Voice input");
     await app.type("id:composer", "提醒我：");
+    expect(app.count("id:composer-sweep")).toBe(0);
     await app.press("label:Voice input");
-    await app.waitUntil(() => app.speechRequests().length === 1);
-    expect(app.speechRequests()[0].lang).toBe("zh-CN");
+    await app.waitFor("id:composer-sweep");
+    const requests = (await app.fake("nsh-extra/speech", "requests", [])) as { lang: string }[];
+    expect(requests.length).toBe(1);
+    expect(requests[0].lang).toBe("zh-CN");
     await app.waitFor("label:Stop voice input");
     expect(app.shows("text:Listening…")).toBe(true);
 
     // interim results replace each other; the words land after what was typed
-    await app.hear("明天");
+    await app.fake("nsh-extra/speech", "hear", ["明天"]);
     expect(app.value("id:composer")).toBe("提醒我：明天");
-    await app.hear("明天上午开会");
+    await app.fake("nsh-extra/speech", "hear", ["明天上午开会"]);
     expect(app.value("id:composer")).toBe("提醒我：明天上午开会");
+    await app.wait(2000);
+    expect(app.count("id:composer-sweep")).toBe(1); // the light keeps circling while listening
 
     await app.press("label:Stop voice input");
     await app.waitFor("label:Voice input");
+    await app.waitUntil(() => app.count("id:composer-sweep") === 0, { timeout: 3000 });
     expect(app.value("id:composer")).toBe("提醒我：明天上午开会");
     expect(app.shows("id:dictating")).toBe(false);
     expect(posts).toEqual([]);
@@ -1699,16 +1781,28 @@ describe("voice input", () => {
   test("sending while listening stops it; a refused microphone is explained", async () => {
     const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
     await app.press("label:Voice input");
-    await app.hear("看一下日志");
+    await app.fake("nsh-extra/speech", "hear", ["看一下日志"]);
     expect(app.value("id:composer")).toBe("看一下日志");
     await app.press("id:send");
     await app.waitFor("label:Voice input");
     expect(app.value("id:composer")).toBe("");
 
     await app.press("label:Voice input");
-    await app.endSpeech("not-allowed");
+    await app.fake("nsh-extra/speech", "end", ["not-allowed"]);
     await app.waitFor("id:attach-note");
     expect(app.shows("text:/No microphone or speech recognition permission/")).toBe(true);
+    expect(app.shows("label:Stop voice input")).toBe(false);
+  });
+
+  test("in a browser, a refused microphone points to the browser settings", async () => {
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, network: hub([]), width: 1200, height: 800, platform: "web" });
+    await app.waitFor("label:Voice input");
+    await app.press("label:Voice input");
+    await app.waitFor("label:Stop voice input");
+    await app.fake("nsh-extra/speech", "end", ["not-allowed"]);
+    await app.waitFor("id:attach-note");
+    expect(app.shows("text:/Allow the microphone in your browser settings/")).toBe(true);
+    expect(app.shows("text:/System Settings/")).toBe(false);
     expect(app.shows("label:Stop voice input")).toBe(false);
   });
 
@@ -1720,7 +1814,7 @@ describe("voice input", () => {
     await app.waitFor("label:Stop voice input");
     expect(app.shows("id:dictate")).toBe(true);
     expect(app.shows("label:Voice input")).toBe(false);
-    await app.hear("部署一下");
+    await app.fake("nsh-extra/speech", "hear", ["部署一下"]);
     await app.press("label:Stop voice input");
     await app.waitFor("label:Voice input");
     expect(app.value("id:composer")).toBe("部署一下");
@@ -2182,27 +2276,93 @@ describe("commands", () => {
     expect(sent[0]).toEqual({ name: "GITHUB_TOKEN", value: "ghp_live_value" });
     await app.waitFor("id:secret-row-GITHUB_TOKEN");
     expect(app.shows("text:ghp_live_value")).toBe(false);
-    await app.press("label:Replace key GITHUB_TOKEN");
+    await app.press("id:secret-row-GITHUB_TOKEN"); // the whole row opens the editor
     expect(app.value("id:secret-value")).toBe("");
     await app.press("id:secret-delete");
     await app.waitUntil(() => sent.length === 2);
     expect(sent[1]).toEqual({ name: "GITHUB_TOKEN", value: null });
+    // Claude credentials live in their own tab, not under MCP
+    expect(app.count("id:claude-key-set-ANTHROPIC_API_KEY")).toBe(0);
+    await app.press("id:settings-tab-claude");
+    expect(app.count("id:secret-row-GITHUB_TOKEN")).toBe(0);
+    // an unset Claude credential: its Set button opens the editor under the variable's name, with nothing to delete yet
+    await app.press("id:claude-key-set-ANTHROPIC_API_KEY");
+    await app.waitFor("id:secret-editor");
+    await app.waitFor("text:Set API Key");
+    expect(app.count("id:secret-delete")).toBe(0);
+    await app.type("id:secret-value", "sk-ant-live");
+    await app.press("id:secret-save");
+    await app.waitUntil(() => sent.length === 3);
+    expect(sent[2]).toEqual({ name: "ANTHROPIC_API_KEY", value: "sk-ant-live" });
+    await app.waitUntil(() => app.count("id:claude-key-set-ANTHROPIC_API_KEY") === 0);
+    // once set, pressing anywhere on its row replaces it
+    await app.press("id:claude-key-ANTHROPIC_API_KEY");
+    await app.waitFor("text:Replace API Key");
+  });
+
+  test("settings edits the IP allow-list as a draft and saves it once", async () => {
+    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
+    const sent: any[] = [];
+    let live = ["203.0.113.7", "198.51.100.0/24"];
+    const view = () => ({ entries: live.map((value) => ({ value, mine: value === "203.0.113.7" })), on: true, ip: "203.0.113.7", machines: [], pending: null });
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+      ...server(posts, puts, updates),
+      [`GET ${URL}/api/allow-ips`]: () => ({ body: view() }),
+      [`PUT ${URL}/api/allow-ips`]: (r: { body?: string | null }) => {
+        const b = JSON.parse(r.body!); sent.push(b);
+        if (!b.entries.includes("203.0.113.7")) return { status: 400, body: { error: "would lock you out", code: "self", ips: ["203.0.113.7"] } };
+        live = b.entries;
+        return { body: view() };
+      },
+    } });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-account");
+    await app.waitFor("id:allow-row-198.51.100.0/24");
+    await app.waitFor("text:This device");
+    // nothing goes out until Save
+    await app.press("id:allow-remove-198.51.100.0/24");
+    await app.press("id:allow-add");
+    await app.waitFor("id:allow-editor");
+    await app.type("id:allow-entry", "not-an-ip");
+    await app.press("id:allow-confirm");
+    await app.waitFor("id:allow-entry-note");
+    await app.clear("id:allow-entry");
+    await app.type("id:allow-entry", "192.220.47.149");
+    await app.press("id:allow-confirm");
+    await app.waitFor("id:allow-row-192.220.47.149");
+    expect(sent.length).toBe(0);
+    await app.press("id:allow-save");
+    await app.waitUntil(() => sent.length === 1);
+    expect(sent[0]).toEqual({ entries: ["203.0.113.7", "192.220.47.149"], force: false });
+    await app.waitUntil(() => app.count("id:allow-row-198.51.100.0/24") === 0);
+    // removing this device's own entry is refused by the server, and the reason stays on screen
+    await app.press("id:allow-remove-203.0.113.7");
+    await app.press("id:allow-save");
+    await app.waitFor("id:allow-note");
+    expect(app.shows("text:would lock you out")).toBe(true);
   });
 });
 
 
 test("channels share per-message read state with main chat, and Menu can mark all as read", async () => {
-  const older = { id: "shared-old", ts: ts(-300), from: "agent", kind: "notice", text: "Shared channel result", ref: "T-0700" };
-  const later = Array.from({ length: 240 }, (_, i) => ({ id: `unread-${i}`, ts: ts(-290 + i), from: "agent", kind: "notice", text: `Other result ${i}` }));
+  const older = { id: "shared-old", ts: ts(59), from: "agent", kind: "notice", text: "Shared channel result", ref: "T-0700" };
   const c = { slug: "omamail", name: "Omamail", goal: "Mail quality", status: "active", created: ts(-900), last_activity: older.ts, stale: false, count: 1,
     items: [{ id: "T-0700", kind: "task", title: "Review mail", state: "done", updated: older.ts }] };
+  const later: unknown[] = [];
   const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "linux", network: {
-    ...hub([], [older, ...later]),
+    ...hub([]),
+    [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }),
     [`GET ${URL}/api/channels`]: { body: { channels: [c, { ...c, slug: "mail-perf", name: "Mail performance" }] } },
     [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0700", title: "Review mail", agent: "lead", state: "done", request: "Review mail", runs: [], steps: [], events: [older] } },
     [`GET ${URL}/api/channels/feed?*`]: { body: { events: [older, { id: "step", ts: ts(-299), from: "agent", kind: "notice", text: "Running cargo test", ref: "T-0700", thread: true }, { id: "ack", ts: ts(-298), from: "hub", kind: "notice", text: "收到 D-1", ref: "T-0700" }] } },
   } });
-  await app.waitFor("id:side-channel-unread-omamail");
+  // The main chat reads everything at or above its newest row on screen, so the result arrives while a machine page is open.
+  await app.waitFor("Channel");
+  await app.press("label:Load 42% · Disk 120 GB free · 1 running");
+  await app.waitFor("Machine linux-box");
+  later.push(older);
+  await app.waitFor("id:side-channel-unread-omamail", { timeout: 10000 });
   await app.waitFor("id:side-channel-unread-mail-perf");
   await app.press("id:side-channel-omamail");
   await app.waitFor("text:Shared channel result");
@@ -2214,10 +2374,36 @@ test("channels share per-message read state with main chat, and Menu can mark al
   });
   expect(app.shows("id:side-channel-unread-omamail")).toBe(false);
   expect(app.shows("id:side-channel-unread-mail-perf")).toBe(false);
+  // a main-chat result arriving while the channel is open stays unread, for Mark all as read to clear
+  later.push({ id: "main-new", ts: ts(59.5), from: "agent", kind: "notice", text: "Main chat result" });
   await app.press("id:user-menu");
+  await app.waitUntil(() => app.enabled("id:mark-all-read"), { timeout: 10000 });
   await app.press("id:mark-all-read");
   await app.waitUntil(() => { const raw = app.storage()[`hub.read:${URL}`]; return !!raw && !!JSON.parse(raw).through; });
   expect(app.shows("id:menu-unread-count")).toBe(false);
+});
+
+test("switching to a channel with as many rows reads its newest message, not the last view's rows", async () => {
+  // The list reports viewable rows by index; a channel with the same rows as the one before reports nothing new.
+  const room = (slug: string, name: string, at: string) => ({ slug, name, goal: name, status: "active", created: ts(-900), last_activity: at, stale: false, count: 1, refs: [], items: [] });
+  const a = { id: "room-a", ts: ts(40), from: "agent", kind: "notice", text: "Room A update", channel: "room-a" };
+  const b = { id: "room-b", ts: ts(50), from: "agent", kind: "notice", text: "Room B update", channel: "room-b" };
+  const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+    ...hub([], [a, b]),
+    [`GET ${URL}/api/channels`]: { body: { channels: [room("room-a", "Room A", a.ts), room("room-b", "Room B", b.ts)] } },
+    [`GET ${URL}/api/channels/feed?*`]: (r: { url: string }) => ({ body: { events: r.url.includes("room-a") ? [a] : [b] } }),
+  } });
+  const readIds = () => { const raw = app.storage()[`hub.read:${URL}`]; return raw ? (JSON.parse(raw).ids as string[]) : []; };
+  await app.waitFor("id:side-channel-unread-room-a");
+  await app.waitFor("id:side-channel-unread-room-b");
+  await app.press("id:side-channel-room-a");
+  await app.waitFor("text:Room A update");
+  await app.waitUntil(() => readIds().includes("room-a"), { timeout: 10000 });
+  await app.press("id:side-channel-room-b");
+  await app.waitFor("text:Room B update");
+  await app.waitUntil(() => readIds().includes("room-b"), { timeout: 10000 });
+  await app.waitUntil(() => !app.shows("id:side-channel-unread-room-b"));
+  expect(app.shows("id:unread-dot-room-b")).toBe(false);
 });
 
 describe("folding page heads", () => {

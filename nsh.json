@@ -1,0 +1,97 @@
+{
+  "name": "Noop",
+  "id": "dev.noop.app",
+  "version": "1.0.1",
+  "build": 1,
+  "entry": "app/App.tsx",
+  "features": [
+    "websocket"
+  ],
+  "updater": {
+    "url": "https://noop.allsum.io/api/updates/direct/latest.json",
+    "publicKey": "th7UtLhBOa73Bx2s+DZlmlH4EhKcxk5YLYHZQxSgb6I=",
+    "packages": {
+      "roots": [
+        "SJl1kuuXiy0WqZM03S0Q16OIGNX7e+RTI8H5Flk8JLo="
+      ]
+    }
+  },
+  "appearance": "system",
+  "theme": "app/theme.json",
+  "web": {
+    "host": "./app/host.js"
+  },
+  "capabilities": {
+    "application": true,
+    "clipboard": true,
+    "statusBar": true,
+    "network": {
+      "hosts": [
+        "*"
+      ]
+    },
+    "host": [
+      "page",
+      "pushState",
+      "pushEnable",
+      "pushDisable",
+      "setSession",
+      "setBadge",
+      "clearNotifications",
+      "vibrate"
+    ],
+    "picker": true,
+    "speech": true,
+    "notifications": true,
+    "fs": {
+      "read": [
+        "${homeDir}"
+      ]
+    },
+    "openUrl": {
+      "schemes": [
+        "https",
+        "mailto"
+      ]
+    }
+  },
+  "icon": "app/icon.png",
+  "store": {
+    "ios": {
+      "appId": "6835723652",
+      "usesNonExemptEncryption": false,
+      "release": "auto"
+    },
+    "linux": {
+      "license": "MIT",
+      "developer": "Jason Lee",
+      "homepage": "https://huacnlee.github.io/noop/",
+      "categories": [
+        "Development"
+      ],
+      "screenshots": [
+        "https://raw.githubusercontent.com/huacnlee/noop/main/website/public/screenshot.png"
+      ],
+      "archiveUrl": "https://github.com/huacnlee/noop/releases/download/v{version}/noop-{version}-linux-x86_64.tar.gz"
+    },
+    "windows": {
+      "productId": "9P8G3V5WV3T9"
+    }
+  },
+  "windows": {
+    "identityName": "huacnlee.NoopAgent",
+    "publisher": "CN=43482E1E-9E96-4A95-82A1-D43F087CD981",
+    "publisherDisplayName": "huacnlee"
+  },
+  "dependencies": {
+    "nsh-extra": {
+      "version": "^0.7.0",
+      "features": [
+        "speech"
+      ]
+    },
+    "nsh-icon": "^0.2.2",
+    "nsh-icon-lucide": "^0.2.1",
+    "nsmetry": "^0.1.0"
+  }
+}
