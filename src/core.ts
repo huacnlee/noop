@@ -496,6 +496,46 @@ export function remember(agent: string, lessons: string[] | undefined, source: s
   const f = P("agents", agent, "memory.md");
   if (!existsSync(f)) { mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, `# ${agent} memory\n\n`); }
   appendFileSync(f, list.map((l) => `- ${l} _(${source}, ${today()})_\n`).join(""));
+  archiveAgentMemory(f, source);
+}
+
+/** An agent's memory.md reaches its prompt through readTail(…, 8000) in runner.ts, so a longer file loses its oldest
+ *  lessons without a trace. It used to be trimmed by hand on every evolve run: lead and rust-maintainer grew by 30–70 KB
+ *  a day (T-10957, T-11568, T-11791). Over AGENT_MEMORY_BUDGET bytes (bytes, not characters: CJK lessons are 3 bytes
+ *  each) the oldest "- " entries move verbatim to memory-archive-<date>[-n].md next to it until the file is back under
+ *  AGENT_MEMORY_KEEP; headings and any other lines stay. Archive files hold < 150 lines each, like the hand-made ones. */
+export const AGENT_MEMORY_BUDGET = 7500;
+export const AGENT_MEMORY_KEEP = 6000;
+const ARCHIVE_LINES = 140;
+
+export function archiveAgentMemory(f: string, source: string): string[] {
+  const bytes = (s: string) => Buffer.byteLength(s);
+  const text = readFileSync(f, "utf8");
+  if (bytes(text) <= AGENT_MEMORY_BUDGET) return [];
+  const lines = text.split("\n");
+  const moved = new Set<number>();
+  let size = bytes(text);
+  for (let i = 0; i < lines.length && size > AGENT_MEMORY_KEEP; i++) {
+    if (!lines[i].startsWith("- ")) continue;
+    moved.add(i);
+    size -= bytes(lines[i]) + 1;
+  }
+  if (!moved.size) return [];
+  const old = lines.filter((_, i) => moved.has(i));
+  const written: string[] = [];
+  const day = today();
+  let n = 0;
+  for (let k = 0; k < old.length; k += ARCHIVE_LINES) {
+    let out: string;
+    do out = join(dirname(f), `memory-archive-${day}${n++ ? `-${n}` : ""}.md`);
+    while (existsSync(out) && readFileSync(out, "utf8").split("\n").length + Math.min(ARCHIVE_LINES, old.length - k) > ARCHIVE_LINES + 10);
+    const chunk = old.slice(k, k + ARCHIVE_LINES).join("\n") + "\n";
+    if (existsSync(out)) appendFileSync(out, chunk);
+    else writeFileSync(out, `# archived memory (oldest entries, moved verbatim; ${source}, ${day})\n\n${chunk}`);
+    written.push(out);
+  }
+  writeFileSync(f, lines.filter((_, i) => !moved.has(i)).join("\n"));
+  return written;
 }
 
 export const readIf = (p: string, tail = 12000) => (existsSync(p) ? readFileSync(p, "utf8").slice(-tail) : "");
