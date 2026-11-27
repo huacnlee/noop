@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit, validEvery, waitProgressIsNew } from "../src/cli";
@@ -825,6 +825,35 @@ test("lessons sent as a bare string are kept, not fatal", async () => {
   rmSync(dir, { force: true });
   expect(() => remember("crashguard-test", undefined, "T-3")).not.toThrow();
   expect(() => remember("crashguard-test", { length: 2 } as any, "T-4")).not.toThrow(); // no write, no crash
+});
+
+test("agent memory over budget moves its oldest entries verbatim to a dated archive", async () => {
+  const { remember, P, today, AGENT_MEMORY_BUDGET, AGENT_MEMORY_KEEP } = await import("../src/core");
+  const dir = P("agents", "archive-test");
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const f = join(dir, "memory.md");
+  const entries = Array.from({ length: 400 }, (_, i) => `- 经验 ${i} ${"字".repeat(10)} _(T-${i}, 2026-11-01)_`);
+  writeFileSync(f, `# archive-test memory\n\n## standing rule\nkeep me\n\n${entries.join("\n")}\n`);
+  remember("archive-test", ["newest lesson"], "T-9");
+  const kept = readFileSync(f, "utf8");
+  expect(Buffer.byteLength(kept)).toBeLessThanOrEqual(AGENT_MEMORY_KEEP);
+  expect(kept).toContain("## standing rule\nkeep me"); // non-entry lines stay
+  expect(kept).toContain("- newest lesson _(T-9");
+  expect(kept).toContain(entries[399]);
+  expect(kept).not.toContain(entries[0]);
+  const archives = readdirSync(dir).filter((n) => n.startsWith(`memory-archive-${today()}`)).sort();
+  expect(archives.length).toBeGreaterThan(1); // more than 140 entries moved: split, each file < 150 lines
+  const moved = archives.map((n) => readFileSync(join(dir, n), "utf8"));
+  for (const m of moved) expect(m.split("\n").length).toBeLessThan(150);
+  const all = moved.join("\n");
+  for (const e of entries) expect(kept.includes(e) || all.includes(e)).toBe(true); // nothing is lost
+  // under budget: untouched
+  writeFileSync(f, "# small\n\n- one\n");
+  remember("archive-test", ["two"], "T-10");
+  expect(Buffer.byteLength(readFileSync(f, "utf8"))).toBeLessThan(AGENT_MEMORY_BUDGET);
+  expect(readFileSync(f, "utf8")).toContain("- one\n- two");
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("runsCheckHere: the host that parked a wait runs its check; the primary runs the rest it can", async () => {
