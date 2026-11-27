@@ -6560,17 +6560,19 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
                 </>
               }
             >
-              <Field
-                label={L("Code", "验证码")}
-                value={code()}
-                onChange={onCode}
-                onSubmit={verify}
-                placeholder="········"
-                autoComplete="one-time-code"
-                autoFocus
-                big
-                testID="code"
-              />
+              <View style={{ gap: 6 }}>
+                <FieldLabel label={L("Code", "验证码")} />
+                <CodeField
+                  length={CODE_LEN}
+                  validationType="alphanumeric"
+                  groups={2}
+                  value={code()}
+                  onChange={onCode}
+                  autoFocus
+                  accessibilityLabel={L(`Email code, ${CODE_LEN} letters and digits`, `邮箱验证码，${CODE_LEN} 位字母和数字`)}
+                  testID="code"
+                />
+              </View>
               <View style={{ gap: 6 }}>
                 <FieldLabel label={L("Authenticator code", "两步验证码（验证器 App）")} />
                 <CodeField
