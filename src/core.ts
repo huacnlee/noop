@@ -509,10 +509,17 @@ export function readTail(p: string, tail = 12000): string {
   return `[… the first ${s.length - tail} of ${s.length} characters are cut; read ${p} for them]\n${s.slice(-tail)}`;
 }
 
+/** The memory files every prompt is built around: the owner's profile, current focus and the principles the judge decides
+ *  by (sessions.ts tells the learner to record per-category rules there "so the judge can decide them next time"). */
+export const MEMORY_KEEP = ["principles.md", "owner.md", "focus.md"];
+
 /** Every .md of a folder, joined, last `tail` characters. The files that fall into the cut part are named, so a folder
- *  that outgrows its budget does not lose whole files (the alphabetically first ones) without a trace. */
-export function readAll(dir: string, tail = 12000): string {
-  const parts = list(dir).map((p) => ({ name: basename(p), text: `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}` }));
+ *  that outgrows its budget does not lose whole files (the alphabetically first ones) without a trace. Files named in
+ *  `keep` go last, in that order, so the cut takes the other files first instead of whichever sort first by name. */
+export function readAll(dir: string, tail = 12000, keep: string[] = []): string {
+  const rank = (name: string) => keep.indexOf(name); // -1 for the rest: they stay first, in name order
+  const parts = list(dir).map((p) => ({ name: basename(p), text: `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}` }))
+    .sort((a, b) => rank(a.name) - rank(b.name));
   const joined = parts.map((x) => x.text).join("\n\n");
   if (joined.length <= tail) return joined;
   const cut = joined.length - tail;

@@ -4,7 +4,7 @@ import { codexMessage, codexTurnError } from "./codex-output";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, readTail, recentJournal, signature,
+  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, precedents, readAll, MEMORY_KEEP, readIf, readTail, recentJournal, signature,
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
@@ -106,7 +106,7 @@ ${readTail(P("agents", agent, "memory.md"), 8000) || "(empty)"}
 ${readAll(P("policies"))}
 
 # Owner profile & principles
-${readAll(P("memory"))}
+${readAll(P("memory"), 12000, MEMORY_KEEP)}
 
 # Owner decision precedents (follow them; never re-ask a decided question)
 ${precedents(25) || "(none yet)"}

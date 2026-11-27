@@ -1,7 +1,7 @@
 // Decisions: agent asks → AI judge (owner's precedents & principles) → only unprecedented taste calls reach the owner.
 import { existsSync, unlinkSync, appendFileSync, writeFileSync } from "node:fs";
 import {
-  type Cfg, L, P, agentName, journal, list, newTask, nextId, now, precedents, readAll, readDoc, readTail, today, writeDoc,
+  type Cfg, L, P, agentName, journal, list, newTask, nextId, now, precedents, readAll, MEMORY_KEEP, readDoc, readTail, today, writeDoc,
 } from "./core";
 import { notify } from "./notify";
 import { ask, type Result } from "./runner";
@@ -88,7 +88,7 @@ Decide one of:
 Be conservative: when in doubt, "hold". Never decide anything involving money, credentials, production data deletion, or messages committing the owner personally.
 
 # Owner principles & profile
-${readAll(P("memory"))}
+${readAll(P("memory"), 12000, MEMORY_KEEP)}
 
 # Fleet policy
 ${readAll(P("policies"))}
