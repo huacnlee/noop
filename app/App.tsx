@@ -5926,7 +5926,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     if (!draft() && !attachments().length && !replyTo() && !reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut", "opacity"));
                     focused.set(false);
                   }}
-                  onContentSizeChange={({ size: s }) => inputHeight.set(Math.min(220, Math.max(28, s.height)))}
+                  // the text's height, plus the 2 + 2 of padding below, or the last line scrolls under the bottom edge
+                  onContentSizeChange={({ size: s }) => inputHeight.set(Math.min(220, Math.max(28, s.height + 4)))}
                   placeholder={replyTo() ? L(`Reply to ${replyTo()}…`, `回复 ${replyTo()}…`) : scope() ? L(`Message #${scoped()?.name ?? scope()}`, `在 #${scoped()?.name ?? scope()} 里讨论…`) : wide() ? L("Tell the team what to do, e.g. review the open pull requests", "给团队下指令，例如：审查一遍待处理的 PR") : L("Tell the team what to do…", "给团队下指令…")}
                   class={platform.os === "ios" ? "placeholder:text-muted-foreground" : "placeholder:text-faint"}
                   style={{
