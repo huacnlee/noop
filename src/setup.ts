@@ -2,7 +2,7 @@
 import { $ } from "bun";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { CODE, DATA, HOME_DIR, P, isCloudDeployHost } from "./core";
 import { machineName } from "./machine";
 
@@ -274,7 +274,7 @@ export function winTaskXml(user: string, bun: string, cli: string, log: string, 
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
-    <Exec><Command>${xml(join(windir, "System32", "conhost.exe"))}</Command><Arguments>${xml(run)}</Arguments></Exec>
+    <Exec><Command>${xml(win32.join(windir, "System32", "conhost.exe"))}</Command><Arguments>${xml(run)}</Arguments></Exec>
   </Actions>
 </Task>
 `;
