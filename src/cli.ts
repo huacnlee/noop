@@ -900,17 +900,19 @@ export async function tick(cfg: Cfg, background = false) {
   await ensureDisk(cfg, host, busyRepos, (t) => notify(t, cfg));
   const jobs: Promise<void>[] = [];
   const tried = new Set<string>();
+  const queued = list(P("tasks", "inbox"), /^T-.*\.md$/).length;
+  let stall = ""; // why this tick started nothing, for the journal below
   for (;;) {
     if (draining) break; // stopping: finish what runs, start nothing new
     const s = sample(cfg);
     const max = allowedParallel(s, cfg, running);
-    if (running >= max) break;
-    if (!pickAccount(cfg, ["claude", "codex"].filter((c) => Bun.which(c)))) break;
-    if ((await githubStarved(cfg)).starved && list(P("tasks", "inbox"), /^T-.*\.md$/).every((p) => GH_HEAVY.has(readDoc(p).meta.agent))) break;
+    if (running >= max) { stall = `${L("resources", "资源")}: ${running} running, ${max} allowed (mem free ${s.memFreePct}%, disk ${s.diskFreeGB}GB, load ${s.load1}/${s.cores})`; break; }
+    if (!pickAccount(cfg, ["claude", "codex"].filter((c) => Bun.which(c)))) { stall = L("no usable AI account", "没有可用的 AI 账户"); break; }
+    if ((await githubStarved(cfg)).starved && list(P("tasks", "inbox"), /^T-.*\.md$/).every((p) => GH_HEAVY.has(readDoc(p).meta.agent))) { stall = L("GitHub quota too low for these agents", "GitHub 配额过低，跑不了这些 agent"); break; }
     const t = pickTask(cfg, pressureOf(s), canRunHeavy(s, cfg, running));
-    if (!t) break;
+    if (!t) { stall = L("no queued task this host can run now", "队列里没有本机现在能跑的任务"); break; }
     const active = await claim(t, host);
-    if (!active) { if (tried.has(t)) break; tried.add(t); continue; } // e.g. offline: don't spin on the same task
+    if (!active) { if (tried.has(t)) { stall = L(`could not claim ${t}`, `无法领取 ${t}`); break; } tried.add(t); continue; } // e.g. offline: don't spin on the same task
     running++;
     const tid = basename(active, ".md");
     runningIds.add(tid);
@@ -919,7 +921,20 @@ export async function tick(cfg: Cfg, background = false) {
       .finally(() => { running--; runningIds.delete(tid); });
     jobs.push(job);
   }
+  // A fleet that holds work and starts none must leave a trace: on 2026-11-24 four tasks waited 10 h while every tick
+  // started nothing and the journal recorded only routine skips, so the blocking gate took a manual dig to identify.
+  if (!jobs.length && !draining && (running === 0 || /\b0 allowed\b|\b0 个名额\b/.test(stall))) noteStall(host, stall, queued);
   if (!background) await Promise.all(jobs);
+}
+
+/** Journal a tick that started nothing while tasks wait, at most once an hour per reason (T-2406). */
+let lastStall = "", lastStallAt = 0;
+function noteStall(host: string, stall: string, queued: number) {
+  if (!stall || !queued) return;
+  const now = Date.now();
+  if (stall === lastStall && now - lastStallAt < 3_600_000) return;
+  lastStall = stall; lastStallAt = now;
+  journal(host, L(`⏸ ${queued} task(s) queued, none started: ${stall}`, `⏸ ${queued} 个任务在排队，一个都没启动：${stall}`));
 }
 
 /** AI placement for new tasks: which host capabilities a task needs (e.g. os:macos for iOS screenshots), which CLI
