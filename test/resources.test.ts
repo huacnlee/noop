@@ -119,7 +119,7 @@ test("reapScratch only removes git checkouts: plain dirs and loose files hold wo
   try {
     git(root, "init -q --bare origin.git");
     git(root, "clone -q origin.git t10500-clone");
-    git(join(root, "t10500-clone"), "commit -q --allow-empty -m x");
+    git(join(root, "t10500-clone"), "commit -q --no-gpg-sign --allow-empty -m x");
     git(join(root, "t10500-clone"), "push -q origin HEAD");
     const clone = join(root, "t10500-clone");
     age(join(clone, ".git", "index"), join(clone, ".git", "HEAD"), join(clone, ".git"), clone);
