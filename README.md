@@ -88,9 +88,10 @@ Noop counts usage with the author's own [NsMetry](https://github.com/huacnlee/ns
 - The apps send the name of each screen opened (`/chat`, `/task`, `/settings`, ...), the app version, the OS and a random install ID, in batches. No email, Noop URL, task, channel, message or file name.
 - The primary machine sends one heartbeat a day with the Noop build date, the OS family and a random install ID.
 - Your Noop Worker sends one report a day with the Noop build date, a random install ID and counts only: machines online, devices signed in during the last day per platform (iOS, Android, macOS, Windows, Linux, web) and MCP connectors. It is redeployed with every Noop update, so it also covers apps that are not updated.
+- **Your email, only while Noop is in use.** When at least one machine is online and someone signed in with an app or browser during the last day, the Worker also sends, once a day, the email address of each person who signed in (one of your `HUB_OWNER_EMAIL` addresses) to a separate NsMetry site, `noop-users`, with the Noop build date and the number of machines and devices. This is how the author counts the people who actually use Noop, rather than installs, and can reach them about breaking changes. Nothing is sent there while no machine is online or nobody signed in. MCP connectors do not count.
 - The website counts page views.
 
-The daemon heartbeat and the Worker report can be turned off with any of these (the Worker picks it up at its next deploy, `noop cloud deploy`):
+The daemon heartbeat and both Worker reports, including the email, can be turned off with any of these (the Worker picks it up at its next deploy, `noop cloud deploy`):
 
 ```toml
 # config.toml

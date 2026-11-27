@@ -694,9 +694,10 @@ export class Hub extends DurableObject<Env> {
     seen: () => ({
       machines: ((this.get("status")?.hosts ?? []) as unknown[]).length,
       // the sessions table holds a handful of rows (one per signed-in device); read once a day
-      sessions: this.sql.exec("SELECT ua, scope FROM sessions WHERE last_seen > ?", Date.now() - 86_400_000).toArray()
-        .map((r) => ({ ua: String(r.ua ?? ""), scope: r.scope == null ? null : String(r.scope) })),
+      sessions: this.sql.exec("SELECT ua, scope, email FROM sessions WHERE last_seen > ?", Date.now() - 86_400_000).toArray()
+        .map((r) => ({ ua: String(r.ua ?? ""), scope: r.scope == null ? null : String(r.scope), email: String(r.email ?? "") })),
     }),
+    owner: () => this.owners()[0] ?? "",
     post: (body) => fetch(NSMETRY_URL, { method: "POST", headers: { "content-type": "text/plain" }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) }).then((r) => r.status),
   });
 
