@@ -1428,7 +1428,7 @@ function Message(props: {
     return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref)?.grade;
   };
   const body = (
-    <View style={{ gap: 10 }}>
+    <View selectable style={{ gap: 10 }}>
       <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
       <If when={graded()}>{(g) => <GradeLine testID={`msg-grade-${e.id}`} grade={g()} />}</If>
       <If when={e.attachments?.length}>
@@ -1970,7 +1970,8 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
       style={{ flex: 1 }}
       contentStyle={pageContent}
     >
-      <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", paddingHorizontal: props.wide ? 32 : 16, paddingTop: 24, paddingBottom: composerHeight() + 24 }}>
+      {/* one selection across the page's texts, so a drag can take several lines of the grade's notes */}
+      <View selectable style={{ width: "100%", maxWidth: size.column, alignSelf: "center", paddingHorizontal: props.wide ? 32 : 16, paddingTop: 24, paddingBottom: composerHeight() + 24 }}>
         <If when={t()} else={<Text style={{ fontSize: 15, color: colors.muted }}>{missing() ? L(`Can’t find ${props.id}.`, `找不到 ${props.id}。`) : L("Loading…", "读取中…")}</Text>}>
           <PageHeader testID="task-head">
             <Text style={{ userSelect: "text", fontSize: 20, fontWeight: "600", color: colors.text }}>{t()!.title}</Text>

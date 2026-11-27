@@ -178,13 +178,13 @@ export function GradeCard(props: { grade: Grade; wide: boolean }) {
       {notes().some(Boolean) ? (
         <View style={{ gap: 6 }}>
           {DIMS.map((_, i) => (notes()[i] ? (
-            <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted, userSelect: "text" }}>
+            <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted }}>
               <Text style={{ fontWeight: "600", color: colors.text }}>{`${t().dims[i]} ${letters(props.grade.grades)[i] === "?" ? t().pending : letters(props.grade.grades)[i]}${L(": ", "：")}`}</Text>
               {notes()[i]}
             </Text>
           ) : null))}
           {props.grade.fit && notes()[DIMS.length] ? (
-            <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted, userSelect: "text" }}>
+            <Text style={{ fontSize: 13.5, lineHeight: 20, color: colors.muted }}>
               <Text style={{ fontWeight: "600", color: colors.text }}>{`${t().fit[props.grade.fit]}${L(": ", "：")}`}</Text>
               {notes()[DIMS.length]}
             </Text>
