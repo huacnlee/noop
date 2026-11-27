@@ -12,7 +12,7 @@ import {
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { RUN_LIMIT, STALLED, type Result, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent, runLimits } from "./runner";
-import { writeRules } from "./rules";
+import { maybeCompactMemory, writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, MAX_WAKES, sameWaitAgain, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, pressureOf, sample } from "./resources";
 import { homedir } from "node:os";
@@ -870,6 +870,7 @@ export async function tick(cfg: Cfg, background = false) {
     heartbeat(cfg, running, sample(cfg));
     if (primary) {
       runRoutines(cfg, host, primary);
+      try { const id = maybeCompactMemory(host); if (id) journal(host, `🗜 memory over budget → ${id} compaction`); } catch (e) { journal(host, `💥 memory compaction: ${e}`); }
       reapStale(cfg, host);
       wakeParents(host, ready);
       maybeSupervise(cfg, host);
