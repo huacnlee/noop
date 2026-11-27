@@ -24,6 +24,7 @@ import { CODE_RE, newCode, normCode } from "./authcode";
 import { newSecret, otpauthUri, totpMatch } from "./totp";
 import { mediaResponse, ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
 import { sendMail, type SmtpCfg } from "./smtp";
+import { loginCodeMail, mimeBody } from "./codemail";
 import { EmailMessage } from "cloudflare:email";
 
 import { GUEST_TOKEN, guestApi, guestJoin, guestWho, guestsAdmin, initGuestSchema } from "./guests";
@@ -32,10 +33,10 @@ import { type OAuthState, PENDING_TTL_MS, authorizeUrl, callbackPage, discover, 
 import { mcpServers } from "../../app/mcp-servers";
 
 const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
-async function cfMail(binding: SendEmail, from: string, to: string, subject: string, text: string) {
+async function cfMail(binding: SendEmail, from: string, to: string, subject: string, text: string, html?: string) {
   const raw = [`From: Noop <${from}>`, `To: ${to}`, `Subject: =?UTF-8?B?${b64(subject)}?=`,
     `Message-ID: <${crypto.randomUUID()}@${from.split("@")[1]}>`, `Date: ${new Date().toUTCString()}`,
-    "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64", "", b64(text)].join("\r\n");
+    ...mimeBody(text, html)].join("\r\n");
   await binding.send(new EmailMessage(from, to, raw));
 }
 import { sendPush, type PushSub, type Vapid } from "./push";
@@ -293,11 +294,11 @@ export class Hub extends DurableObject<Env> {
 
   // ---- security alerts
   /** How to send mail, or null when email isn't set up (codes then go through `noop login`). */
-  mailer(): ((to: string, subject: string, text: string) => Promise<void>) | null {
+  mailer(): ((to: string, subject: string, text: string, html?: string) => Promise<void>) | null {
     let smtp: SmtpCfg | null = null;
     try { smtp = this.env.HUB_SMTP ? JSON.parse(this.env.HUB_SMTP) : null; } catch {}
-    if (smtp?.host) return (to, subject, text) => sendMail(smtp!, to, subject, text);
-    if (this.env.EMAIL && this.env.HUB_MAIL_FROM) return (to, subject, text) => cfMail(this.env.EMAIL!, this.env.HUB_MAIL_FROM!, to, subject, text);
+    if (smtp?.host) return (to, subject, text, html) => sendMail(smtp!, to, subject, text, html);
+    if (this.env.EMAIL && this.env.HUB_MAIL_FROM) return (to, subject, text, html) => cfMail(this.env.EMAIL!, this.env.HUB_MAIL_FROM!, to, subject, text, html);
     return null;
   }
   /** Where a request came from, for an alert: time, IP and place (Cloudflare's view), device. */
@@ -583,9 +584,8 @@ export class Hub extends DurableObject<Env> {
       this.sql.exec("INSERT OR REPLACE INTO auth_codes (email, hash, expires, attempts) VALUES (?, ?, ?, 0)", email, await sha256(`${email}:${code}`), now + CODE_TTL);
       if (cli) { this.set("cli_code", { email, code, expires: now + CODE_TTL }); return json({ ok: true, delivery: "cli" }); }
       try {
-        const subject = L(`Noop login code: ${code}`, `Noop 登录验证码：${code}`);
-        const text = L(`Your Noop login code is:\n\n    ${code}\n\nValid for 10 minutes.\n\nIf this was not you, ignore this email.\n`, `你的 Noop 登录验证码是：\n\n    ${code}\n\n10 分钟内有效。\n\n如果不是你本人操作，请忽略这封邮件。\n`);
-        await send!(email, subject, text);
+        const mail = loginCodeMail(code);
+        await send!(email, mail.subject, mail.text, mail.html);
       } catch (err) {
         console.error(`auth mail failed: ${err}`);
         this.sql.exec("DELETE FROM auth_codes WHERE email = ?", email);
