@@ -70,7 +70,7 @@ import { parseHubMarkdown } from "./markdown";
 import { messageTags, taskTagId } from "./message-tags";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
-import { setupTray, type TrayChat } from "./tray";
+import { keepMainWindow, setupTray, type TrayChat } from "./tray";
 import { createTimelineWindow } from "./timeline";
 import { ShellUpdate } from "./shell-update";
 import { CHECK_EVERY_MS, createUpdates, shellLine, type ShellInfo, type UpdateState } from "./update";
@@ -6670,6 +6670,7 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
 function App() {
   if (hasWindow) {
     currentWindow().set({ title: "Noop", titleBar: { style: "hidden", height: size.bar } });
+    keepMainWindow();
   }
   Scrollbar.setTheme(scrollbarTheme);
   watchUpdates();

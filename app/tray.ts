@@ -1,6 +1,6 @@
 // The tray icon (the menu bar on macOS, the notification area on Windows, a StatusNotifierItem on Linux) and its menu.
 import { effect, platform } from "nsh";
-import { isAvailable as hasWindow, Tray, Window, type MenuItem } from "nsh/desktop";
+import { Application, currentWindow, isAvailable as hasWindow, Tray, Window, type MenuItem } from "nsh/desktop";
 import { L } from "./i18n";
 import icon from "./tray.svg";
 
@@ -29,4 +29,15 @@ export function setupTray(chat: () => TrayChat | null) {
   const show = () => Window.get("main")?.focus();
   const onClick = platform.os === "macos" ? undefined : show;
   effect(() => Tray.set({ icon, onClick, ...trayMenu(chat(), show) }));
+}
+
+/** On macOS closing the main window (its close button, Command-W) hides it, as a chat app's does: Noop keeps running
+ * (its connection, notifications and tray icon), and clicking the Dock icon or "Open Noop" shows it again. Without
+ * this the window is gone and nothing can bring it back. Windows and Linux quit when it closes, as before. */
+export function keepMainWindow() {
+  if (!hasWindow || platform.os !== "macos") return;
+  const main = currentWindow();
+  main.set({ closeOnPress: false });
+  main.on("closePress", () => main.hide());
+  Application.on("reopen", () => main.focus());
 }
