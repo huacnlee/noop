@@ -1993,6 +1993,29 @@ describe("phones", () => {
     });
   }
 
+  test("iPhone Duo: the inner display puts the sidebar beside the chat, the outer one stays a phone, the draft survives", async () => {
+    // iPhone Duo's outer display is 466x678 points, its inner one 669x951 (Xcode 27.2 simulator); opening it resizes the app.
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 466, height: 678, platform: "ios", network: hub([]) });
+    await app.waitFor("id:composer");
+    expect(app.shows("id:sidebar-scroll")).toBe(false);
+    expect(app.shows("label:Menu")).toBe(true);
+    await app.type("id:composer", "草稿");
+    await app.setViewport(669, 951);
+    await app.waitFor("id:sidebar-scroll");
+    expect(app.shows("label:Menu")).toBe(false);
+    expect(app.value("id:composer")).toBe("草稿");
+    // turned on the inner display, and back to the outer one
+    await app.setViewport(951, 669);
+    expect(app.shows("id:sidebar-scroll")).toBe(true);
+    await app.setViewport(466, 678);
+    await app.waitUntil(() => !app.shows("id:sidebar-scroll"));
+    expect(app.shows("label:Menu")).toBe(true);
+    expect(app.value("id:composer")).toBe("草稿");
+    // an iPhone on its side is still a phone, however long it is
+    await app.setViewport(678, 466);
+    expect(app.shows("id:sidebar-scroll")).toBe(false);
+  });
+
   test("a horizontal swipe opens the phone sidebar", async () => {
     const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: settingsServer([]) });
     await app.waitFor("id:composer");
