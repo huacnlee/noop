@@ -792,11 +792,19 @@ const inQuietHours = (cfg: Cfg) => {
 const raisedDecision = (taskId: string) =>
   ["open", "closed"].some((dir) => list(P("decisions", dir)).some((p) => readDoc(p).meta.task === taskId));
 
+/** Work the owner asked for (chat, CLI, follow-ups of a menu they picked from): proof they are around again. */
+const ownerAsked = (m: Record<string, string>) => m.origin === "owner" || /^owner/.test(m.source ?? "");
+
 export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, string>) {
   if (cfg.idle?.enabled === false || inQuietHours(cfg)) return;
-  const busy = ["inbox", "active"].some((f) => list(P("tasks", f), /^T-.*\.md$/)
-    .some((p) => !readDoc(p).meta.parked));
-  if (busy || running > 0) { delete state.idle_since; return; }
+  const queued = ["inbox", "active"].flatMap((f) => list(P("tasks", f), /^T-.*\.md$/))
+    .map((p) => readDoc(p).meta).filter((m) => !m.parked);
+  if (queued.length || running > 0) {
+    delete state.idle_since;
+    // The owner is back (sent work, or picked items from a card): the next menu needs no extra back-off.
+    if (queued.some(ownerAsked)) delete state.idle_empty;
+    return;
+  }
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
@@ -815,7 +823,12 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   if (sinceLast < 15 * 60_000) return;
   // The cooldown above only covers a menu card that is still open. A run that found nothing worth asking raises no card,
   // so without this the next run fires every 15 minutes, each one a full model run that again answers "nothing new".
-  if (sinceLast < cooldown && state.last_idle_task && !raisedDecision(state.last_idle_task)) return;
+  // Each further empty run in a row doubles the wait (cooldown, 2x, 4x, then at most daily) until the owner is back:
+  // over a quiet weekend a fixed cooldown still meant ~5 full model runs a day that all answered "nothing new".
+  const empty = !!state.last_idle_task && !raisedDecision(state.last_idle_task);
+  const streak = Number(state.idle_empty ?? 0) || 0;
+  const day = 24 * 60 * 60_000;
+  if (empty && sinceLast < Math.min(cooldown * 2 ** streak, Math.max(cooldown, day))) return;
   if (cfg.idle?.mode === "explore") {
     // Owner 2026-11-25 (T-11170): an idle fleet finds its own work. The planner picks the next items from the team OKR
     // (memory/okr.md) and dispatches them as followups instead of asking the owner to choose from a menu.
@@ -827,6 +840,9 @@ Do not send a menu. If nothing qualifies, return done with one line saying why.`
       { agent, priority: "normal", source: "idle", extra: { kind: "explore" } });
     state.last_menu = new Date().toISOString();
     state.last_idle_task = id;
+    // An explore run hands out followups rather than raising a card, so "no card" is not "nothing found": keep its old
+    // fixed cooldown instead of growing the back-off.
+    state.idle_empty = "0";
     journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} ${agent} planning self-driven work`);
     return;
   }
@@ -835,6 +851,7 @@ Build the owner's next-action menu per your profile. Return needs_decision only 
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
   state.last_idle_task = id;
+  state.idle_empty = String(empty ? streak + 1 : 0);
   journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff drafting a next-steps menu`);
 }
 
