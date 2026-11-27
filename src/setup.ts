@@ -237,9 +237,51 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
 /** Machines installed before the rename keep their service name. */
 export const SERVICE = existsSync(join(homedir(), ".config/systemd/user/agent-hub.service")) || existsSync(join(homedir(), "Library/LaunchAgents/com.agent-hub.daemon.plist")) ? "agent-hub" : "noop";
 const LABEL = SERVICE === "agent-hub" ? "com.agent-hub.daemon" : "dev.noop.daemon";
+const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+/** The Windows Scheduled Task, as Task Scheduler XML.
+ *  - No window: bun is a console program, so a plain task opened a terminal window (titled "claude" by the agents
+ *    sharing it). Closing it ended the daemon and every running agent at once (exit 0xC000013A, 2026-11-27).
+ *    A headless conhost gives the same console without a window; the task stays in the logon session, so GUI work
+ *    still has a desktop. Output goes to logs/daemon.log, as on macOS.
+ *  - Kept alive: nothing restarted the daemon after `noop restart`, a self-update or a crash (launchd has KeepAlive,
+ *    systemd Restart=always). The logon trigger repeats every minute and IgnoreNew drops the repeat while it runs.
+ *    `noop stop` disables the task so the repeat does not bring it back.
+ *  - No battery or 72-hour limits (schtasks' defaults). */
+export function winTaskXml(user: string, bun: string, cli: string, log: string, windir = "C:\\Windows"): string {
+  const run = `--headless cmd.exe /d /c ""${bun}" "${cli}" start --foreground >> "${log}" 2>&1"`;
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Noop fleet daemon</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${xml(user)}</UserId>
+      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <Enabled>true</Enabled>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>${xml(join(windir, "System32", "conhost.exe"))}</Command><Arguments>${xml(run)}</Arguments></Exec>
+  </Actions>
+</Task>
+`;
+}
+
 /** Write a launch agent without loading it; also supports fresh macOS accounts. */
 export function writeMacAgent(home: string, data: string, bun: string, cli: string, path: string, label: string): string {
-  const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
   const plist = join(home, `Library/LaunchAgents/${label}.plist`);
   mkdirSync(join(plist, ".."), { recursive: true });
   mkdirSync(join(data, "logs"), { recursive: true });
@@ -303,10 +345,16 @@ WantedBy=default.target
     await $`launchctl bootstrap gui/${process.getuid!()} ${plist}`;
     console.log(`✔ launchd agent installed: ${plist} (starts at login; the daemon blocks idle and system sleep while it runs). Keep a primary Mac logged in and awake: sleep, logout or closing the lid pauses coordination until it returns.`);
   } else if (process.platform === "win32") {
-    const cmd = `"${bun}" "${cli}" start --foreground`;
-    await $`schtasks /Create /F /SC ONLOGON /RL LIMITED /TN ${SERVICE} /TR ${cmd}`.nothrow();
+    const log = join(DATA, "logs", "daemon.log");
+    mkdirSync(join(DATA, "logs"), { recursive: true });
+    const user = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME ?? "";
+    const file = join(HOME_DIR, "noop-task.xml");
+    mkdirSync(HOME_DIR, { recursive: true });
+    writeFileSync(file, Buffer.from(`﻿${winTaskXml(user, bun, cli, log, process.env.SystemRoot ?? process.env.windir)}`, "utf16le")); // schtasks reads UTF-16
+    const r = await $`schtasks /Create /F /TN ${SERVICE} /XML ${file}`.nothrow();
+    if (r.exitCode !== 0) return void console.log(`✗ schtasks could not create the task: ${r.stderr.toString().trim()}`);
     await $`schtasks /Run /TN ${SERVICE}`.nothrow();
-    console.log(`✔ Scheduled Task '${SERVICE}' installed (runs at logon, restarts with the daemon's own loop). Disable sleep: powercfg /change standby-timeout-ac 0`);
+    console.log(`✔ Scheduled Task '${SERVICE}' installed (runs at logon without a window, restarted within a minute when it exits). Logs: ${log}. Disable sleep: powercfg /change standby-timeout-ac 0`);
   }
 }
 
@@ -370,6 +418,7 @@ export async function startService(): Promise<boolean> {
     const r = await $`systemctl --user start ${SERVICE}.service`.quiet().nothrow();
     if (r.exitCode !== 0) { console.log(`✗ systemctl failed: ${r.stderr.toString().trim()}`); return false; }
   } else {
+    await $`schtasks /Change /TN ${SERVICE} /ENABLE`.quiet().nothrow(); // `noop stop` disabled it
     const r = await $`schtasks /Run /TN ${SERVICE}`.quiet().nothrow();
     if (r.exitCode !== 0) { console.log(`✗ schtasks failed: ${r.stderr.toString().trim()}`); return false; }
   }
@@ -382,6 +431,8 @@ export async function startService(): Promise<boolean> {
 export async function stopService(): Promise<boolean> {
   const st = await serviceState();
   if (!st.installed) { console.log("noop is not installed as a service; nothing to stop"); return true; }
+  // the task's one-minute repeat would start the daemon again; disabled, it stays stopped until `noop start` or `noop install`
+  if (st.manager === "schtasks") await $`schtasks /Change /TN ${SERVICE} /DISABLE`.quiet().nothrow();
   if (!st.running) { console.log("✓ noop is not running"); return true; }
   console.log("stopping noop: running tasks finish first, this can take a while…");
   // launchd and systemd send SIGTERM, which the daemon answers by draining (ExitTimeOut / TimeoutStopSec allow 90 min)
