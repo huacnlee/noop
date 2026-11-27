@@ -860,6 +860,26 @@ test("readAll names the files that no longer fit instead of dropping them silent
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("readAll keeps the named files and cuts the others first", async () => {
+  const { readAll } = await import("../src/core");
+  const dir = mkdtempSync(join(tmpdir(), "noop-readall-keep-"));
+  try {
+    writeFileSync(join(dir, "focus.md"), "F".repeat(200));
+    writeFileSync(join(dir, "lessons.md"), "L".repeat(300));
+    writeFileSync(join(dir, "principles.md"), "P".repeat(300));
+    writeFileSync(join(dir, "taste.md"), "T".repeat(300));
+    const out = readAll(dir, 560, ["principles.md", "focus.md"]);
+    const first = out.split("\n")[0];
+    expect(first).toContain("not shown: lessons.md"); // alphabetical order alone would drop focus.md and lessons.md
+    expect(first).toContain("partly shown: taste.md");
+    expect(out).toContain("P".repeat(300));
+    expect(out.endsWith("F".repeat(200))).toBe(true);
+    const all = readAll(dir, 5000, ["principles.md"]);
+    expect(all).not.toContain("cut to the last"); // fits: everything shown, the kept file just moves to the end
+    expect(all.indexOf("### principles.md")).toBeGreaterThan(all.indexOf("### taste.md"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a long paste uploads as Markdown; other text types stay refused", async () => {
   const { uploadProblem } = await import("../cloud/src/uploads");
   expect(uploadProblem("text/markdown", 10)).toBeNull();
