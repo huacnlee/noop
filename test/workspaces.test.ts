@@ -10,9 +10,9 @@ const tmp = (prefix: string) => realpathSync(mkdtempSync(join(tmpdir(), prefix))
 
 async function repoIn(dir: string): Promise<string> {
   mkdirSync(dir, { recursive: true });
-  await $`git -C ${dir} init -q -b main && git -C ${dir} -c user.email=t@t -c user.name=t commit -q --allow-empty -m init`.quiet();
+  await $`git -C ${dir} init -q -b main && git -C ${dir} -c user.email=t@t -c user.name=t commit -q --no-gpg-sign --allow-empty -m init`.quiet();
   writeFileSync(join(dir, "README.md"), "x");
-  await $`git -C ${dir} add README.md && git -C ${dir} -c user.email=t@t -c user.name=t commit -q -m readme`.quiet();
+  await $`git -C ${dir} add README.md && git -C ${dir} -c user.email=t@t -c user.name=t commit -q --no-gpg-sign -m readme`.quiet();
   return dir;
 }
 

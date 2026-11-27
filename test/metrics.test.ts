@@ -110,10 +110,10 @@ test("metrics say which code produced them, and when that code is behind or dirt
   g("config", "user.name", "t");
   writeFileSync(join(dir, "a.txt"), "1");
   g("add", "-A");
-  g("commit", "-qm", "one");
+  g("commit", "--no-gpg-sign", "-qm", "one");
   g("checkout", "-qb", "side");
   writeFileSync(join(dir, "a.txt"), "2");
-  g("commit", "-qam", "two");
+  g("commit", "--no-gpg-sign", "-qam", "two");
   g("update-ref", "refs/remotes/origin/main", "HEAD");
   g("checkout", "-q", "main");
   writeFileSync(join(dir, "a.txt"), "dirty");
