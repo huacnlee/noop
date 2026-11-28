@@ -253,22 +253,7 @@ export const which = (bin: string) => Bun.which(bin) !== null;
  *  4. otherwise either CLI, Claude first.
  *  The per-member config is checked before the hint on purpose: an owner who sets a member to codex-only in the app
  *  must not have that silently undone by the planner picking Claude for a task it calls "hard". */
-/** Members whose work is read-only (review, triage, reports, planning). Every other member may write code. */
-const READ_ONLY_AGENTS = new Set(["reviewer", "dispatcher", "ops-watcher", "reporter", "chief-of-staff", "apprentice", "planner"]);
-
-/** Owner rule (T-11868): code is written by Claude only. Codex keeps read-only work. */
-export function writesCode(meta: Record<string, string>): boolean {
-  return !READ_ONLY_AGENTS.has(meta.agent || "lead");
-}
-
 export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
-  const clis = baseClis(meta, cfg);
-  if (!writesCode(meta)) return clis;
-  const claudeOnly = clis.filter((c) => c !== "codex");
-  return claudeOnly.length ? claudeOnly : ["claude"];
-}
-
-function baseClis(meta: Record<string, string>, cfg: Cfg): string[] {
   if (meta.cli && meta.cli !== "auto") return [meta.cli];
   const per = cfg.clis?.agents?.[meta.agent || "lead"];
   if (Array.isArray(per) && per.length) return per;
@@ -290,6 +275,14 @@ export function cliHintPatch(meta: Record<string, string>, per: unknown, suggest
 /** The agent CLIs (claude, codex) installed on at least one of these hosts, read from their `cli:*` caps. */
 export function fleetClis(caps: string[][]): string[] {
   return ["claude", "codex"].filter((c) => caps.some((cs) => cs.includes(`cli:${c}`)));
+}
+
+/** May quota/login failover switch this task to `cli`? Not when the owner's per-member config (`clis.agents`) leaves
+ *  that CLI out: a member set to ["claude"] waits for Claude instead of silently running on Codex. Without a member
+ *  config any CLI may take over, as before. */
+export function failoverAllowed(meta: Record<string, string>, cfg: Cfg): (cli: string) => boolean {
+  const per = cfg.clis?.agents?.[meta.agent || "lead"];
+  return (cli) => !Array.isArray(per) || !per.length || per.includes(cli);
 }
 
 export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null {

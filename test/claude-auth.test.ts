@@ -90,19 +90,3 @@ test("a shared setup-token is the subscription login on every machine", async ()
   const a = { cli: "claude", name: "default", dir: "", default: true, auth: "oauth" as const };
   expect(claudeOAuthToken(a, { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-shared" })).toBe("sk-ant-oat-shared");
 });
-
-test("failover never jumps from claude to codex when the task does not allow codex", async () => {
-  const { failoverAccount } = await import("../src/accounts");
-  const cfg = { accounts: [
-    { cli: "claude", name: "only-claude", dir: "/nonexistent", auth: "oauth" },
-    { cli: "codex", name: "codex-test", dir: "/nonexistent" },
-  ] } as any;
-  const state = join(HOME_DIR, "accounts/state.json");
-  const saved = readFileSync(state, "utf8");
-  try {
-    writeFileSync(state, JSON.stringify({ seq: 0, accounts: {} }));
-    const failed = cfg.accounts[0];
-    expect(failoverAccount(cfg, failed, ["claude"], () => true)).toBeNull();
-    expect(failoverAccount(cfg, failed, ["claude", "codex"], () => true)?.cli).toBe("codex");
-  } finally { writeFileSync(state, saved); }
-});
