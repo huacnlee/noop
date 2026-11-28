@@ -253,7 +253,22 @@ export const which = (bin: string) => Bun.which(bin) !== null;
  *  4. otherwise either CLI, Claude first.
  *  The per-member config is checked before the hint on purpose: an owner who sets a member to codex-only in the app
  *  must not have that silently undone by the planner picking Claude for a task it calls "hard". */
+/** Members whose work is read-only (review, triage, reports, planning). Every other member may write code. */
+const READ_ONLY_AGENTS = new Set(["reviewer", "dispatcher", "ops-watcher", "reporter", "chief-of-staff", "apprentice", "planner"]);
+
+/** Owner rule (T-11868): code is written by Claude only. Codex keeps read-only work. */
+export function writesCode(meta: Record<string, string>): boolean {
+  return !READ_ONLY_AGENTS.has(meta.agent || "lead");
+}
+
 export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
+  const clis = baseClis(meta, cfg);
+  if (!writesCode(meta)) return clis;
+  const claudeOnly = clis.filter((c) => c !== "codex");
+  return claudeOnly.length ? claudeOnly : ["claude"];
+}
+
+function baseClis(meta: Record<string, string>, cfg: Cfg): string[] {
   if (meta.cli && meta.cli !== "auto") return [meta.cli];
   const per = cfg.clis?.agents?.[meta.agent || "lead"];
   if (Array.isArray(per) && per.length) return per;

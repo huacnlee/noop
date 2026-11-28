@@ -243,7 +243,8 @@ test("quota/auth failover: same CLI's other account, then the other CLI, else no
   const two = { accounts: [{ cli: "claude", name: "zz-test-a" }, { cli: "claude", name: "zz-test-b" }] } as any;
   expect(failoverAccount(two, a, ["claude"], all)?.name).toBe("zz-test-b");
   const solo = { accounts: [{ cli: "claude", name: "zz-test-a" }, { cli: "codex", name: "zz-test-c" }] } as any;
-  expect(failoverAccount(solo, a, ["claude"], all)?.cli).toBe("codex"); // claude-only (owner/hard) work still falls back
+  expect(failoverAccount(solo, a, ["claude"], all)).toBeNull(); // claude-only (code-writing) work waits for Claude, T-11868
+  expect(failoverAccount(solo, a, ["claude", "codex"], all)?.cli).toBe("codex"); // read-only work may fall back
   expect(failoverAccount(solo, a, ["claude"], (c) => c === "claude")).toBeNull(); // codex not installed → requeue
   expect(failoverAccount(solo, { cli: "codex", name: "zz-test-c", dir: "" }, ["codex", "claude"], all)?.cli).toBe("claude");
 });
