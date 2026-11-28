@@ -33,7 +33,7 @@ import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, retireUnrunnableProposed, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
-import { CODE, L, isEnglish, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, isEnglish, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, failoverAllowed, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, networkBlocked, pendingLoginIds, pickAccount, reportFailure, reportNetworkBlock, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
@@ -207,8 +207,9 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   const { meta, body } = readDoc(path);
   const wanted = allowedClis(meta, cfg);
   const installed = (c: string) => !!Bun.which(c);
+  const crossOk = failoverAllowed(meta, cfg);
   await sharedSecrets(cfg); // shared Claude keys decide which accounts exist
-  const first = pickAccount(cfg, wanted.filter(installed)) ?? failoverAccount(cfg, null, wanted, installed);
+  const first = pickAccount(cfg, wanted.filter(installed)) ?? failoverAccount(cfg, null, wanted, installed, crossOk);
   const agent = meta.agent || "lead";
   if (!first) { // no usable account right now → put it back, don't fail it
     await locked(async () => {
@@ -310,7 +311,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const failure = res.status === "failed" ? classify(out) : null;
     if (!failure) break;
     await reportFailure(acct, failure, out, cfg); // puts this account on cooldown / needs-login
-    const next: typeof first | null = hop < 4 ? failoverAccount(cfg, acct, wanted, installed) : null;
+    const next: typeof first | null = hop < 4 ? failoverAccount(cfg, acct, wanted, installed, crossOk) : null;
     if (next) {
       const was = `${acct.cli}/${acct.name}`;
       await locked(async () => {

@@ -277,6 +277,14 @@ export function fleetClis(caps: string[][]): string[] {
   return ["claude", "codex"].filter((c) => caps.some((cs) => cs.includes(`cli:${c}`)));
 }
 
+/** May quota/login failover switch this task to `cli`? Not when the owner's per-member config (`clis.agents`) leaves
+ *  that CLI out: a member set to ["claude"] waits for Claude instead of silently running on Codex. Without a member
+ *  config any CLI may take over, as before. */
+export function failoverAllowed(meta: Record<string, string>, cfg: Cfg): (cli: string) => boolean {
+  const per = cfg.clis?.agents?.[meta.agent || "lead"];
+  return (cli) => !Array.isArray(per) || !per.length || per.includes(cli);
+}
+
 export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null {
   return allowedClis(meta, cfg).find(which) ?? null;
 }

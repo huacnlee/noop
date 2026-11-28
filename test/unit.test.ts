@@ -244,6 +244,7 @@ test("quota/auth failover: same CLI's other account, then the other CLI, else no
   expect(failoverAccount(two, a, ["claude"], all)?.name).toBe("zz-test-b");
   const solo = { accounts: [{ cli: "claude", name: "zz-test-a" }, { cli: "codex", name: "zz-test-c" }] } as any;
   expect(failoverAccount(solo, a, ["claude"], all)?.cli).toBe("codex"); // claude-only (owner/hard) work still falls back
+  expect(failoverAccount(solo, a, ["claude"], all, (c) => c !== "codex")).toBeNull(); // member config excludes codex → wait
   expect(failoverAccount(solo, a, ["claude"], (c) => c === "claude")).toBeNull(); // codex not installed → requeue
   expect(failoverAccount(solo, { cli: "codex", name: "zz-test-c", dir: "" }, ["codex", "claude"], all)?.cli).toBe("claude");
 });

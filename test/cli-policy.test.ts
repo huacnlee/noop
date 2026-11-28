@@ -2,7 +2,7 @@
 // It did not: the planner wrote its choice into the task's `cli` field, allowedClis() read that first, so a member
 // pinned to codex-only kept running Claude for every task the planner called "hard".
 import { expect, test } from "bun:test";
-import { allowedClis, chooseCli, cliHintPatch, fleetClis } from "../src/core";
+import { allowedClis, chooseCli, failoverAllowed, cliHintPatch, fleetClis } from "../src/core";
 
 const BOTH = ["claude", "codex"];
 const cfg = (agents?: Record<string, unknown>) => ({ clis: agents ? { agents } : {} }) as any;
@@ -85,4 +85,13 @@ test("fleetClis reads the agent CLIs from the online hosts' caps", () => {
   expect(fleetClis([["cli:claude"], ["os:linux", "cli:codex"]])).toEqual(["claude", "codex"]);
   expect(fleetClis([["cli:gh", "cli:bun"]])).toEqual([]);
   expect(fleetClis([])).toEqual([]);
+});
+
+// Failover must respect the member config: an owner who sets a member to ["claude"] wants it to wait for Claude,
+// not to run on Codex when Claude is out of quota. Without a member config nothing changes for other users.
+test("failover stays inside the member's configured CLIs", () => {
+  expect(failoverAllowed({ agent: "lead" }, cfg({ lead: ["claude"] }))("codex")).toBe(false);
+  expect(failoverAllowed({ agent: "lead" }, cfg({ lead: ["claude", "codex"] }))("codex")).toBe(true);
+  expect(failoverAllowed({ agent: "lead" }, cfg())("codex")).toBe(true);
+  expect(failoverAllowed({ agent: "reviewer" }, cfg({ lead: ["claude"] }))("codex")).toBe(true);
 });
