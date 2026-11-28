@@ -131,9 +131,17 @@ const REJECTED = () => join(HOME_DIR, "update-rejected"); // machine-local: a re
 const BLOCKED = () => join(HOME_DIR, "update-blocked"); // machine-local: the last reason an update could not be applied
 
 /** A release whose tests failed here is not tried again until origin moves on — otherwise every check
- *  re-installs the same bad code and wakes the medic again. An explicit `hub update` still retries. */
-export function updateRejected(up: string, file = REJECTED()): boolean {
-  try { return readFileSync(file, "utf8").trim() === up; } catch { return false; }
+ *  re-installs the same bad code and wakes the medic again. An explicit `hub update` still retries.
+ *  Timeouts are the exception: they measure the host's load, not the code (2026-11-27: a release was refused
+ *  on two timeouts under load 176, and this host then sat 8 commits behind for 29 hours because nothing
+ *  retries while origin stands still). Those are retried after TIMEOUT_RETRY_MS. */
+export const TIMEOUT_RETRY_MS = 6 * 60 * 60_000;
+export function updateRejected(up: string, file = REJECTED(), now = Date.now()): boolean {
+  try {
+    const [sha, at, kind] = readFileSync(file, "utf8").trim().split(/\s+/);
+    if (sha !== up) return false;
+    return kind === "timeout" ? now - Number(at) < TIMEOUT_RETRY_MS : true;
+  } catch { return false; }
 }
 
 /** Report a blocked update once per distinct state: an uncommitted file (the medic is told to keep its fix applied
@@ -210,7 +218,12 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
   if (deps.exitCode !== 0 || test.exitCode !== 0) {
     await g("reset", "--hard", "-q", head); // roll back a bad release
     await $`bun install --frozen-lockfile`.cwd(CODE).quiet().nothrow();
-    try { mkdirSync(HOME_DIR, { recursive: true }); writeFileSync(REJECTED(), up); } catch {}
+    // Record why it was refused: a timeout depends on the host's load, a failed assertion on the code.
+    const output = `${test.stdout.toString()}\n${test.stderr.toString()}`;
+    const failed = (output.match(/^\(fail\)/gm) ?? []).length;
+    const timedOut = (output.match(/timed out after \d+ms/g) ?? []).length;
+    const kind = failed > 0 && timedOut >= failed ? "timeout" : "failure";
+    try { mkdirSync(HOME_DIR, { recursive: true }); writeFileSync(REJECTED(), `${up} ${Date.now()} ${kind}`); } catch {}
     console.error(`self-update to ${up.slice(0, 7)} failed tests → rolled back to ${head.slice(0, 7)}`);
     const { medic } = await import("./medic");
     const { loadConfig } = await import("./core");

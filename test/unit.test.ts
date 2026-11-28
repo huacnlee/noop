@@ -296,6 +296,22 @@ test("a release whose tests failed here is not installed again until origin move
   expect(updateRejected("d23c0de", f)).toBe(false); // a newer release is tried again
 });
 
+test("a release refused only on timeouts is retried after a cooldown", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { updateRejected, TIMEOUT_RETRY_MS } = await import("../src/setup");
+  const f = join(mkdtempSync(join(tmpdir(), "noop-up-")), "update-rejected");
+  const now = 1_800_000_000_000;
+  writeFileSync(f, `1c6ae5a ${now} timeout\n`);
+  expect(updateRejected("1c6ae5a", f, now + TIMEOUT_RETRY_MS - 1)).toBe(true); // still cooling down
+  expect(updateRejected("1c6ae5a", f, now + TIMEOUT_RETRY_MS)).toBe(false); // load may have dropped: run the tests again
+  writeFileSync(f, `1c6ae5a ${now} failure\n`);
+  expect(updateRejected("1c6ae5a", f, now + TIMEOUT_RETRY_MS * 100)).toBe(true); // a real failure waits for the next release
+  writeFileSync(f, `1c6ae5a ${now} timeout\n`);
+  expect(updateRejected("d23c0de", f, now)).toBe(false); // a newer release is always tried
+});
+
 test("taskView shows the original ask, not daemon requeue notes", async () => {
   const { mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
