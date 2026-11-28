@@ -8,7 +8,7 @@
  */
 import type { JSX, ViewStyle } from "nsh";
 import { signal, Text, View } from "nsh";
-import { Input as BaseInput, NumberInput as BaseNumberInput, Switch as BaseSwitch } from "nsh/base";
+import { Input as BaseInput, NumberInput as BaseNumberInput, OtpInput, type OtpInputRef, Switch as BaseSwitch } from "nsh/base";
 import { Icon, type IconName } from "./icons";
 import { alpha, colors, focusRing, motion, tints } from "./theme";
 import { controlMetrics, corner, duration, edge, fill, font, leading, press as give, size, space, touch } from "./tokens";
@@ -597,6 +597,49 @@ export function NumberField(props: {
       incrementButtonStyle={stepStyle(false)}
       decrementButton={<View testID={props.testID && `${props.testID}-dec`}><Icon name="minus" size={14} tint={colors.muted} /></View>}
       incrementButton={<View testID={props.testID && `${props.testID}-inc`}><Icon name="plus" size={14} tint={colors.muted} /></View>}
+    />
+  );
+}
+
+/**
+ * A one-time code (`nsh/base`'s `OtpInput`): a cell per character in the field's fill and hairline, the cell taking
+ * the next one edged in the focus ring while the code has the keys. One native field over the cells brings paste, the
+ * keyboard for the code (the number pad for digits, the full one with capitals for `alphanumeric`) and the system's
+ * code autofill; `onChange` gets the code typed so far, letters upper-cased.
+ */
+export function CodeField(props: {
+  length: number;
+  value: string;
+  onChange: (value: string) => void;
+  accessibilityLabel: string;
+  validationType?: "numeric" | "alphanumeric";
+  groups?: number;
+  autoFocus?: boolean;
+  disabled?: boolean;
+  testID?: string;
+}) {
+  let input: OtpInputRef | undefined;
+  if (props.autoFocus) setTimeout(() => input?.focus(), 0); // after mount, as `Input`'s autoFocus
+  return (
+    <OtpInput
+      ref={(r) => (input = r)}
+      testID={props.testID}
+      length={props.length}
+      validationType={props.validationType}
+      groups={props.groups ?? 1}
+      value={props.value}
+      disabled={props.disabled}
+      accessibilityLabel={props.accessibilityLabel}
+      onChange={({ value }) => props.onChange(value)}
+      class="w-full flex-row gap-3"
+      groupClass="flex-1 flex-row gap-2"
+      cellClass="flex-1 items-center justify-center border border-input focus:border-ring disabled:opacity-45"
+      cellStyle={{
+        height: 56, borderRadius: corner.field, borderCurve: "continuous", backgroundColor: colors.field,
+        color: colors.text, fontSize: 24, fontWeight: "600", fontVariant: ["tabular-nums"],
+        transitionProperty: "border-color", transitionDuration: duration.quick,
+      }}
+      caretClass="w-0.5 h-6 rounded-full bg-foreground"
     />
   );
 }

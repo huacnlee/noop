@@ -121,6 +121,7 @@ import {
   SettingsItem,
   SettingsChoices,
   NumberField,
+  CodeField,
   PageHeader,
   pageContent,
   font,
@@ -6569,27 +6570,30 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
                 </>
               }
             >
-              <Field
-                label={L("Code", "验证码")}
-                value={code()}
-                onChange={onCode}
-                onSubmit={verify}
-                placeholder="········"
-                autoComplete="one-time-code"
-                autoFocus
-                big
-                testID="code"
-              />
-              <Field
-                label={L("Authenticator code", "两步验证码（验证器 App）")}
-                value={totp()}
-                onChange={onTotp}
-                onSubmit={verify}
-                placeholder="······"
-                keyboardType="number-pad"
-                big
-                testID="totp"
-              />
+              <View style={{ gap: 6 }}>
+                <FieldLabel label={L("Code", "验证码")} />
+                <CodeField
+                  length={CODE_LEN}
+                  validationType="alphanumeric"
+                  groups={2}
+                  value={code()}
+                  onChange={onCode}
+                  autoFocus
+                  accessibilityLabel={L(`Email code, ${CODE_LEN} letters and digits`, `邮箱验证码，${CODE_LEN} 位字母和数字`)}
+                  testID="code"
+                />
+              </View>
+              <View style={{ gap: 6 }}>
+                <FieldLabel label={L("Authenticator code", "两步验证码（验证器 App）")} />
+                <CodeField
+                  length={6}
+                  groups={2}
+                  value={totp()}
+                  onChange={onTotp}
+                  accessibilityLabel={L("Authenticator code, 6 digits", "两步验证码，6 位数字")}
+                  testID="totp"
+                />
+              </View>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                 <View role="button" accessibilityLabel={L("Use another email", "换个邮箱")} onPress={() => { step.set("email"); error.set(""); }} hoverStyle={hovered()} style={{ height: 30, justifyContent: "center", paddingHorizontal: 8, borderRadius: 6 }}>
                   <Text style={{ fontSize: 14, color: colors.muted }}>{L("‹ Use another email", "‹ 换个邮箱")}</Text>
